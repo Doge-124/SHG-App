@@ -50,13 +50,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp TEXT NOT NULL
 );
 
-CREATE VIEW IF NOT EXISTS member_balances AS
-SELECT
-    m.id AS member_id,
-    m.name,
-    SUM(l.principal) - IFNULL(SUM(p.amount), 0) AS balance
-FROM members m
-LEFT JOIN loans l ON l.member_id = m.id
-LEFT JOIN payments p ON p.loan_id = l.id
-GROUP BY m.id;
+CREATE TABLE IF NOT EXISTS member_balances (
+    member_id INTEGER PRIMARY KEY,
+    balance REAL NOT NULL DEFAULT 0,
+    FOREIGN KEY (member_id) REFERENCES members(id)
+);
+
 "#;

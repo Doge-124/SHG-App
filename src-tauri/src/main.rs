@@ -20,7 +20,8 @@ fn main() {
             commands::auth::add_member,
             commands::auth::get_member,
             commands::auth::list_members,
-            commands::auth::member_balance
+            commands::auth::member_balance,
+            commands::auth::dump_members
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -13,13 +13,13 @@ mod security;
 pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<rusqlite::Connection, ()> {
     let app_dir = app.path().app_data_dir().unwrap();
     let data_dir = app_dir.join("data");
-    fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("shg.db");
     let sec_path = data_dir.join("security.json");
 
+    println!("DB PATH = {:?}", db_path);
 
-    // FIRST RUN
     if !db_path.exists() {
         let salt = key::generate_salt();
         let derived_key = key::derive_key(pin, &salt);
@@ -38,17 +38,17 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<rusqlite::C
         return Ok(conn);
     }
 
-    // SUBSEQUENT RUN
-    let sec = store::load(&sec_path)
-        .expect("Security file missing");
-
+    let sec = store::load(&sec_path).expect("Security file missing");
     let salt = hex::decode(sec.salt).expect("Invalid salt");
     let derived_key = key::derive_key(pin, &salt);
     let db_key = hex::encode(&derived_key);
 
-    Ok(connection::open_db(&db_path, &db_key)
-        .expect("Failed to open encrypted DB"))
+    let conn = connection::open_db(&db_path, &db_key)
+        .expect("Failed to open encrypted DB");
+
+    Ok(conn)
 }
+
 
 #[derive(Serialize)]
 pub struct Member {
@@ -69,17 +69,32 @@ pub fn add_member(
     address: Option<&str>,
     joined_at: &str,
 ) -> Result<(), rusqlite::Error> {
+
     conn.execute(
         "INSERT INTO members (member_code, name, phone, address, joined_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         (code, name, phone, address, joined_at),
     )?;
+
+    let member_id: i64 = conn.query_row(
+        "SELECT id FROM members WHERE member_code = ?1",
+        [code],
+        |r| r.get(0),
+    )?;
+
+    conn.execute(
+        "INSERT INTO member_balances (member_id, balance) VALUES (?1, 0)",
+        [member_id],
+    )?;
+
     Ok(())
 }
+
 
 pub fn get_member_by_code(
     conn: &rusqlite::Connection,
     code: &str,
 ) -> Result<Member, rusqlite::Error> {
+    println!("Searching for member_code = {}", code);
     conn.query_row(
         "SELECT id, member_code, name, phone, address, joined_at, is_active FROM members WHERE member_code = ?1",
         [code],
@@ -128,6 +143,9 @@ pub fn get_member_balance(
     conn.query_row(
         "SELECT balance FROM member_balances WHERE member_id = ?1",
         [member_id],
-        |row| row.get(0),
+        |row| {
+        let v: Option<f64> = row.get(0)?;
+        Ok(v.unwrap_or(0.0))
+    },
     )
 }
