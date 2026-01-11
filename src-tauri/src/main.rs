@@ -15,7 +15,8 @@ fn main() {
         })
         .manage(std::sync::Mutex::new(AppState { db: None }))
         .invoke_handler(tauri::generate_handler![
-            commands::auth::unlock_db
+            commands::auth::unlock_db,
+            commands::auth::has_security
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

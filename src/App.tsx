@@ -1,12 +1,27 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { invoke } from "@tauri-apps/api/core";
 import './App.css'
 import PinScreen from './components/PinScreen';
+import SetPinScreen from "./components/SetPinScreen";
 
 export default function App() {
-  const [unlocked, setUnlocked] = useState(false);
+  const [mode, setMode] = useState<"checking" | "set" | "unlock" | "app">("checking");
 
-  if (!unlocked) {
-    return <PinScreen onUnlocked={() => setUnlocked(true)} />;
+  useEffect(() => {
+    (async () => {
+      const exists = await invoke<boolean>("has_security");
+      setMode(exists ? "unlock" : "set");
+    })();
+  }, []);
+
+  if (mode === "checking") return null;
+
+  if (mode === "set") {
+    return <SetPinScreen onDone={() => setMode("app")} />;
+  }
+
+  if (mode === "unlock") {
+    return <PinScreen onUnlocked={() => setMode("app")} />;
   }
 
   return (

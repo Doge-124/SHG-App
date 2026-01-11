@@ -22,7 +22,7 @@ export default function PinScreen({ onUnlocked }: Props) {
 
   return (
     <div>
-      <h2>Enter Admin PIN</h2>
+      <h2>Enter PIN</h2>
       <input
         type="password"
         value={pin}
