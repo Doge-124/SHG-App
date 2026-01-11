@@ -1,29 +1,62 @@
 pub const SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL,
-    pin_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS members (
-    member_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     phone TEXT,
     address TEXT,
-    join_date TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    joined_at TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS audit_logs (
-    log_id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS loans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_id INTEGER NOT NULL,
+    principal REAL NOT NULL,
+    interest_rate REAL NOT NULL,
+    issued_at TEXT NOT NULL,
+    due_date TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    FOREIGN KEY (member_id) REFERENCES members(id)
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    loan_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    paid_at TEXT NOT NULL,
+    receipt_no TEXT NOT NULL UNIQUE,
+    FOREIGN KEY (loan_id) REFERENCES loans(id)
+);
+
+CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_no TEXT NOT NULL UNIQUE,
+    member_id INTEGER NOT NULL,
+    loan_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    generated_at TEXT NOT NULL,
+    FOREIGN KEY (member_id) REFERENCES members(id),
+    FOREIGN KEY (loan_id) REFERENCES loans(id)
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
-    reference_id TEXT,
+    entity TEXT NOT NULL,
+    entity_id INTEGER,
     timestamp TEXT NOT NULL
 );
+
+CREATE VIEW IF NOT EXISTS member_balances AS
+SELECT
+    m.id AS member_id,
+    m.name,
+    SUM(l.principal) - IFNULL(SUM(p.amount), 0) AS balance
+FROM members m
+LEFT JOIN loans l ON l.member_id = m.id
+LEFT JOIN payments p ON p.loan_id = l.id
+GROUP BY m.id;
 "#;

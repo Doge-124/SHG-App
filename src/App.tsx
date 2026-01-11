@@ -25,9 +25,10 @@ export default function App() {
   }
 
   return (
-    <div>
-      <h1>SHG Manager</h1>
-      <p>Unlocked</p>
-    </div>
-  );
+  <div>
+    <h1>SHG Manager</h1>
+    <p>Database unlocked successfully!</p>
+  </div>
+);
+
 }
