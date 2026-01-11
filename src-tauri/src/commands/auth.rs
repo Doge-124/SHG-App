@@ -2,9 +2,8 @@ use tauri::State;
 use std::sync::Mutex;
 
 use crate::db;
-use crate::AppState;
+use crate::state::AppState;
 use tauri::Manager;
-
 
 #[tauri::command]
 pub fn unlock_db(pin: String, state: State<Mutex<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
@@ -29,5 +28,44 @@ pub fn has_security(app: tauri::AppHandle) -> bool {
     let data_dir = app_dir.join("data");
     let sec_path = data_dir.join("security.json");
     sec_path.exists()
+}
+
+#[tauri::command]
+pub fn add_member(
+    state: tauri::State<Mutex<AppState>>,
+    code: String,
+    name: String,
+    phone: Option<String>,
+    address: Option<String>,
+    joined_at: String,
+) -> Result<(), String> {
+    let guard = state.lock().unwrap();
+    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
+    db::add_member(conn, &code, &name, phone.as_deref(), address.as_deref(), &joined_at)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_member(code: String, state: tauri::State<Mutex<AppState>>) -> Result<db::Member, String> {
+    let guard = state.lock().unwrap();
+    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
+    db::get_member_by_code(conn, &code).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_members(state: tauri::State<Mutex<AppState>>) -> Result<Vec<db::Member>, String> {
+    let guard = state.lock().unwrap();
+    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
+    db::list_members(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn member_balance(
+    state: tauri::State<Mutex<AppState>>,
+    member_id: i64,
+) -> Result<f64, String> {
+    let guard = state.lock().unwrap();
+    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
+    db::get_member_balance(conn, member_id).map_err(|e| e.to_string())
 }
 
