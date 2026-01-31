@@ -39,24 +39,21 @@ pub fn add_member(
     address: Option<String>,
     joined_at: String,
 ) -> Result<(), String> {
-    let guard = state.lock().unwrap();
-    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
-    db::add_member(conn, &code, &name, phone.as_deref(), address.as_deref(), &joined_at)
+    let mut guard = state.lock().unwrap();
+    let conn = guard.db.as_mut().ok_or("DB not unlocked")?;    db::add_member(conn, &code, &name, phone.as_deref(), address.as_deref(), &joined_at)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_member(code: String, state: tauri::State<Mutex<AppState>>) -> Result<db::Member, String> {
-    let guard = state.lock().unwrap();
-    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
-    db::get_member_by_code(conn, &code).map_err(|e| e.to_string())
+    let mut guard = state.lock().unwrap();
+    let conn = guard.db.as_mut().ok_or("DB not unlocked")?;    db::get_member_by_code(conn, &code).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn list_members(state: tauri::State<Mutex<AppState>>) -> Result<Vec<db::Member>, String> {
-    let guard = state.lock().unwrap();
-    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
-    db::list_members(conn).map_err(|e| e.to_string())
+    let mut guard = state.lock().unwrap();
+    let conn = guard.db.as_mut().ok_or("DB not unlocked")?;    db::list_members(conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -64,16 +61,14 @@ pub fn member_balance(
     state: tauri::State<Mutex<AppState>>,
     member_id: i64,
 ) -> Result<f64, String> {
-    let guard = state.lock().unwrap();
-    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
-    db::get_member_balance(conn, member_id).map_err(|e| e.to_string())
+    let mut guard = state.lock().unwrap();
+    let conn = guard.db.as_mut().ok_or("DB not unlocked")?;    db::get_member_balance(conn, member_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn dump_members(state: tauri::State<std::sync::Mutex<AppState>>) -> Result<String, String> {
-    let guard = state.lock().unwrap();
-    let conn = guard.db.as_ref().ok_or("DB not unlocked")?;
-
+    let mut guard = state.lock().unwrap();
+    let conn = guard.db.as_mut().ok_or("DB not unlocked")?;
     let mut stmt = conn
         .prepare("SELECT id, member_code, name FROM members")
         .map_err(|e| e.to_string())?;

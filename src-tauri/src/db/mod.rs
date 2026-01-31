@@ -149,3 +149,158 @@ pub fn get_member_balance(
     },
     )
 }
+
+pub fn record_receipt(
+    tx: &mut rusqlite::Transaction,
+    amount: f64,
+    reason: &str,
+    payment_method: &str,
+    reference_type: Option<&str>,
+    reference_id: Option<i64>,
+    created_at: &str,
+) -> Result<(), rusqlite::Error> {
+
+    tx.execute(
+        "INSERT INTO shg_transactions
+         (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
+         VALUES ('RECEIPT', ?1, ?2, ?3, ?4, ?5, ?6)",
+        (amount, reason, payment_method, reference_type, reference_id, created_at),
+    )?;
+
+    tx.execute(
+        "UPDATE shg_balances SET balance = balance + ?1 WHERE method = ?2",
+        (amount, payment_method),
+    )?;
+
+    Ok(())
+}
+
+
+
+pub fn record_voucher(
+    tx: &mut rusqlite::Transaction,
+    amount: f64,
+    reason: &str,
+    payment_method: &str,
+    reference_type: Option<&str>,
+    reference_id: Option<i64>,
+    created_at: &str,
+) -> Result<(), rusqlite::Error> {
+
+    tx.execute(
+        "INSERT INTO shg_transactions
+         (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
+         VALUES ('VOUCHER', ?1, ?2, ?3, ?4, ?5, ?6)",
+        (amount, reason, payment_method, reference_type, reference_id, created_at),
+    )?;
+
+    tx.execute(
+        "UPDATE shg_balances SET balance = balance - ?1 WHERE method = ?2",
+        (amount, payment_method),
+    )?;
+
+    Ok(())
+}
+
+
+pub fn issue_member_loan(
+    conn: &mut rusqlite::Connection,
+    member_id: i64,
+    amount: f64,
+    payment_method: &str,
+    note: &str,
+    created_at: &str,
+) -> Result<(), rusqlite::Error> {
+
+    let mut tx = conn.transaction()?;
+
+    // 1. Member transaction
+    tx.execute(
+        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
+         VALUES (?1, ?2, 'LOAN', ?3)",
+        (member_id, amount, created_at),
+    )?;
+
+    // 2. Update member balance
+    tx.execute(
+        "UPDATE member_balances SET balance = balance + ?1 WHERE member_id = ?2",
+        (amount, member_id),
+    )?;
+
+    // 3. SHG voucher (money goes out)
+    record_voucher(
+        &mut tx,
+        amount,
+        note,
+        payment_method,
+        Some("MEMBER_LOAN"),
+        Some(member_id),
+        created_at,
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+
+pub fn record_member_payment(
+    conn: &mut rusqlite::Connection,
+    member_id: i64,
+    amount: f64,
+    payment_method: &str,
+    note: &str,
+    created_at: &str,
+) -> Result<(), rusqlite::Error> {
+
+    let mut tx = conn.transaction()?;
+
+    // 1. Member transaction
+    tx.execute(
+        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
+         VALUES (?1, ?2, 'PAYMENT', ?3)",
+        (member_id, -amount, created_at),
+    )?;
+
+    // 2. Update member balance
+    tx.execute(
+        "UPDATE member_balances SET balance = balance - ?1 WHERE member_id = ?2",
+        (amount, member_id),
+    )?;
+
+    // 3. SHG receipt (money comes in)
+    record_receipt(
+        &mut tx,
+        amount,
+        note,
+        payment_method,
+        Some("MEMBER_PAYMENT"),
+        Some(member_id),
+        created_at,
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+
+pub fn create_chit_group(
+    conn: &mut rusqlite::Connection,
+    name: &str,
+    total_amount: f64,
+    months: i64,
+    commission_percent: f64,
+    start_date: &str,
+) -> Result<(), rusqlite::Error> {
+    let monthly = total_amount / months as f64;
+
+    conn.execute(
+        "INSERT INTO chit_groups 
+         (name, total_amount, months, monthly_contribution, commission_percent, start_date, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ACTIVE')",
+        (name, total_amount, months, monthly, commission_percent, start_date),
+    )?;
+
+    Ok(())
+}
+
+

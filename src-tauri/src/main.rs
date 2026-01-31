@@ -13,7 +13,7 @@ fn main() {
         .setup(|app| {
             Ok(())
         })
-        .manage(std::sync::Mutex::new(AppState { db: None }))
+        .manage(std::sync::Mutex::new(AppState { db: Option::<rusqlite::Connection>::None }))
         .invoke_handler(tauri::generate_handler![
             commands::auth::unlock_db,
             commands::auth::has_security,
