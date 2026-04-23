@@ -5,6 +5,7 @@ import PinScreen from './components/PinScreen';
 import SetPinScreen from "./components/SetPinScreen";
 import AddMember from "./components/AddMember";
 import SearchMember from "./components/SearchMember";
+import { ToastProvider } from './components/Toast'
 
 export default function App() {
   const [mode, setMode] = useState<"checking" | "set" | "unlock" | "app">("checking");
@@ -27,6 +28,7 @@ export default function App() {
   }
 
   return (
+  <ToastProvider>
   <div>
     <h1>SHG Manager</h1>
     <p>Database unlocked successfully!</p>
@@ -37,13 +39,8 @@ export default function App() {
    <div key="search">
     <SearchMember />
    </div>
-    <button onClick={async () => {
-  const r = await invoke("dump_members");
-  alert(r || "EMPTY");
-}}>
-  Dump Members
-</button>
   </div>
+  </ToastProvider>
 );
 
 }

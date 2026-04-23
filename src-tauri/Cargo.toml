@@ -24,6 +24,9 @@ log = "0.4"
 tauri = { version = "2.9.5", features = [] }
 tauri-plugin-log = "2"
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
-ring = "0.17"
 rand = "0.8"
 hex = "0.4"
+argon2 = "0.5"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"

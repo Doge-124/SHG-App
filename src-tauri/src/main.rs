@@ -2,26 +2,97 @@
 
 mod commands;
 mod db;
+mod error;
 mod security;
 mod state;
+mod types;
 
 use state::AppState;
-use std::sync::Mutex;
 
 fn main() {
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(|_app| {
             Ok(())
         })
-        .manage(std::sync::Mutex::new(AppState { db: Option::<rusqlite::Connection>::None }))
+        .manage(std::sync::Mutex::new(AppState {
+            db: Option::<rusqlite::Connection>::None,
+            db_key: None,
+        }))
         .invoke_handler(tauri::generate_handler![
             commands::auth::unlock_db,
+            commands::auth::setup_db,
+            commands::auth::reset_pin,
             commands::auth::has_security,
-            commands::auth::add_member,
-            commands::auth::get_member,
-            commands::auth::list_members,
-            commands::auth::member_balance,
-            commands::auth::dump_members
+            commands::auth::verify_master_password,
+            commands::members::add_member,
+            commands::members::get_member,
+            commands::members::update_member,
+            commands::members::list_members,
+            commands::members::member_balance,
+            commands::members::set_member_opening_data,
+            commands::members::get_member_profile,
+            commands::members::list_members_by_type_cmd,
+            commands::members::update_member_type,
+            commands::members::get_total_members,
+            commands::members::get_total_loans_outstanding,
+            commands::members::get_active_chit_groups,
+            commands::contributions::record_weekly_contribution_cmd,
+            commands::loans::record_past_loan,
+            commands::loans::get_all_loans,
+            commands::loans::get_member_loans,
+            commands::loans::get_loan,
+            commands::loans::get_loan_repayments,
+            commands::loans::issue_member_loan,
+            commands::loans::record_member_payment,
+            commands::chits::get_chit_group,
+            commands::chits::get_chit_groups,
+            commands::chits::get_chit_members,
+            commands::chits::get_chit_cycles,
+            commands::chits::get_chit_payments,
+            commands::chits::create_chit_group,
+            commands::chits::add_member_to_chit,
+            commands::chits::create_chit_cycle,
+            commands::chits::record_chit_payment,
+            commands::chits::payout_chit_winner,
+            commands::chits::get_current_cycle_with_summary,
+            commands::chits::advance_to_next_cycle,
+            commands::chits::record_member_payment_with_discount,
+            commands::chits::process_winner_payout,
+            commands::chits::get_member_chit_groups,
+            commands::chits::record_past_chit_cycle,
+            commands::chits::get_member_payment_status,
+            commands::chits::get_chit_cycles_with_details,
+            commands::chits::get_chit_migration_status,
+            commands::ledger::record_receipt,
+            commands::ledger::record_voucher,
+            commands::ledger::get_shg_balances,
+            commands::ledger::get_receipts,
+            commands::ledger::get_vouchers,
+            commands::reports::daily_transactions,
+            commands::reports::weekly_transactions,
+            commands::reports::monthly_transactions,
+            commands::daybook::get_day_book,
+            commands::daybook::get_day_book_for_date,
+            commands::daybook::export_day_book_csv,
+            commands::settings::get_general_settings,
+            commands::settings::save_general_settings,
+            commands::settings::get_notification_settings,
+            commands::settings::save_notification_settings,
+            commands::settings::get_data_settings,
+            commands::settings::save_data_settings,
+            commands::settings::get_appearance_settings,
+            commands::settings::save_appearance_settings,
+            commands::settings::get_all_settings,
+            commands::settings::save_all_settings,
+            commands::settings::debug_settings_json,
+            commands::settings::force_migrate_settings,
+            commands::settings::change_database_password,
+            commands::settings::create_backup,
+            commands::settings::restore_backup,
+            commands::settings::get_backup_list,
+            commands::settings::export_all_data,
+            commands::settings::import_all_data,
+            commands::settings::clear_all_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

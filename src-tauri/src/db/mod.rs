@@ -1,306 +1,146 @@
 
-use tauri::Manager;
-use std::fs;
-use crate::security::{key, store};
+//! Database facade module.
+//!
+//! This module exposes high-level helpers (e.g. `init_db_with_pin`) and
+//! re-exports submodules that own specific areas of the financial model:
+//!
+//! - `members` – member CRUD and balances
+//! - `ledger` – SHG receipts, vouchers, and balances
+//! - `loans` – member loans and repayments
+//! - `chits` – chit group lifecycle and installments
+//! - `reports` – reporting queries over the ledger
+//! - `validation` – reusable input validation helpers
+//! - `settings` – application settings
+//! - `backup` – database backup functionality
+//! - `contributions` – member contributions
+//! - `daybook` – derived view of all financial transactions
+
+use crate::error::AppError;
 use hex;
-use serde::Serialize;
+use tauri::Manager;
 
+pub mod schema;
+pub mod connection;
+pub mod members;
+pub mod ledger;
+pub mod loans;
+pub mod chits;
+pub mod chits_past_entry;
+pub mod reports;
+pub mod validation;
+pub mod key;
+pub mod store;
+pub mod daybook;
+pub mod settings;
+pub mod backup;
+pub mod contributions;
 
-mod schema;
-mod connection;
-mod security;
+/// Open or create the encrypted SQLCipher database using a PIN-derived key.
+///
+/// This keeps all filesystem and key-derivation details in one place while the
+/// rest of the code works with an already-open `rusqlite::Connection`.
+/// Open or create the encrypted SQLCipher database.
+/// Returns `(Connection, hex_key)` so callers can store the key for later
+/// operations such as restore that need to reopen the DB.
+pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::Connection, String), AppError> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "app_data_dir not available",
+        )))?;
 
-pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<rusqlite::Connection, ()> {
-    let app_dir = app.path().app_data_dir().unwrap();
     let data_dir = app_dir.join("data");
-    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&data_dir)?;
 
     let db_path = data_dir.join("shg.db");
     let sec_path = data_dir.join("security.json");
 
-    println!("DB PATH = {:?}", db_path);
-
     if !db_path.exists() {
         let salt = key::generate_salt();
-        let derived_key = key::derive_key(pin, &salt);
+        let derived_key = key::derive_key(pin, &salt)?;
         let db_key = hex::encode(&derived_key);
 
-        let conn = connection::open_db(&db_path, &db_key)
-            .expect("Failed to create encrypted DB");
+        let conn = connection::open_db(&db_path, &db_key)?;
 
-        conn.execute_batch(schema::SCHEMA_SQL)
-            .expect("Failed to apply schema");
+        conn.execute_batch(schema::SCHEMA_SQL)?;
+        let mut conn = conn;
+        schema::apply_migrations(&mut conn)?;
 
-        store::save(&sec_path, &store::SecurityData {
-            salt: hex::encode(&salt),
-        });
+        // Initialize settings table for new database
+        settings::init_settings_table(&mut conn)?;
 
-        return Ok(conn);
+        store::save(
+            &sec_path,
+            &store::SecurityData {
+                salt: hex::encode(&salt),
+                admin_salt: None,
+                recovery_blob: None,
+            },
+        )?;
+
+        return Ok((conn, db_key));
     }
 
-    let sec = store::load(&sec_path).expect("Security file missing");
-    let salt = hex::decode(sec.salt).expect("Invalid salt");
-    let derived_key = key::derive_key(pin, &salt);
+    let sec = store::load(&sec_path)?
+        .ok_or_else(|| AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "security.json missing",
+        )))?;
+
+    let salt = hex::decode(sec.salt)
+        .map_err(|e| AppError::Crypto(format!("invalid salt encoding: {e}")))?;
+
+    let derived_key = key::derive_key(pin, &salt)?;
     let db_key = hex::encode(&derived_key);
 
-    let conn = connection::open_db(&db_path, &db_key)
-        .expect("Failed to open encrypted DB");
+    let mut conn = connection::open_db(&db_path, &db_key)?;
+    schema::apply_migrations(&mut conn)?;
 
-    Ok(conn)
+    // Initialize the loans table for existing databases
+    loans::init_loans_table(&mut conn)?;
+
+    // Initialize settings table
+    settings::init_settings_table(&mut conn)?;
+
+    Ok((conn, db_key))
 }
 
-
-#[derive(Serialize)]
-pub struct Member {
-    pub id: i64,
-    pub member_code: String,
-    pub name: String,
-    pub phone: Option<String>,
-    pub address: Option<String>,
-    pub joined_at: String,
-    pub is_active: bool,
-}
-
-pub fn add_member(
-    conn: &rusqlite::Connection,
-    code: &str,
-    name: &str,
-    phone: Option<&str>,
-    address: Option<&str>,
-    joined_at: &str,
-) -> Result<(), rusqlite::Error> {
-
-    conn.execute(
-        "INSERT INTO members (member_code, name, phone, address, joined_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        (code, name, phone, address, joined_at),
-    )?;
-
-    let member_id: i64 = conn.query_row(
-        "SELECT id FROM members WHERE member_code = ?1",
-        [code],
-        |r| r.get(0),
-    )?;
-
-    conn.execute(
-        "INSERT INTO member_balances (member_id, balance) VALUES (?1, 0)",
-        [member_id],
-    )?;
-
-    Ok(())
-}
-
-
-pub fn get_member_by_code(
-    conn: &rusqlite::Connection,
-    code: &str,
-) -> Result<Member, rusqlite::Error> {
-    println!("Searching for member_code = {}", code);
-    conn.query_row(
-        "SELECT id, member_code, name, phone, address, joined_at, is_active FROM members WHERE member_code = ?1",
-        [code],
-        |row| {
-            Ok(Member {
-                id: row.get(0)?,
-                member_code: row.get(1)?,
-                name: row.get(2)?,
-                phone: row.get(3)?,
-                address: row.get(4)?,
-                joined_at: row.get(5)?,
-                is_active: row.get::<_, i64>(6)? == 1,
-            })
-        },
-    )
-}
-
-pub fn list_members(conn: &rusqlite::Connection) -> Result<Vec<Member>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, member_code, name, phone, address, joined_at, is_active FROM members ORDER BY name"
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok(Member {
-            id: row.get(0)?,
-            member_code: row.get(1)?,
-            name: row.get(2)?,
-            phone: row.get(3)?,
-            address: row.get(4)?,
-            joined_at: row.get(5)?,
-            is_active: row.get::<_, i64>(6)? == 1,
-        })
-    })?;
-
-    let mut out = vec![];
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-pub fn get_member_balance(
-    conn: &rusqlite::Connection,
-    member_id: i64,
-) -> Result<f64, rusqlite::Error> {
-    conn.query_row(
-        "SELECT balance FROM member_balances WHERE member_id = ?1",
-        [member_id],
-        |row| {
-        let v: Option<f64> = row.get(0)?;
-        Ok(v.unwrap_or(0.0))
-    },
-    )
-}
-
-pub fn record_receipt(
-    tx: &mut rusqlite::Transaction,
-    amount: f64,
-    reason: &str,
-    payment_method: &str,
-    reference_type: Option<&str>,
-    reference_id: Option<i64>,
-    created_at: &str,
-) -> Result<(), rusqlite::Error> {
-
-    tx.execute(
-        "INSERT INTO shg_transactions
-         (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
-         VALUES ('RECEIPT', ?1, ?2, ?3, ?4, ?5, ?6)",
-        (amount, reason, payment_method, reference_type, reference_id, created_at),
-    )?;
-
-    tx.execute(
-        "UPDATE shg_balances SET balance = balance + ?1 WHERE method = ?2",
-        (amount, payment_method),
-    )?;
-
-    Ok(())
-}
-
-
-
-pub fn record_voucher(
-    tx: &mut rusqlite::Transaction,
-    amount: f64,
-    reason: &str,
-    payment_method: &str,
-    reference_type: Option<&str>,
-    reference_id: Option<i64>,
-    created_at: &str,
-) -> Result<(), rusqlite::Error> {
-
-    tx.execute(
-        "INSERT INTO shg_transactions
-         (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
-         VALUES ('VOUCHER', ?1, ?2, ?3, ?4, ?5, ?6)",
-        (amount, reason, payment_method, reference_type, reference_id, created_at),
-    )?;
-
-    tx.execute(
-        "UPDATE shg_balances SET balance = balance - ?1 WHERE method = ?2",
-        (amount, payment_method),
-    )?;
-
-    Ok(())
-}
-
-
-pub fn issue_member_loan(
-    conn: &mut rusqlite::Connection,
-    member_id: i64,
-    amount: f64,
-    payment_method: &str,
-    note: &str,
-    created_at: &str,
-) -> Result<(), rusqlite::Error> {
-
-    let mut tx = conn.transaction()?;
-
-    // 1. Member transaction
-    tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-         VALUES (?1, ?2, 'LOAN', ?3)",
-        (member_id, amount, created_at),
-    )?;
-
-    // 2. Update member balance
-    tx.execute(
-        "UPDATE member_balances SET balance = balance + ?1 WHERE member_id = ?2",
-        (amount, member_id),
-    )?;
-
-    // 3. SHG voucher (money goes out)
-    record_voucher(
-        &mut tx,
-        amount,
-        note,
-        payment_method,
-        Some("MEMBER_LOAN"),
-        Some(member_id),
-        created_at,
-    )?;
-
-    tx.commit()?;
-    Ok(())
-}
-
-
-pub fn record_member_payment(
-    conn: &mut rusqlite::Connection,
-    member_id: i64,
-    amount: f64,
-    payment_method: &str,
-    note: &str,
-    created_at: &str,
-) -> Result<(), rusqlite::Error> {
-
-    let mut tx = conn.transaction()?;
-
-    // 1. Member transaction
-    tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-         VALUES (?1, ?2, 'PAYMENT', ?3)",
-        (member_id, -amount, created_at),
-    )?;
-
-    // 2. Update member balance
-    tx.execute(
-        "UPDATE member_balances SET balance = balance - ?1 WHERE member_id = ?2",
-        (amount, member_id),
-    )?;
-
-    // 3. SHG receipt (money comes in)
-    record_receipt(
-        &mut tx,
-        amount,
-        note,
-        payment_method,
-        Some("MEMBER_PAYMENT"),
-        Some(member_id),
-        created_at,
-    )?;
-
-    tx.commit()?;
-    Ok(())
-}
-
-
-pub fn create_chit_group(
-    conn: &mut rusqlite::Connection,
-    name: &str,
-    total_amount: f64,
-    months: i64,
-    commission_percent: f64,
-    start_date: &str,
-) -> Result<(), rusqlite::Error> {
-    let monthly = total_amount / months as f64;
-
-    conn.execute(
-        "INSERT INTO chit_groups 
-         (name, total_amount, months, monthly_contribution, commission_percent, start_date, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ACTIVE')",
-        (name, total_amount, months, monthly, commission_percent, start_date),
-    )?;
-
-    Ok(())
-}
-
-
+// Re-export commonly used types and functions from submodules so that
+// higher layers (commands) can stay relatively stable.
+#[allow(unused_imports)]
+pub use members::{
+    Member, MemberProfile, MemberTxn, add_member, get_member_by_code, update_member, list_members,
+    get_member_balance, get_member_outstanding, get_member_profile, set_member_opening_data,
+};
+#[allow(unused_imports)]
+pub use ledger::{
+    ShgTransaction, record_receipt, record_voucher, get_shg_balance, get_cash_balance,
+    get_bank_balance,
+};
+#[allow(unused_imports)]
+pub use loans::{
+    issue_member_loan, record_member_payment, get_member_transactions, MemberTransaction, Loan,
+    create_loan, get_member_loans, record_loan_payment, init_loans_table,
+};
+#[allow(unused_imports)]
+pub use chits::{
+    ChitGroup, ChitCycle, create_chit_group, add_member_to_chit, create_chit_cycle, get_chit_cycles,
+    record_chit_payment,
+    get_current_cycle, advance_to_next_cycle, record_member_payment_with_discount, process_winner_payout,
+    get_cycle_payment_summary, CyclePaymentSummary,
+};
+#[allow(unused_imports)]
+pub use chits_past_entry::{
+    MemberPaymentStatus, ChitCycleDetail, ChitMigrationStatus,
+    record_past_chit_cycle, get_member_payment_status, get_chit_cycles_with_details, get_chit_migration_status,
+};
+#[allow(unused_imports)]
+pub use contributions::{record_weekly_contribution, WeeklyContributionInput};
+#[allow(unused_imports)]
+pub use daybook::{
+    DayBookEntry, DayBookSummary, get_day_book_summary, compute_opening_balance,
+    get_day_book_entries, compute_totals, filter_by_category, filter_by_type,
+    filter_by_member, get_categories,
+};

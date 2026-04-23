@@ -7,10 +7,29 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+
+# Build output
 dist
 dist-ssr
 *.local
+frontend/out
+frontend/.next
+src-tauri/target
+
+# Tauri build
+*.db
+*.db-wal
+*.db-shm
+
+# Debug / scratch files
+debug-*.js
+test-*.js
+final-test-report.md
+
+# Claude AI session data
+.claude/
 
 # Editor directories and files
 .vscode/*
