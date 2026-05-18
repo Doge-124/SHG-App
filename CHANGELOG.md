@@ -6,9 +6,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Changes since v1.0.0 that haven't been released yet — move these into a new version section when releasing._
+### Fixed
+- **Release build on GitHub Actions** — switched rusqlite feature from `bundled-sqlcipher` to `bundled-sqlcipher-vendored-openssl` so OpenSSL is vendored into the build. Without this, CI failed with `Missing environment variable OPENSSL_DIR` because the stock Windows runner has no OpenSSL on PATH. (No customer-visible behavior change — same encryption, same DB format.)
 
-### Added
+_Note: v1.0.1, v1.0.2 and v1.0.3 tags exist but produced no published GitHub Release (build failed for the above reason). v1.0.4 is the first version actually distributable to customers._
+
+### Added (from v1.0.1/1.0.2/1.0.3 work)
 - **Sentry crash reporting** (opt-in via Settings → Support):
   - Captures Rust panics + frontend errors automatically
   - PII scrubbing (10+ digit number runs replaced with `[REDACTED_PHONE]`); no IP/username sent
