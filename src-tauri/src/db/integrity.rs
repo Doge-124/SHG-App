@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::error::AppError;
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct IntegrityCheck {
     pub name: String,
     pub passed: bool,
@@ -22,6 +23,7 @@ pub struct IntegrityCheck {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IntegrityReport {
     pub overall_ok: bool,
     pub error_count: usize,

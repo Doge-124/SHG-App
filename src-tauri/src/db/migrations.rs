@@ -167,6 +167,7 @@ fn create_pre_migration_backup(
 }
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationStatus {
     pub version: i64,
     pub name: String,

@@ -10,6 +10,7 @@ use crate::crash_reporting;
 use crate::db::{integrity, migrations};
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticReport {
     pub app_version: String,
     pub installation_id: String,
@@ -148,6 +149,7 @@ pub fn get_schema_info(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaInfo {
     pub version: i64,
     pub applied: Vec<migrations::MigrationStatus>,
@@ -171,6 +173,7 @@ pub fn set_crash_reporting_enabled(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CrashReportingStatus {
     pub configured: bool,        // SENTRY_DSN was baked in at build time
     pub enabled: bool,           // user has toggled it on

@@ -20,11 +20,17 @@ pub static CRASH_REPORTING_ENABLED: AtomicBool = AtomicBool::new(true);
 static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct InstallationInfo {
+    // Aliases preserve compatibility with installation.json files created
+    // before this struct was renamed to camelCase.
+    #[serde(alias = "installation_id")]
     pub installation_id: String,
+    #[serde(alias = "created_at")]
     pub created_at: String,
+    #[serde(alias = "first_version")]
     pub first_version: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "crash_reporting_enabled")]
     pub crash_reporting_enabled: bool,
 }
 
