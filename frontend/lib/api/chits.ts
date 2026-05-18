@@ -30,10 +30,9 @@ export async function getChitGroups(): Promise<ApiResponse<ChitGroup[]>> {
           invoke('get_chit_members', { chitId: group.id }) as Promise<any[]>,
           invoke('get_chit_cycles', { chitId: group.id }) as Promise<any[]>,
         ])
-        const totalMembers = group.months
+        const totalMembers = group.total_members
         const currentMembers = chitMembers.length
         const currentCycle = chitCyclesRaw.length > 0 ? Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)) : 0
-
 
         return {
           id: group.id.toString(),
@@ -44,6 +43,9 @@ export async function getChitGroups(): Promise<ApiResponse<ChitGroup[]>> {
           currentMembers,
           durationMonths: group.months,
           currentCycle,
+          winnersPerCycle: group.winners_per_cycle ?? 1,
+          commissionPerWinner: group.commission_per_winner ?? 0,
+          fixedPrizeAmount: group.fixed_prize_amount ?? group.total_amount,
           status: group.status.toLowerCase() as 'active' | 'completed' | 'cancelled',
           startDate: group.start_date,
           createdAt: group.start_date,
@@ -76,9 +78,9 @@ export async function getChitGroup(id: string): Promise<ApiResponse<ChitGroup>> 
       return { success: false, error: 'Chit group not found' }
     }
     
-    // Calculate member counts from chit_members data
-    const totalMembers = chitGroup.months // Total members should equal the duration in months
-    const currentMembers = chitMembers.length // Current members are those actually added
+    const totalMembers = chitGroup.total_members
+    const currentMembers = chitMembers.length
+
     
     
     const frontendChitGroup: ChitGroup = {
@@ -90,6 +92,9 @@ export async function getChitGroup(id: string): Promise<ApiResponse<ChitGroup>> 
       currentMembers,
       durationMonths: chitGroup.months,
       currentCycle: chitCyclesRaw.length > 0 ? Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)) : 0,
+      winnersPerCycle: chitGroup.winners_per_cycle ?? 1,
+      commissionPerWinner: chitGroup.commission_per_winner ?? 0,
+      fixedPrizeAmount: chitGroup.fixed_prize_amount ?? chitGroup.total_amount,
       status: chitGroup.status.toLowerCase() as 'active' | 'completed' | 'cancelled',
       startDate: chitGroup.start_date,
       createdAt: chitGroup.start_date,
@@ -202,10 +207,14 @@ export async function createChitGroup(data: ChitGroupFormData): Promise<ApiRespo
       name: data.name,
       totalAmount: data.totalAmount,
       months: data.durationMonths,
-      commissionPercent: 5, // Default commission
+      totalMembers: data.totalMembers,
+      commissionPercent: 0,
       startDate: data.startDate,
+      winnersPerCycle: data.winnersPerCycle,
+      commissionPerWinner: data.commissionPerWinner,
+      fixedPrizeAmount: data.totalAmount, // fixed prize = total prize amount
     })
-    
+
     const newChitGroup: ChitGroup = {
       id: Date.now().toString(),
       name: data.name,
@@ -214,6 +223,9 @@ export async function createChitGroup(data: ChitGroupFormData): Promise<ApiRespo
       totalMembers: data.totalMembers,
       currentMembers: 0,
       durationMonths: data.durationMonths,
+      winnersPerCycle: data.winnersPerCycle,
+      commissionPerWinner: data.commissionPerWinner,
+      fixedPrizeAmount: data.totalAmount,
       currentCycle: 0,
       status: 'active',
       startDate: data.startDate,
@@ -386,6 +398,9 @@ export async function getCurrentCycleWithSummary(chitGroupId: string): Promise<A
         amountPaid: p.amount_paid,
         paymentMethod: p.payment_method,
         paidAt: p.paid_at,
+        isEligibleForDiscount: p.is_eligible_for_discount ?? true,
+        payableAmount: p.payable_amount ?? 0,
+        hasWon: p.has_won ?? false,
       })),
     }
     
@@ -434,7 +449,6 @@ export async function recordMemberPaymentWithDiscount(
   message: string;
 }>> {
   try {
-    
     const result = await invoke('record_member_payment_with_discount', {
       input: {
         chit_id: parseInt(chitGroupId),
@@ -466,32 +480,38 @@ export async function processWinnerPayout(
   chitGroupId: string,
   cycleId: string,
   winningMemberId: string,
-  winnerAmount: number,
+  bidDiscount: number,
+  commission: number,
   paymentMethod: 'cash' | 'bank',
   note: string
 ): Promise<ApiResponse<{
   voucherGenerated: boolean;
+  receiptGenerated: boolean;
+  winnerAmount: number;
+  commission: number;
   bidDiscount: number;
   message: string;
 }>> {
   try {
-    
     const result = await invoke('process_winner_payout', {
       input: {
         chit_id: parseInt(chitGroupId),
         cycle_id: parseInt(cycleId),
         winning_member_id: parseInt(winningMemberId),
-        winner_amount: winnerAmount,
+        bid_discount: bidDiscount,
+        commission,
         payment_method: paymentMethod.toUpperCase(),
         note,
       }
     }) as any
-    
-    
+
     return {
       success: true,
       data: {
         voucherGenerated: result.voucher_generated,
+        receiptGenerated: result.receipt_generated,
+        winnerAmount: result.winner_amount,
+        commission: result.commission,
         bidDiscount: result.bid_discount,
         message: result.message,
       }
@@ -507,42 +527,42 @@ export async function processWinnerPayout(
 export async function recordPastChitCycle(
   chitGroupId: string,
   data: PastChitCycleData
-): Promise<ApiResponse<{ cycleId: string; totalCollected: number; bidDiscount: number; payoutAmount: number; netToShg: number }>> {
+): Promise<ApiResponse<{ cycleId: string; totalCollected: number; totalBidDiscounts: number; auctionDiscountPerMember: number; winnerCount: number }>> {
   try {
-
-    // Calculate default winner payout if not provided (total - bidDiscount)
-    const totalCollected = data.memberPayments.reduce((sum, p) => sum + p.amount, 0)
-    const winnerPayout = data.winnerPayout ?? (totalCollected - data.bidDiscount)
-
     const result = await invoke('record_past_chit_cycle', {
       chitId: parseInt(chitGroupId),
       cycleNo: data.cycleNumber,
       auctionDate: data.auctionDate,
-      winningMemberId: data.winningMemberId ? parseInt(data.winningMemberId) : null,
-      bidDiscount: data.bidDiscount,
-      winnerPayout: winnerPayout,
-      memberPayments: data.memberPayments.map((p: { memberId: string; amount: number; paymentMethod: string }) => ({
+      winners: data.winners.map(w => ({
+        memberId: parseInt(w.memberId),
+        winnerType: w.winnerType,
+        bidDiscount: w.bidDiscount,
+        commission: w.commission,
+        payoutAmount: w.payoutAmount,
+        paymentMethod: w.paymentMethod.toUpperCase(),
+      })),
+      auctionDiscountPerMember: data.auctionDiscountPerMember,
+      memberPayments: data.memberPayments.map(p => ({
         memberId: parseInt(p.memberId),
         amount: p.amount,
         paymentMethod: p.paymentMethod.toUpperCase(),
       })),
     }) as {
-      cycle_id: string;
+      cycle_id: number;
       total_collected: number;
-      bid_discount: number;
-      payout_amount: number;
-      net_to_shg: number;
+      total_bid_discounts: number;
+      auction_discount_per_member: number;
+      winner_count: number;
     }
-
 
     return {
       success: true,
       data: {
         cycleId: result.cycle_id.toString(),
         totalCollected: result.total_collected,
-        bidDiscount: result.bid_discount,
-        payoutAmount: result.payout_amount,
-        netToShg: result.net_to_shg,
+        totalBidDiscounts: result.total_bid_discounts,
+        auctionDiscountPerMember: result.auction_discount_per_member,
+        winnerCount: result.winner_count,
       }
     }
   } catch (error) {
@@ -627,5 +647,108 @@ export async function getChitMigrationStatus(chitGroupId: string): Promise<ApiRe
   } catch (error) {
     console.error('Failed to get chit migration status:', error)
     return { success: false, error: 'Failed to get chit migration status' }
+  }
+}
+
+// ── New configurable chit API ─────────────────────────────────────────────
+
+export async function getChitCycleWinners(cycleId: string): Promise<ApiResponse<import('@/lib/types').ChitCycleWinner[]>> {
+  try {
+    const rows = await invoke('get_chit_cycle_winners', { cycleId: parseInt(cycleId) }) as any[]
+    return {
+      success: true,
+      data: rows.map((w: any) => ({
+        id: w.id.toString(),
+        chitGroupId: w.chit_id.toString(),
+        cycleId: w.cycle_id.toString(),
+        memberId: w.member_id.toString(),
+        memberName: w.member_name,
+        winnerType: w.winner_type as 'FIXED' | 'AUCTION',
+        bidDiscount: w.bid_discount,
+        commission: w.commission,
+        payoutAmount: w.payout_amount,
+        paymentMethod: w.payment_method.toLowerCase() as 'cash' | 'bank',
+        paidAt: w.paid_at,
+      })),
+    }
+  } catch (error) {
+    return { success: false, error: 'Failed to get cycle winners' }
+  }
+}
+
+export async function getCycleEligibility(chitGroupId: string, cycleId: string): Promise<ApiResponse<import('@/lib/types').MemberEligibility[]>> {
+  try {
+    const rows = await invoke('get_cycle_eligibility', { chitId: parseInt(chitGroupId), cycleId: parseInt(cycleId) }) as any[]
+    return {
+      success: true,
+      data: rows.map(r => ({
+        memberId: r.member_id.toString(),
+        memberName: r.member_name,
+        isEligible: !!r.is_eligible,
+        adminOverride: !!r.admin_override,
+      })),
+    }
+  } catch (error) {
+    return { success: false, error: 'Failed to get eligibility' }
+  }
+}
+
+export async function overrideMemberEligibility(chitGroupId: string, cycleId: string, memberId: string, eligible: boolean, reason: string): Promise<ApiResponse<void>> {
+  try {
+    await invoke('override_member_eligibility', {
+      chitId: parseInt(chitGroupId), cycleId: parseInt(cycleId),
+      memberId: parseInt(memberId), eligible, reason,
+    })
+    return { success: true }
+  } catch (error: any) {
+    return { success: false, error: error?.toString() }
+  }
+}
+
+export interface AuctionWinnerInput {
+  memberId: string
+  bidDiscount: number
+  paymentMethod: 'cash' | 'bank'
+}
+
+export async function processCycleWinners(
+  chitGroupId: string,
+  cycleId: string,
+  fixedWinnerMemberId: string | null,
+  fixedWinnerPaymentMethod: 'cash' | 'bank' | null,
+  auctionWinners: AuctionWinnerInput[],
+  overrideDiscountPerMember?: number,
+): Promise<ApiResponse<{ auctionDiscountPerMember: number; winners: import('@/lib/types').ChitCycleWinner[]; message: string }>> {
+  try {
+    const result = await invoke('process_chit_cycle_winners', {
+      chitId: parseInt(chitGroupId),
+      cycleId: parseInt(cycleId),
+      fixedWinnerMemberId: fixedWinnerMemberId ? parseInt(fixedWinnerMemberId) : null,
+      fixedWinnerPaymentMethod: fixedWinnerPaymentMethod?.toUpperCase() ?? null,
+      auctionWinners: auctionWinners.map(w => ({
+        member_id: parseInt(w.memberId),
+        bid_discount: w.bidDiscount,
+        payment_method: w.paymentMethod.toUpperCase(),
+      })),
+      overrideDiscountPerMember: overrideDiscountPerMember ?? null,
+    }) as any
+
+    const winners: import('@/lib/types').ChitCycleWinner[] = (result.winners ?? []).map((w: any) => ({
+      id: w.id.toString(),
+      chitGroupId: w.chit_id.toString(),
+      cycleId: w.cycle_id.toString(),
+      memberId: w.member_id.toString(),
+      memberName: w.member_name,
+      winnerType: w.winner_type as 'FIXED' | 'AUCTION',
+      bidDiscount: w.bid_discount,
+      commission: w.commission,
+      payoutAmount: w.payout_amount,
+      paymentMethod: w.payment_method.toLowerCase() as 'cash' | 'bank',
+      paidAt: w.paid_at,
+    }))
+
+    return { success: true, data: { auctionDiscountPerMember: result.auction_discount_per_member, winners, message: result.message } }
+  } catch (error: any) {
+    return { success: false, error: error?.toString() || 'Failed to process winners' }
   }
 }

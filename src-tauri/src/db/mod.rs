@@ -21,6 +21,7 @@ use tauri::Manager;
 
 pub mod schema;
 pub mod connection;
+pub mod audit;
 pub mod members;
 pub mod ledger;
 pub mod loans;
@@ -34,6 +35,9 @@ pub mod daybook;
 pub mod settings;
 pub mod backup;
 pub mod contributions;
+pub mod trial_balance;
+pub mod balance_sheet;
+pub mod income_expenditure;
 
 /// Open or create the encrypted SQLCipher database using a PIN-derived key.
 ///
@@ -111,7 +115,8 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
 // higher layers (commands) can stay relatively stable.
 #[allow(unused_imports)]
 pub use members::{
-    Member, MemberProfile, MemberTxn, add_member, get_member_by_code, update_member, list_members,
+    Member, MemberProfile, MemberTxn, MemberPassbook, PassbookEntry,
+    add_member, get_member_by_code, update_member, list_members,
     get_member_balance, get_member_outstanding, get_member_profile, set_member_opening_data,
 };
 #[allow(unused_imports)]

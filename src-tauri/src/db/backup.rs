@@ -268,9 +268,9 @@ pub fn import_all_data(conn: &mut Connection, json_data: &str) -> Result<(), App
         ("chit_members",        vec!["id","chit_id","member_id","joined_at"].into_iter().collect()),
         ("chit_cycles",         vec!["id","chit_id","cycle_no","auction_date","winning_member_id","bid_discount","payout_amount"].into_iter().collect()),
         ("chit_payments",       vec!["id","chit_id","cycle_id","member_id","amount","payment_method","paid_at"].into_iter().collect()),
-        ("audit_log",           vec!["id","action","entity","entity_id","timestamp"].into_iter().collect()),
+        ("audit_log",           vec!["id","action","entity","entity_id","details","timestamp"].into_iter().collect()),
         ("backup_info",         vec!["id","file_name","file_size","created_at","backup_type"].into_iter().collect()),
-        ("settings",            vec!["id","general_settings","notification_settings","data_settings","appearance_settings","updated_at"].into_iter().collect()),
+        ("settings",            vec!["id","general_settings","notification_settings","data_settings","appearance_settings","updated_at","past_data_locked"].into_iter().collect()),
     ].into_iter().collect();
 
     // Helper: inserts rows into a table, failing the whole import on any error.
@@ -353,6 +353,9 @@ pub fn import_all_data(conn: &mut Connection, json_data: &str) -> Result<(), App
 pub fn clear_all_data(conn: &mut Connection) -> Result<(), AppError> {
     let tx = conn.transaction()?;
 
+    // Temporarily disable foreign key constraints to avoid deletion order issues
+    tx.execute("PRAGMA foreign_keys = OFF", [])?;
+
     // Delete from chit-related tables (child tables first)
     tx.execute("DELETE FROM chit_payments", [])?;
     tx.execute("DELETE FROM chit_cycles", [])?;
@@ -381,6 +384,9 @@ pub fn clear_all_data(conn: &mut Connection) -> Result<(), AppError> {
 
     // Delete backup info
     let _ = tx.execute("DELETE FROM backup_info", []);
+
+    // Re-enable foreign key constraints
+    tx.execute("PRAGMA foreign_keys = ON", [])?;
 
     // Reset autoincrement counters
     let tables_to_reset = [
@@ -426,8 +432,8 @@ pub fn clear_all_data(conn: &mut Connection) -> Result<(), AppError> {
 
     tx.execute(
         "INSERT OR REPLACE INTO settings
-         (id, general_settings, notification_settings, data_settings, appearance_settings, updated_at)
-         VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
+         (id, general_settings, notification_settings, data_settings, appearance_settings, updated_at, past_data_locked)
+         VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 0)",
         (
             serde_json::to_string(&default_general)?,
             serde_json::to_string(&default_notifications)?,

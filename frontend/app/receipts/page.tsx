@@ -26,6 +26,21 @@ import { formatCurrency, formatDateTime } from '@/lib/format'
 import type { Receipt, ReceiptFormData } from '@/lib/types'
 import type { ReceiptWithMember, WeeklyContributionInput } from '@/lib/types/receipts'
 
+function friendlyReason(referenceType: string | undefined, rawReason: string): string {
+  switch (referenceType) {
+    case 'WEEKLY_CONTRIBUTION':
+    case 'MEMBER_CONTRIBUTION': return 'Savings contribution'
+    case 'MEMBER_PAYMENT':      return 'Loan repayment'
+    case 'CHIT_PAYMENT':        return 'Chit installment'
+    case 'CHIT_COMMISSION':     return 'Chit commission'
+    case 'MEMBER_RECEIPT':      return 'Member receipt'
+    case 'DONATION':            return 'Donation'
+    case 'GRANT':               return 'Grant'
+    case 'OPENING':             return 'Opening balance'
+    default:                    return rawReason  // manual receipts keep their user-entered text
+  }
+}
+
 export default function ReceiptsPage() {
   const { settings } = useSettings()
   const shgName = settings?.general?.groupName || undefined
@@ -149,22 +164,10 @@ export default function ReceiptsPage() {
       key: 'reason',
       header: 'Reason',
       cell: (receipt) => (
-        <div className="space-y-1">
-          <span className="text-sm">{receipt.reason}</span>
+        <div className="space-y-0.5">
+          <span className="text-sm">{friendlyReason(receipt.reference_type, receipt.reason)}</span>
           {receipt.member_name && (
-            <span className="text-xs text-muted-foreground block">
-              From: {receipt.member_name}
-            </span>
-          )}
-          {!receipt.member_name && receipt.reference_type === 'MEMBER_RECEIPT' && receipt.reference_id && (
-            <span className="text-xs text-muted-foreground block">
-              From: Member ID {receipt.reference_id}
-            </span>
-          )}
-          {receipt.reference_type === 'WEEKLY_CONTRIBUTION' && (
-            <span className="text-xs text-muted-foreground block">
-              Type: Weekly Contribution
-            </span>
+            <span className="text-xs text-muted-foreground block">From: {receipt.member_name}</span>
           )}
         </div>
       ),
@@ -177,10 +180,10 @@ export default function ReceiptsPage() {
       ),
     },
     {
-      key: 'reference_id',
+      key: 'id',
       header: 'Ref. No.',
       cell: (receipt) => (
-        <span className="text-sm font-mono">{receipt.reference_id || '-'}</span>
+        <span className="text-sm font-mono">#{receipt.id}</span>
       ),
     },
     {
@@ -292,7 +295,7 @@ export default function ReceiptsPage() {
         isOpen={printPreview.isOpen}
         onClose={handleClosePrintPreview}
         type={printPreview.type}
-        data={printPreview.data}
+        data={printPreview.data as any}
         shgName={shgName}
       />
     </div>

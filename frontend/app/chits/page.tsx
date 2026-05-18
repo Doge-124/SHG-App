@@ -156,11 +156,11 @@ export default function ChitsPage() {
                   <div className="flex items-center gap-4 text-sm">
                     <div className="flex items-center gap-1.5 text-muted-foreground">
                       <Users className="h-4 w-4" />
-                      <span>{group.currentMembers}/{group.totalMembers}</span>
+                      <span>{group.currentMembers} of {group.totalMembers} members</span>
                     </div>
                     <div className="flex items-center gap-1.5 text-muted-foreground">
                       <Calendar className="h-4 w-4" />
-                      <span>{group.currentCycle}/{group.durationMonths} cycles</span>
+                      <span>Cycle {group.currentCycle} of {group.durationMonths}</span>
                     </div>
                   </div>
 
@@ -173,7 +173,7 @@ export default function ChitsPage() {
                   </div>
 
                   <Button asChild variant="outline" className="w-full">
-                    <Link href={`/chits/${group.id}`}>
+                    <Link href={`/chits/detail?id=${group.id}`}>
                       <Eye className="mr-2 h-4 w-4" />
                       View Details
                     </Link>

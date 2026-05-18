@@ -201,3 +201,31 @@ export async function verifyMasterPassword(password: string): Promise<ApiRespons
     return { success: false, error: 'Failed to verify password' }
   }
 }
+
+// Past data lock
+export async function getPastDataLockStatus(): Promise<ApiResponse<boolean>> {
+  try {
+    const locked = await invoke('get_past_data_lock_status') as boolean
+    return { success: true, data: locked }
+  } catch (error) {
+    return { success: false, error: String(error) }
+  }
+}
+
+export async function lockPastDataEntry(): Promise<ApiResponse<void>> {
+  try {
+    await invoke('lock_past_data_entry')
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: String(error) }
+  }
+}
+
+export async function unlockPastDataEntry(adminPin: string): Promise<ApiResponse<void>> {
+  try {
+    await invoke('unlock_past_data_entry', { adminPin })
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: String(error) }
+  }
+}

@@ -4,6 +4,7 @@ use tauri::{State, Manager};
 use std::sync::Mutex;
 use crate::state::AppState;
 use crate::db::{self, settings, backup};
+use crate::security::{key, store};
 use crate::types::{GeneralSettings, NotificationSettings, DataSettings, AppearanceSettings};
 
 #[tauri::command]
@@ -335,8 +336,100 @@ pub fn clear_all_data(state: State<Mutex<AppState>>) -> Result<(), String> {
     
     backup::clear_all_data(conn)
         .map_err(|e| e.to_string())?;
-    
-    // Force settings reload on frontend by emitting an event
-    // This will trigger the SettingsContext to refresh
     Ok(())
 }
+
+/// Get the current past-data lock status.
+#[tauri::command]
+pub fn get_past_data_lock_status(state: State<Mutex<AppState>>) -> Result<bool, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    settings::get_past_data_locked(conn).map_err(|e| e.to_string())
+}
+
+/// Lock past data entry permanently. Requires no credential — caller shows confirmation dialog.
+#[tauri::command]
+pub fn lock_past_data_entry(state: State<Mutex<AppState>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    if settings::get_past_data_locked(conn).map_err(|e| e.to_string())? {
+        return Err("Past data entry is already locked".to_string());
+    }
+
+    settings::set_past_data_locked(conn, true).map_err(|e| e.to_string())
+}
+
+/// Unlock past data entry.
+/// Verifies using the admin PIN if one is configured, otherwise falls back to
+/// the main PIN (for databases created before admin PIN support was added).
+#[tauri::command]
+pub fn unlock_past_data_entry(
+    admin_pin: String,
+    state: State<Mutex<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let app_dir = app.path().app_data_dir()
+        .map_err(|_| "app_data_dir not available".to_string())?;
+    let sec_path = app_dir.join("data").join("security.json");
+
+    let sec = store::load(&sec_path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No security data found".to_string())?;
+
+    let pin_verified = if sec.admin_salt.is_some() && sec.recovery_blob.is_some() {
+        // Admin PIN is configured — verify against it.
+        let admin_salt_bytes = hex::decode(sec.admin_salt.as_deref().unwrap_or(""))
+            .map_err(|_| "Invalid admin salt".to_string())?;
+        let recovery_bytes = hex::decode(sec.recovery_blob.as_deref().unwrap_or(""))
+            .map_err(|_| "Invalid recovery data".to_string())?;
+
+        let admin_key = key::derive_key(&admin_pin, &admin_salt_bytes)
+            .map_err(|e: crate::error::AppError| e.to_string())?;
+        let recovery_arr: [u8; 32] = recovery_bytes
+            .try_into()
+            .map_err(|_| "Corrupt recovery blob".to_string())?;
+        let recovered_db_key = hex::encode(key::xor_keys(&recovery_arr, &admin_key));
+
+        let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+        let stored = guard.db_key.as_deref()
+            .ok_or_else(|| "Database not unlocked".to_string())?
+            .to_string();
+        recovered_db_key == stored
+    } else {
+        // No admin PIN set — fall back to main PIN.
+        match db::init_db_with_pin(&app, &admin_pin) {
+            Ok((conn, _)) => { drop(conn); true }
+            Err(_) => false,
+        }
+    };
+
+    if !pin_verified {
+        return Err("Incorrect PIN".to_string());
+    }
+
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    settings::set_past_data_locked(conn, false).map_err(|e| e.to_string())
+}
+
+/// Get the SHG opening balance status (locked, cash amount, bank amount).
+#[tauri::command]
+pub fn get_shg_opening_status(state: State<Mutex<AppState>>) -> Result<settings::ShgOpeningStatus, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    settings::get_shg_opening_status(conn).map_err(|e| e.to_string())
+}
+
+/// Set the SHG opening cash and bank balances and lock them permanently.
+#[tauri::command]
+pub fn set_shg_opening_balance(
+    state: State<Mutex<AppState>>,
+    cash: f64,
+    bank: f64,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    settings::set_shg_opening_balance(conn, cash, bank).map_err(|e| e.to_string())
+}
+

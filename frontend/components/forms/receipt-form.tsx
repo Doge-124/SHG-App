@@ -43,10 +43,9 @@ const receiptSchema = z.object({
   referenceId: z.string().optional(),
 })
 
-// Preset reasons for receipts
+// Preset reasons for receipts (loan repayments are handled through the Loans page)
 const receiptReasons = [
   'Savings deposit',
-  'Loan repayment',
   'Fine payment',
   'Donation',
   'Other'

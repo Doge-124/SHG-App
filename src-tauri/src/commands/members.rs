@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use tauri::State;
 
-use crate::db::{self, validation, members::{list_members_by_type, MemberType}};
+use crate::db::{self, validation, members::{list_members_by_type, MemberType}, settings as db_settings};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -34,7 +34,7 @@ pub fn add_member(
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
-    db::add_member(
+    let member_id = db::add_member(
         conn,
         &code,
         &name,
@@ -43,7 +43,11 @@ pub fn add_member(
         &joined_at,
         &member_type,
     )
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "MEMBER_ADDED", "member", Some(member_id),
+        &format!("{name} ({code}) — type: {member_type}"));
+    Ok(())
 }
 
 #[tauri::command]
@@ -82,7 +86,14 @@ pub fn update_member(
         phone.as_deref(),
         address.as_deref(),
     )
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e: AppError| e.to_string())?;
+
+    let member_id: Option<i64> = conn
+        .query_row("SELECT id FROM members WHERE member_code = ?1", [&code], |r| r.get(0))
+        .ok();
+    db::audit::log_audit(conn, "MEMBER_UPDATED", "member", member_id,
+        &format!("{name} ({code})"));
+    Ok(())
 }
 
 #[tauri::command]
@@ -180,19 +191,16 @@ pub fn set_member_opening_data(
         return Err("opening_balance must be >= 0.0".to_string());
     }
 
-    if input.opening_balance > 0.0 {
-        let pm = input
-            .payment_method
-            .as_deref()
-            .ok_or_else(|| "payment_method is required when opening_balance > 0".to_string())?;
-        validation::validate_payment_method(pm).map_err(|e| e.to_string())?;
-    }
+    // payment_method is optional — opening balance is now member-profile-only,
+    // not reflected in SHG cash/bank balances.
 
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
         .db
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db_settings::assert_past_data_unlocked(conn).map_err(|e| e.to_string())?;
 
     db::set_member_opening_data(
         conn,
@@ -235,6 +243,20 @@ pub fn list_members_by_type_cmd(
         .ok_or_else(|| "DB not unlocked".to_string())?;
     
     list_members_by_type(conn, mt).map_err(|e: AppError| e.to_string())
+}
+
+/// Get savings passbook for a member
+#[tauri::command]
+pub fn get_member_passbook(
+    state: State<Mutex<AppState>>,
+    member_id: i64,
+    from_date: String,
+    to_date: String,
+) -> Result<db::MemberPassbook, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::members::get_member_passbook(conn, member_id, &from_date, &to_date)
+        .map_err(|e: AppError| e.to_string())
 }
 
 /// Update a member's type

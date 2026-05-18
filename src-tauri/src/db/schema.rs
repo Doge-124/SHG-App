@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS chit_groups (
     name TEXT NOT NULL,
     total_amount REAL NOT NULL,
     months INTEGER NOT NULL,
+    total_members INTEGER NOT NULL DEFAULT 0,
     monthly_contribution REAL NOT NULL,
     commission_percent REAL NOT NULL,
     start_date TEXT NOT NULL,
@@ -224,6 +225,32 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     // 5) Drop member_roles table if it exists (replaced by member_type column)
     tx.execute_batch("DROP TABLE IF EXISTS member_roles;")?;
 
+    // 6a) Add past_data_locked flag to settings table — only if the table already
+    //     exists (on a brand-new DB, init_settings_table hasn't run yet so the
+    //     column is added there instead; see db/settings.rs CREATE TABLE).
+    let settings_exists: bool = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0) > 0;
+    if settings_exists {
+        add_column_if_missing(&tx, "settings", "past_data_locked", "INTEGER NOT NULL DEFAULT 0")?;
+    }
+
+    // 6b) Add details column to audit_log (may not exist on older DBs).
+    add_column_if_missing(&tx, "audit_log", "details", "TEXT")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(timestamp);"
+    )?;
+
+    // 6c) Add total_members to chit_groups — independent from `months` (cycles).
+    // For old rows where it doesn't exist, default to the same value as months
+    // so existing chits keep working.
+    add_column_if_missing(&tx, "chit_groups", "total_members", "INTEGER NOT NULL DEFAULT 0")?;
+    tx.execute_batch(
+        "UPDATE chit_groups SET total_members = months WHERE total_members = 0;"
+    )?;
+
     // 6) Create loan_payments table for per-loan repayment history.
     tx.execute_batch(
         r#"
@@ -241,6 +268,60 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         CREATE INDEX IF NOT EXISTS idx_loan_payments_loan ON loan_payments(loan_id);
         "#,
     )?;
+
+    // 8) Configurable chit fund: winners per cycle, commission, fixed prize, eligibility tracking.
+    add_column_if_missing(&tx, "chit_groups", "winners_per_cycle", "INTEGER NOT NULL DEFAULT 1")?;
+    add_column_if_missing(&tx, "chit_groups", "commission_per_winner", "REAL NOT NULL DEFAULT 0")?;
+    add_column_if_missing(&tx, "chit_groups", "fixed_prize_amount", "REAL NOT NULL DEFAULT 0")?;
+    add_column_if_missing(&tx, "chit_cycles", "auction_discount_per_member", "REAL NOT NULL DEFAULT 0")?;
+    add_column_if_missing(&tx, "chit_cycles", "total_bid_discounts", "REAL NOT NULL DEFAULT 0")?;
+    add_column_if_missing(&tx, "chit_cycles", "admin_discount_override", "REAL")?;
+
+    tx.execute_batch(r#"
+        CREATE TABLE IF NOT EXISTS chit_cycle_winners (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chit_id INTEGER NOT NULL,
+            cycle_id INTEGER NOT NULL,
+            member_id INTEGER NOT NULL,
+            winner_type TEXT NOT NULL CHECK (winner_type IN ('FIXED','AUCTION')),
+            bid_discount REAL NOT NULL DEFAULT 0,
+            commission REAL NOT NULL DEFAULT 0,
+            payout_amount REAL NOT NULL,
+            payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH','BANK')),
+            paid_at TEXT NOT NULL,
+            FOREIGN KEY (chit_id) REFERENCES chit_groups(id),
+            FOREIGN KEY (cycle_id) REFERENCES chit_cycles(id),
+            FOREIGN KEY (member_id) REFERENCES members(id),
+            UNIQUE (chit_id, member_id)
+        );
+        CREATE TABLE IF NOT EXISTS chit_member_eligibility (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chit_id INTEGER NOT NULL,
+            cycle_id INTEGER NOT NULL,
+            member_id INTEGER NOT NULL,
+            is_eligible INTEGER NOT NULL DEFAULT 1,
+            admin_override INTEGER NOT NULL DEFAULT 0,
+            override_reason TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (chit_id) REFERENCES chit_groups(id),
+            FOREIGN KEY (cycle_id) REFERENCES chit_cycles(id),
+            FOREIGN KEY (member_id) REFERENCES members(id),
+            UNIQUE (chit_id, cycle_id, member_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_chit_winners_cycle ON chit_cycle_winners(cycle_id);
+        CREATE INDEX IF NOT EXISTS idx_chit_eligibility ON chit_member_eligibility(chit_id, cycle_id);
+    "#)?;
+
+    // 9) SHG opening balance columns on the settings table.
+    if settings_exists {
+        add_column_if_missing(&tx, "settings", "shg_opening_cash", "REAL NOT NULL DEFAULT 0")?;
+        add_column_if_missing(&tx, "settings", "shg_opening_bank", "REAL NOT NULL DEFAULT 0")?;
+        add_column_if_missing(&tx, "settings", "shg_opening_locked", "INTEGER NOT NULL DEFAULT 0")?;
+    }
+
+    // 9) Daily interest rate and upfront interest for new loan logic.
+    add_column_if_missing(&tx, "loans", "daily_interest_rate", "REAL NOT NULL DEFAULT 0")?;
+    add_column_if_missing(&tx, "loans", "upfront_interest_amount", "REAL NOT NULL DEFAULT 0")?;
 
     // 7) Ensure indexes exist for performance.
     tx.execute_batch(

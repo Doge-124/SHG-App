@@ -92,6 +92,7 @@ pub struct MemberProfile {
 }
 
 /// Create a new member and initialize their balance to zero.
+/// Returns the new member's id.
 pub fn add_member(
     conn: &mut Connection,
     code: &str,
@@ -100,9 +101,9 @@ pub fn add_member(
     address: Option<&str>,
     joined_at: &str,
     member_type: &str,
-) -> Result<(), AppError> {
+) -> Result<i64, AppError> {
     validation::validate_member_code(code)?;
-    
+
     // Validate member_type
     let _mt = member_type.parse::<MemberType>()
         .map_err(|e| AppError::validation(&e))?;
@@ -127,7 +128,7 @@ pub fn add_member(
     )?;
 
     tx.commit()?;
-    Ok(())
+    Ok(member_id)
 }
 
 /// Fetch a member by their unique member code.
@@ -271,22 +272,18 @@ pub fn set_member_opening_data(
         return Err(AppError::validation("opening_balance must be >= 0.0"));
     }
 
-    if opening_balance > 0.0 {
-        let pm = payment_method.ok_or_else(|| {
-            AppError::validation("payment_method is required when opening_balance > 0")
-        })?;
-        validation::validate_payment_method(pm)?;
-    }
+    // payment_method stored for reference but no longer required (opening balance
+    // is a member-profile-only record and does not affect SHG cash/bank balances).
 
     let now = chrono::Utc::now().to_rfc3339();
 
     // Load and validate the member state outside the write transaction.
-    let (member_code, is_active): (String, i64) = conn.query_row(
-        "SELECT member_code, is_active
+    let (member_code, name, is_active): (String, String, i64) = conn.query_row(
+        "SELECT member_code, name, is_active
          FROM members
          WHERE id = ?1",
         [member_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
     if is_active != 1 {
@@ -309,48 +306,22 @@ pub fn set_member_opening_data(
     }
 
     if opening_balance > 0.0 {
-        let pm = match payment_method {
-            Some(v) => v,
-            None => {
-                return Err(AppError::validation(
-                    "payment_method is required when opening_balance > 0",
-                ))
-            }
-        };
+        // Member savings reference only — does NOT touch SHG cash/bank balances.
+        // SHG opening funds are set separately via Settings → SHG Opening Balance.
 
-        // 1) SHG opening transaction (must not be treated as a receipt).
-        tx.execute(
-            "INSERT INTO shg_transactions
-             (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
-             VALUES ('OPENING', ?1, ?2, ?3, 'MEMBER_OPENING', ?4, ?5)",
-            (
-                opening_balance,
-                format!("Opening balance migration for member {member_code}"),
-                pm,
-                member_id,
-                &now,
-            ),
-        )?;
-
-        // 2) Update SHG balances
-        tx.execute(
-            "UPDATE shg_balances SET balance = balance + ?1 WHERE method = ?2",
-            (opening_balance, pm),
-        )?;
-
-        // 3) Member opening transaction
+        // 1) Member opening transaction (reference in member profile)
         tx.execute(
             "INSERT INTO member_transactions (member_id, amount, txn_type, reason, created_at)
              VALUES (?1, ?2, 'OPENING', ?3, ?4)",
             (
                 member_id,
                 opening_balance,
-                "Opening balance (pre-migration)",
+                "Opening balance (pre-migration savings)",
                 &now,
             ),
         )?;
 
-        // 4) Update member balance cache (UPSERT in case row doesn't exist)
+        // 2) Update member balance cache
         tx.execute(
             "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
              ON CONFLICT(member_id) DO UPDATE SET balance = member_balances.balance + excluded.balance",
@@ -493,6 +464,151 @@ pub fn list_members_by_type(
         out.push(r?);
     }
     Ok(out)
+}
+
+// ─── Passbook ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassbookEntry {
+    pub id: i64,
+    pub date: String,
+    pub particulars: String,
+    pub txn_type: String,
+    pub credit: f64,
+    pub running_balance: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberPassbook {
+    pub member_id: i64,
+    pub member_name: String,
+    pub member_code: String,
+    pub member_type: String,
+    pub join_date: String,
+    pub from_date: String,
+    pub to_date: String,
+    pub migration_opening: f64,   // from members.opening_balance — pre-app savings
+    pub opening_balance: f64,     // migration_opening + contributions before period
+    pub entries: Vec<PassbookEntry>,
+    pub total_credits: f64,
+    pub closing_balance: f64,
+    pub total_installments: i64,
+}
+
+/// Fetch the savings passbook for a member for a given date range.
+/// Pass empty strings for `from_date` / `to_date` to get all-time data.
+///
+/// # Opening balance strategy
+/// The OPENING transaction in `member_transactions` is stamped with the date the
+/// past data was *entered* (today), not the member's actual historical join date.
+/// Relying on its `created_at` makes it invisible for any date range that predates
+/// when the migration was run.  Instead we read `members.opening_balance` directly —
+/// it represents savings accumulated before the app was adopted and always forms the
+/// base of the passbook, regardless of the date range selected.
+pub fn get_member_passbook(
+    conn: &Connection,
+    member_id: i64,
+    from_date: &str,
+    to_date: &str,
+) -> Result<MemberPassbook, AppError> {
+    // ── Member details ────────────────────────────────────────────────────
+    let (member_name, member_code, member_type, join_date, migration_opening): (String, String, String, String, f64) =
+        conn.query_row(
+            "SELECT name, member_code, member_type, joined_at,
+                    COALESCE(opening_balance, 0.0)
+             FROM members WHERE id = ?1",
+            [member_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+
+    let to_dt = if to_date.is_empty() {
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+    } else {
+        format!("{}T23:59:59", to_date)
+    };
+
+    // ── Opening balance for this period ───────────────────────────────────
+    // = migration opening balance (always)
+    // + weekly CONTRIBUTION entries recorded before `from_date`
+    // (OPENING entries in member_transactions are excluded — handled via members.opening_balance)
+    let contributions_before: f64 = if from_date.is_empty() {
+        0.0
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM member_transactions
+             WHERE member_id = ?1 AND txn_type = 'CONTRIBUTION'
+             AND created_at < ?2",
+            (member_id, from_date),
+            |r| r.get(0),
+        ).unwrap_or(0.0)
+    };
+
+    let opening_balance = migration_opening + contributions_before;
+
+    // ── Entries within the period (CONTRIBUTION only) ─────────────────────
+    // We exclude OPENING entries from the timeline because the migration opening
+    // balance is already baked into `opening_balance` above.
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, txn_type, reason, amount
+         FROM member_transactions
+         WHERE member_id = ?1
+           AND txn_type = 'CONTRIBUTION'
+           AND (?2 = '' OR created_at >= ?2)
+           AND created_at <= ?3
+         ORDER BY created_at ASC, id ASC",
+    )?;
+
+    let rows = stmt.query_map((member_id, from_date, &to_dt), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, f64>(4)?,
+        ))
+    })?;
+
+    let mut entries: Vec<PassbookEntry> = Vec::new();
+    let mut running = opening_balance;
+    for row in rows {
+        let (id, date, txn_type, reason, amount) = row?;
+        running += amount;
+        let particulars = if !reason.is_empty() {
+            reason
+        } else {
+            "Savings Contribution".to_string()
+        };
+        entries.push(PassbookEntry {
+            id,
+            date,
+            particulars,
+            txn_type,
+            credit: amount,
+            running_balance: running,
+        });
+    }
+
+    let total_credits: f64 = entries.iter().map(|e| e.credit).sum();
+    let closing_balance = opening_balance + total_credits;
+    let total_installments = entries.len() as i64;
+
+    Ok(MemberPassbook {
+        member_id,
+        member_name,
+        member_code,
+        member_type,
+        join_date,
+        from_date: from_date.to_string(),
+        to_date: to_date.to_string(),
+        migration_opening,
+        opening_balance,
+        entries,
+        total_credits,
+        closing_balance,
+        total_installments,
+    })
 }
 
 /// Check if a member is of a specific type

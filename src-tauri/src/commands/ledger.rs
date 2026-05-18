@@ -49,10 +49,11 @@ pub fn record_receipt(
     )
     .map_err(|e: AppError| e.to_string())?;
 
-    // If this is a member receipt/contribution, also update member balance
+    // Only savings-type receipts affect member balance.
+    // MEMBER_RECEIPT (fines, generic) → SHG balance only; the member's savings are unchanged.
+    // MEMBER_CONTRIBUTION / WEEKLY_CONTRIBUTION → also update the member's savings balance.
     if let (Some(ref_type), Some(member_id)) = (reference_type.as_deref(), reference_id) {
-        if ref_type == "MEMBER_RECEIPT" || ref_type == "MEMBER_CONTRIBUTION" || ref_type == "WEEKLY_CONTRIBUTION" {
-            // Create member transaction record
+        if ref_type == "MEMBER_CONTRIBUTION" || ref_type == "WEEKLY_CONTRIBUTION" {
             tx.execute(
                 "INSERT INTO member_transactions (member_id, amount, txn_type, reason, created_at)
                  VALUES (?1, ?2, 'CONTRIBUTION', ?3, ?4)",
@@ -60,7 +61,6 @@ pub fn record_receipt(
             )
             .map_err(|e| format!("Failed to create member transaction: {e}"))?;
 
-            // Update member balance cache
             tx.execute(
                 "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
                  ON CONFLICT(member_id) DO UPDATE SET balance = balance + excluded.balance",
@@ -73,6 +73,8 @@ pub fn record_receipt(
     tx.commit()
         .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
+    db::audit::log_audit(conn, "RECEIPT", "receipt", None,
+        &format!("₹{amount} — {reason} ({payment_method})"));
     Ok(())
 }
 
@@ -115,6 +117,8 @@ pub fn record_voucher(
     tx.commit()
         .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
+    db::audit::log_audit(conn, "VOUCHER", "voucher", None,
+        &format!("₹{amount} — {reason} ({payment_method})"));
     Ok(())
 }
 
@@ -230,6 +234,10 @@ pub fn get_receipts(
             t.reference_id,
             t.created_at,
             CASE
+                WHEN t.reference_type = 'CHIT_COMMISSION' AND t.reference_id IS NOT NULL THEN
+                    (SELECT m.name FROM members m
+                     JOIN chit_cycles cc ON cc.winning_member_id = m.id
+                     WHERE cc.id = t.reference_id)
                 WHEN t.reference_type IN (
                     'WEEKLY_CONTRIBUTION', 'MEMBER_RECEIPT', 'MEMBER_CONTRIBUTION',
                     'MEMBER_PAYMENT', 'CHIT_PAYMENT', 'DONATION', 'GRANT'

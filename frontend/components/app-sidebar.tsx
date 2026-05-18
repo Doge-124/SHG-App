@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
@@ -12,6 +13,13 @@ import {
   Settings,
   Building2,
   BookOpen,
+  ClipboardList,
+  Banknote,
+  LandmarkIcon,
+  Scale,
+  PieChart,
+  TrendingUp,
+  CalendarCheck,
 } from 'lucide-react'
 import {
   Sidebar,
@@ -28,68 +36,69 @@ import {
 } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import { useSettings } from '@/lib/settings-context'
+import { getLoans } from '@/lib/api/loans'
+
+// Due-date calculation (mirrors notifications.ts logic)
+function isOverdue(issuedAt: string, loanType: string): boolean {
+  if (loanType !== 'weekly') return false  // monthly loans are open-ended, no due date
+  const issued = new Date(issuedAt)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const graceEnd = new Date(issued.getTime() + 120 * 86_400_000) // 100-day term + 20-day grace
+  return today > graceEnd
+}
 
 const mainNavItems = [
-  {
-    title: 'Dashboard',
-    href: '/',
-    icon: LayoutDashboard,
-  },
-  {
-    title: 'Members',
-    href: '/members',
-    icon: Users,
-  },
-  {
-    title: 'Loans',
-    href: '/loans',
-    icon: Wallet,
-  },
-  {
-    title: 'Receipts',
-    href: '/receipts',
-    icon: Receipt,
-  },
-  {
-    title: 'Vouchers',
-    href: '/vouchers',
-    icon: FileText,
-  },
-  {
-    title: 'Day Book',
-    href: '/daybook',
-    icon: BookOpen,
-  },
+  { title: 'Dashboard', href: '/',          icon: LayoutDashboard },
+  { title: 'Members',       href: '/members',       icon: Users           },
+  { title: 'Contributions', href: '/contributions', icon: CalendarCheck   },
+  { title: 'Loans',         href: '/loans',         icon: Wallet          },
+  { title: 'Receipts',  href: '/receipts',  icon: Receipt         },
+  { title: 'Vouchers',  href: '/vouchers',  icon: FileText        },
+  { title: 'Passbook',       href: '/passbook',        icon: BookOpen     },
+  { title: 'Cash Book',      href: '/cashbook',       icon: Banknote     },
+  { title: 'Bank Book',      href: '/bankbook',       icon: LandmarkIcon },
+  { title: 'Day Book',       href: '/daybook',        icon: BookOpen     },
+  { title: 'Trial Balance',       href: '/trial-balance',       icon: Scale       },
+  { title: 'Income & Expenditure', href: '/income-expenditure', icon: TrendingUp  },
+  { title: 'Balance Sheet',       href: '/balance-sheet',       icon: PieChart    },
 ]
 
 const chitNavItems = [
-  {
-    title: 'Chit Funds',
-    href: '/chits',
-    icon: CircleDollarSign,
-  },
+  { title: 'Chit Funds', href: '/chits', icon: CircleDollarSign },
 ]
 
 const systemNavItems = [
-  {
-    title: 'Settings',
-    href: '/settings',
-    icon: Settings,
-  },
+  { title: 'Audit Log', href: '/audit',    icon: ClipboardList },
+  { title: 'Settings',  href: '/settings', icon: Settings      },
 ]
 
 export function AppSidebar() {
   const pathname = usePathname()
   const { settings } = useSettings()
+  const [overdueCount, setOverdueCount] = useState(0)
 
-  const isActive = (href: string) => {
-    if (href === '/') {
-      return pathname === '/'
+  // Re-check overdue count on every navigation so repayments are reflected immediately.
+  useEffect(() => {
+    if (!settings?.notifications?.loanDueReminders) {
+      setOverdueCount(0)
+      return
     }
-    return pathname.startsWith(href)
-  }
+    getLoans()
+      .then(res => {
+        if (!res.success || !res.data) return
+        const count = res.data.filter(
+          l => l.status === 'active' && isOverdue(l.issuedAt, l.loanType)
+        ).length
+        setOverdueCount(count)
+      })
+      .catch(() => {/* silently ignore */})
+  }, [pathname, settings?.notifications?.loanDueReminders])
 
-  const groupName = settings?.general?.groupName || 'Shakti Group'
+  const isActive = (href: string) =>
+    href === '/' ? pathname === '/' : pathname.startsWith(href)
+
+  const groupName = settings?.general?.groupName || 'My SHG'
 
   return (
     <Sidebar collapsible="icon">
@@ -116,23 +125,47 @@ export function AppSidebar() {
           <SidebarGroupLabel>Main Menu</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {mainNavItems.map((item) => (
-                <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={isActive(item.href)}
-                    tooltip={item.title}
-                  >
-                    <Link href={item.href}>
-                      <item.icon className={cn(
-                        'h-4 w-4',
-                        isActive(item.href) && 'text-primary'
-                      )} />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
+              {mainNavItems.map((item) => {
+                const active = isActive(item.href)
+                const showBadge = item.href === '/loans' && overdueCount > 0 && !isActive('/loans')
+
+                return (
+                  <SidebarMenuItem key={item.href}>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={active}
+                      tooltip={
+                        showBadge
+                          ? `Loans (${overdueCount} overdue)`
+                          : item.title
+                      }
+                    >
+                      <Link href={item.href} className="flex items-center w-full">
+                        {/* Icon — with a dot indicator when collapsed */}
+                        <span className="relative flex-shrink-0">
+                          <item.icon className={cn('h-4 w-4', active && 'text-primary')} />
+                          {showBadge && (
+                            <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75" />
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-destructive" />
+                            </span>
+                          )}
+                        </span>
+
+                        {/* Label + pill badge (visible when sidebar is expanded) */}
+                        <span className="flex items-center gap-2 flex-1 group-data-[collapsible=icon]:hidden">
+                          {item.title}
+                          {showBadge && (
+                            <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
+                              {overdueCount > 99 ? '99+' : overdueCount}
+                            </span>
+                          )}
+                        </span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                )
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -143,16 +176,9 @@ export function AppSidebar() {
             <SidebarMenu>
               {chitNavItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={isActive(item.href)}
-                    tooltip={item.title}
-                  >
+                  <SidebarMenuButton asChild isActive={isActive(item.href)} tooltip={item.title}>
                     <Link href={item.href}>
-                      <item.icon className={cn(
-                        'h-4 w-4',
-                        isActive(item.href) && 'text-primary'
-                      )} />
+                      <item.icon className={cn('h-4 w-4', isActive(item.href) && 'text-primary')} />
                       <span>{item.title}</span>
                     </Link>
                   </SidebarMenuButton>
@@ -168,16 +194,9 @@ export function AppSidebar() {
             <SidebarMenu>
               {systemNavItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={isActive(item.href)}
-                    tooltip={item.title}
-                  >
+                  <SidebarMenuButton asChild isActive={isActive(item.href)} tooltip={item.title}>
                     <Link href={item.href}>
-                      <item.icon className={cn(
-                        'h-4 w-4',
-                        isActive(item.href) && 'text-primary'
-                      )} />
+                      <item.icon className={cn('h-4 w-4', isActive(item.href) && 'text-primary')} />
                       <span>{item.title}</span>
                     </Link>
                   </SidebarMenuButton>

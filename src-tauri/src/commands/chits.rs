@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use tauri::State;
 
-use crate::db::{self, validation};
+use crate::db::{self, validation, settings as db_settings};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -16,9 +16,11 @@ pub fn get_chit_group(state: State<Mutex<AppState>>, id: i64) -> Result<Option<d
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, total_amount, months, monthly_contribution, commission_percent, start_date, status
-         FROM chit_groups 
-         WHERE id = ?1"
+        "SELECT id, name, total_amount, months, total_members, monthly_contribution, commission_percent,
+                start_date, status,
+                COALESCE(winners_per_cycle,1), COALESCE(commission_per_winner,0),
+                COALESCE(fixed_prize_amount, total_amount)
+         FROM chit_groups WHERE id = ?1"
     ).map_err(|e| e.to_string())?;
 
     let group = stmt.query_row([id], |row| {
@@ -27,10 +29,14 @@ pub fn get_chit_group(state: State<Mutex<AppState>>, id: i64) -> Result<Option<d
             name: row.get(1)?,
             total_amount: row.get(2)?,
             months: row.get(3)?,
-            monthly_contribution: row.get(4)?,
-            commission_percent: row.get(5)?,
-            start_date: row.get(6)?,
-            status: row.get(7)?,
+            total_members: row.get(4)?,
+            monthly_contribution: row.get(5)?,
+            commission_percent: row.get(6)?,
+            start_date: row.get(7)?,
+            status: row.get(8)?,
+            winners_per_cycle: row.get(9)?,
+            commission_per_winner: row.get(10)?,
+            fixed_prize_amount: row.get(11)?,
         })
     });
 
@@ -50,9 +56,11 @@ pub fn get_chit_groups(state: State<Mutex<AppState>>) -> Result<Vec<db::chits::C
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, total_amount, months, monthly_contribution, commission_percent, start_date, status
-         FROM chit_groups 
-         ORDER BY start_date DESC"
+        "SELECT id, name, total_amount, months, total_members, monthly_contribution, commission_percent,
+                start_date, status,
+                COALESCE(winners_per_cycle,1), COALESCE(commission_per_winner,0),
+                COALESCE(fixed_prize_amount, total_amount)
+         FROM chit_groups ORDER BY start_date DESC"
     ).map_err(|e| e.to_string())?;
 
     let groups = stmt.query_map([], |row| {
@@ -61,10 +69,14 @@ pub fn get_chit_groups(state: State<Mutex<AppState>>) -> Result<Vec<db::chits::C
             name: row.get(1)?,
             total_amount: row.get(2)?,
             months: row.get(3)?,
-            monthly_contribution: row.get(4)?,
-            commission_percent: row.get(5)?,
-            start_date: row.get(6)?,
-            status: row.get(7)?,
+            total_members: row.get(4)?,
+            monthly_contribution: row.get(5)?,
+            commission_percent: row.get(6)?,
+            start_date: row.get(7)?,
+            status: row.get(8)?,
+            winners_per_cycle: row.get(9)?,
+            commission_per_winner: row.get(10)?,
+            fixed_prize_amount: row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -82,8 +94,12 @@ pub fn create_chit_group(
     name: String,
     total_amount: f64,
     months: i64,
+    total_members: i64,
     commission_percent: f64,
     start_date: String,
+    winners_per_cycle: i64,
+    commission_per_winner: f64,
+    fixed_prize_amount: f64,
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -96,10 +112,19 @@ pub fn create_chit_group(
         &name,
         total_amount,
         months,
+        total_members,
         commission_percent,
         &start_date,
+        winners_per_cycle,
+        commission_per_winner,
+        fixed_prize_amount,
     )
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e: AppError| e.to_string())?;
+
+    let group_id = conn.last_insert_rowid();
+    db::audit::log_audit(conn, "CHIT_GROUP_CREATED", "chit_group", Some(group_id),
+        &format!("{name} — Rs.{total_amount}, {total_members} members, {winners_per_cycle} winner(s)/cycle"));
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -121,9 +146,12 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
     let mut stmt = conn.prepare(
-        "SELECT cm.id, cm.chit_id, cm.member_id, cm.joined_at, m.name
+        "SELECT cm.id, cm.chit_id, cm.member_id, cm.joined_at, m.name,
+                CASE WHEN ccw.member_id IS NOT NULL THEN 1 ELSE 0 END as is_winner
          FROM chit_members cm
          JOIN members m ON cm.member_id = m.id
+         LEFT JOIN (SELECT DISTINCT chit_id, member_id FROM chit_cycle_winners) ccw
+              ON ccw.chit_id = cm.chit_id AND ccw.member_id = cm.member_id
          WHERE cm.chit_id = ?1
          ORDER BY cm.joined_at DESC"
     ).map_err(|e| e.to_string())?;
@@ -135,7 +163,7 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
             member_id: row.get::<_, i64>(2)?.to_string(),
             member_name: row.get(4)?,
             joined_at: row.get(3)?,
-            is_winner: false, // Would need to be determined from chit_cycles
+            is_winner: row.get::<_, i64>(5)? != 0,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -335,6 +363,9 @@ pub fn record_chit_payment(
     )
     .map_err(|e| e.to_string())?;
 
+    db::audit::log_audit(conn, "CHIT_PAYMENT", "chit_cycle", Some(cycle_id),
+        &format!("₹{amount} by {member_name} (chit {chit_id}, cycle {cycle_id})"));
+
     // Return the payment information
     Ok(ChitPaymentResponse {
         id: format!("{}_{}_{}", chit_id, cycle_id, member_id),
@@ -371,17 +402,30 @@ pub fn payout_chit_winner(
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
-    db::chits::process_winner_payout(
+    // Compute bid_discount from total_amount - payout_amount
+    let total_amount: f64 = conn.query_row(
+        "SELECT total_amount FROM chit_groups WHERE id = ?1",
+        [chit_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let bid_discount = (total_amount - payout_amount).max(0.0);
+
+    let (winner_amount, _commission) = db::chits::process_winner_payout(
         conn,
         chit_id,
         cycle_id,
         winning_member_id,
-        payout_amount,
+        bid_discount,
+        0.0, // legacy command — no commission
         &payment_method,
         &payout_date,
         &note,
     )
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_WINNER_PAID", "chit_cycle", Some(cycle_id),
+        &format!("₹{winner_amount} to member {winning_member_id} (chit {chit_id}, cycle {cycle_id})"));
+    Ok(())
 }
 
 // Manual Cycle Management Commands
@@ -490,16 +534,15 @@ pub fn record_member_payment_with_discount(
     )
     .map_err(|e: AppError| e.to_string())?;
 
-    let net_amount = input.gross_amount - input.auction_discount;
+    db::audit::log_audit(conn, "CHIT_PAYMENT", "chit_cycle", Some(input.cycle_id),
+        &format!("₹{} by member {} (chit {}, cycle {})",
+            input.gross_amount, input.member_id, input.chit_id, input.cycle_id));
 
     Ok(RecordPaymentResponse {
         payment_id: payment.id,
-        net_amount,
+        net_amount: input.gross_amount,
         receipt_generated: true,
-        message: format!(
-            "Payment recorded: Gross {}, Discount {}, Net {} added to SHG balance",
-            input.gross_amount, input.auction_discount, net_amount
-        ),
+        message: format!("Payment of ₹{} recorded and added to SHG balance", input.gross_amount),
     })
 }
 
@@ -508,7 +551,8 @@ pub struct ProcessWinnerPayoutInput {
     pub chit_id: i64,
     pub cycle_id: i64,
     pub winning_member_id: i64,
-    pub winner_amount: f64,
+    pub bid_discount: f64,
+    pub commission: f64,
     pub payment_method: String,
     pub note: String,
 }
@@ -516,6 +560,9 @@ pub struct ProcessWinnerPayoutInput {
 #[derive(serde::Serialize)]
 pub struct WinnerPayoutResponse {
     pub voucher_generated: bool,
+    pub receipt_generated: bool,
+    pub winner_amount: f64,
+    pub commission: f64,
     pub bid_discount: f64,
     pub message: String,
 }
@@ -533,32 +580,31 @@ pub fn process_winner_payout(
 
     let payout_date = chrono::Utc::now().to_rfc3339();
 
-    // Get current cycle to calculate bid discount
-    let cycle = db::chits::get_current_cycle(conn, input.chit_id)
-        .map_err(|e: AppError| e.to_string())?
-        .ok_or_else(|| "No active cycle found".to_string())?;
-
-    let total_collection = cycle.payout_amount + cycle.bid_discount;
-    let bid_discount = total_collection - input.winner_amount;
-
-    db::chits::process_winner_payout(
+    let (winner_amount, commission) = db::chits::process_winner_payout(
         conn,
         input.chit_id,
         input.cycle_id,
         input.winning_member_id,
-        input.winner_amount,
+        input.bid_discount,
+        input.commission,
         &input.payment_method,
         &payout_date,
         &input.note,
     )
     .map_err(|e: AppError| e.to_string())?;
 
+    db::audit::log_audit(conn, "CHIT_WINNER_PAID", "chit_cycle", Some(input.cycle_id),
+        &format!("Winner ₹{winner_amount}, Commission ₹{commission} (chit {}, cycle {})",
+            input.chit_id, input.cycle_id));
+
     Ok(WinnerPayoutResponse {
         voucher_generated: true,
-        bid_discount,
+        receipt_generated: commission > 0.0,
+        winner_amount,
+        commission,
+        bid_discount: input.bid_discount,
         message: format!(
-            "Winner payout processed: {} paid, Bid discount: {}",
-            input.winner_amount, bid_discount
+            "Winner paid ₹{winner_amount}. Commission to SHG: ₹{commission}"
         ),
     })
 }
@@ -577,10 +623,19 @@ pub fn get_member_chit_groups(
 
     let mut stmt = conn
         .prepare(
-            "SELECT cg.id, cg.name, cg.total_amount, cg.months, cg.monthly_contribution,
+            "SELECT cg.id, cg.name, cg.total_amount, cg.months, cg.total_members, cg.monthly_contribution,
                     cg.commission_percent, cg.start_date, cg.status,
                     cm.joined_at,
-                    (SELECT MAX(cycle_no) FROM chit_cycles WHERE chit_id = cg.id) as current_cycle
+                    (SELECT MAX(cycle_no) FROM chit_cycles WHERE chit_id = cg.id) as current_cycle,
+                    COALESCE(cg.winners_per_cycle,1), COALESCE(cg.commission_per_winner,0),
+                    COALESCE(cg.fixed_prize_amount, cg.total_amount),
+                    (SELECT ccw.winner_type FROM chit_cycle_winners ccw
+                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as winner_type,
+                    (SELECT ccw.payout_amount FROM chit_cycle_winners ccw
+                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as payout_amount,
+                    (SELECT cc.cycle_no FROM chit_cycles cc
+                     JOIN chit_cycle_winners ccw ON cc.id = ccw.cycle_id
+                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as won_cycle_no
              FROM chit_groups cg
              JOIN chit_members cm ON cg.id = cm.chit_id
              WHERE cm.member_id = ?1
@@ -595,12 +650,19 @@ pub fn get_member_chit_groups(
                 "name": row.get::<_, String>(1)?,
                 "totalAmount": row.get::<_, f64>(2)?,
                 "months": row.get::<_, i64>(3)?,
-                "monthlyContribution": row.get::<_, f64>(4)?,
-                "commissionPercent": row.get::<_, f64>(5)?,
-                "startDate": row.get::<_, String>(6)?,
-                "status": row.get::<_, String>(7)?,
-                "joinedAt": row.get::<_, String>(8)?,
-                "currentCycle": row.get::<_, Option<i64>>(9)?.unwrap_or(0),
+                "totalMembers": row.get::<_, i64>(4)?,
+                "monthlyContribution": row.get::<_, f64>(5)?,
+                "commissionPercent": row.get::<_, f64>(6)?,
+                "startDate": row.get::<_, String>(7)?,
+                "status": row.get::<_, String>(8)?,
+                "joinedAt": row.get::<_, String>(9)?,
+                "currentCycle": row.get::<_, Option<i64>>(10)?.unwrap_or(0),
+                "winnersPerCycle": row.get::<_, i64>(11)?,
+                "commissionPerWinner": row.get::<_, f64>(12)?,
+                "fixedPrizeAmount": row.get::<_, f64>(13)?,
+                "winnerType": row.get::<_, Option<String>>(14)?,
+                "payoutAmount": row.get::<_, Option<f64>>(15)?,
+                "wonCycleNo": row.get::<_, Option<i64>>(16)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -614,7 +676,6 @@ pub fn get_member_chit_groups(
 
 // Chit Past Data Entry Commands
 
-/// Record past chit cycle data for migration from books
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberPaymentInput {
@@ -623,13 +684,25 @@ pub struct MemberPaymentInput {
     pub payment_method: String,
 }
 
+/// Past winner — fixed or auction.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PastWinnerInput {
+    pub member_id: i64,
+    pub winner_type: String,   // "FIXED" or "AUCTION"
+    pub bid_discount: f64,     // 0 for FIXED
+    pub commission: f64,
+    pub payout_amount: f64,
+    pub payment_method: String,
+}
+
 #[derive(serde::Serialize)]
 pub struct RecordPastCycleResponse {
     pub cycle_id: i64,
     pub total_collected: f64,
-    pub bid_discount: f64,
-    pub payout_amount: f64,
-    pub net_to_shg: f64,
+    pub total_bid_discounts: f64,
+    pub auction_discount_per_member: f64,
+    pub winner_count: usize,
 }
 
 #[tauri::command]
@@ -638,9 +711,8 @@ pub fn record_past_chit_cycle(
     chit_id: i64,
     cycle_no: i64,
     auction_date: String,
-    winning_member_id: Option<i64>,
-    bid_discount: f64,
-    winner_payout: f64,
+    winners: Vec<PastWinnerInput>,
+    auction_discount_per_member: f64,
     member_payments: Vec<MemberPaymentInput>,
 ) -> Result<RecordPastCycleResponse, String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
@@ -649,42 +721,105 @@ pub fn record_past_chit_cycle(
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
-    // Convert member payments to the format expected by db function
+    db_settings::assert_past_data_unlocked(conn).map_err(|e| e.to_string())?;
+
+    let winner_inputs: Vec<db::chits_past_entry::PastWinnerInput<'_>> = winners.iter().map(|w| {
+        db::chits_past_entry::PastWinnerInput {
+            member_id: w.member_id,
+            winner_type: w.winner_type.as_str(),
+            bid_discount: w.bid_discount,
+            commission: w.commission,
+            payout_amount: w.payout_amount,
+            payment_method: w.payment_method.as_str(),
+        }
+    }).collect();
+
     let payments: Vec<(i64, f64, &str)> = member_payments
         .iter()
         .map(|p| (p.member_id, p.amount, p.payment_method.as_str()))
         .collect();
 
     db::chits_past_entry::record_past_chit_cycle(
-        conn,
-        chit_id,
-        cycle_no,
-        &auction_date,
-        winning_member_id,
-        bid_discount,
-        winner_payout,
-        &payments,
-    )
-    .map_err(|e: AppError| e.to_string())?;
+        conn, chit_id, cycle_no, &auction_date,
+        &winner_inputs, auction_discount_per_member, &payments,
+    ).map_err(|e: AppError| e.to_string())?;
 
-    // Get the cycle details to return
     let cycle_id: i64 = conn.query_row(
         "SELECT id FROM chit_cycles WHERE chit_id = ?1 AND cycle_no = ?2",
         (chit_id, cycle_no),
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
 
-    let total_collected: f64 = payments.iter().map(|(_, amount, _)| amount).sum();
-    let payout_amount = total_collected - bid_discount;
-    let net_to_shg = total_collected - bid_discount - winner_payout;
+    let total_collected: f64 = payments.iter().map(|(_, a, _)| a).sum();
+    let total_bid_discounts: f64 = winners.iter().map(|w| w.bid_discount).sum();
+    let winner_count = winners.len();
+
+    db::audit::log_audit(conn, "CHIT_PAST_CYCLE", "chit_cycle", Some(cycle_id),
+        &format!("Cycle {cycle_no} chit {chit_id} — {winner_count} winner(s), discount Rs.{auction_discount_per_member:.2}/member, {} members",
+            member_payments.len()));
 
     Ok(RecordPastCycleResponse {
         cycle_id,
         total_collected,
-        bid_discount,
-        payout_amount,
-        net_to_shg,
+        total_bid_discounts,
+        auction_discount_per_member,
+        winner_count,
     })
+}
+
+/// Bulk past cycle entry — records multiple cycles assuming all members paid.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkAuctionWinnerCmd {
+    pub member_id: i64,
+    pub bid_discount: f64,
+    pub payment_method: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkCycleInputCmd {
+    pub cycle_no: i64,
+    pub auction_date: String,
+    pub fixed_winner_member_id: Option<i64>,
+    pub fixed_winner_payment_method: String,
+    pub auction_winners: Vec<BulkAuctionWinnerCmd>,
+}
+
+#[tauri::command]
+pub fn record_bulk_past_chit_cycles(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycles: Vec<BulkCycleInputCmd>,
+) -> Result<usize, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db_settings::assert_past_data_unlocked(conn).map_err(|e| e.to_string())?;
+
+    let inputs: Vec<db::chits_past_entry::BulkCycleInput> = cycles.into_iter().map(|c| {
+        db::chits_past_entry::BulkCycleInput {
+            cycle_no: c.cycle_no,
+            auction_date: c.auction_date,
+            fixed_winner_member_id: c.fixed_winner_member_id,
+            fixed_winner_payment_method: c.fixed_winner_payment_method,
+            auction_winners: c.auction_winners.into_iter().map(|w| {
+                db::chits_past_entry::BulkAuctionWinner {
+                    member_id: w.member_id,
+                    bid_discount: w.bid_discount,
+                    payment_method: w.payment_method,
+                }
+            }).collect(),
+        }
+    }).collect();
+
+    let count = db::chits_past_entry::record_bulk_past_chit_cycles(conn, chit_id, &inputs)
+        .map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_BULK_PAST_ENTRY", "chit_group", Some(chit_id),
+        &format!("{count} past cycles bulk-entered for chit {chit_id}"));
+
+    Ok(count)
 }
 
 #[tauri::command]
@@ -729,5 +864,109 @@ pub fn get_chit_migration_status(
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
     db::chits_past_entry::get_chit_migration_status(conn, chit_id)
+        .map_err(|e: AppError| e.to_string())
+}
+
+// ── New configurable chit commands ────────────────────────────────────────
+
+/// Get eligibility list for a cycle.
+#[tauri::command]
+pub fn get_cycle_eligibility(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycle_id: i64,
+) -> Result<Vec<db::chits::MemberEligibility>, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::get_cycle_eligibility(conn, chit_id, cycle_id)
+        .map_err(|e: AppError| e.to_string())
+}
+
+/// Admin override: flip eligibility for one member in a cycle.
+#[tauri::command]
+pub fn override_member_eligibility(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycle_id: i64,
+    member_id: i64,
+    eligible: bool,
+    reason: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::override_member_eligibility(conn, chit_id, cycle_id, member_id, eligible, &reason)
+        .map_err(|e: AppError| e.to_string())?;
+    db::audit::log_audit(conn, "ELIGIBILITY_OVERRIDE", "chit_cycle", Some(cycle_id),
+        &format!("Member {member_id} set to {} by admin: {reason}", if eligible { "eligible" } else { "ineligible" }));
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuctionWinnerInput {
+    pub member_id: i64,
+    pub bid_discount: f64,
+    pub payment_method: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ProcessWinnersResponse {
+    pub auction_discount_per_member: f64,
+    pub winners: Vec<db::chits::ChitCycleWinner>,
+    pub message: String,
+}
+
+/// Record all winners for a cycle (fixed + auction), compute and store the auction discount.
+#[tauri::command]
+pub fn process_chit_cycle_winners(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycle_id: i64,
+    fixed_winner_member_id: Option<i64>,
+    fixed_winner_payment_method: Option<String>,
+    auction_winners: Vec<AuctionWinnerInput>,
+    override_discount_per_member: Option<f64>,
+) -> Result<ProcessWinnersResponse, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let fixed = fixed_winner_member_id.zip(fixed_winner_payment_method.as_deref().map(str::to_uppercase))
+        .map(|(id, pm)| (id, pm));
+
+    let auction: Vec<(i64, f64, &str)> = auction_winners.iter()
+        .map(|w| (w.member_id, w.bid_discount, w.payment_method.as_str()))
+        .collect();
+
+    let fixed_ref: Option<(i64, &str)> = fixed.as_ref().map(|(id, pm)| (*id, pm.as_str()));
+
+    let discount = db::chits::process_cycle_winners(
+        conn, chit_id, cycle_id, fixed_ref, &auction, override_discount_per_member,
+    ).map_err(|e: AppError| e.to_string())?;
+
+    let winners = db::chits::get_cycle_winners(conn, cycle_id)
+        .map_err(|e: AppError| e.to_string())?;
+
+    let winner_count = winners.len();
+    db::audit::log_audit(conn, "CHIT_CYCLE_WINNERS", "chit_cycle", Some(cycle_id),
+        &format!("{winner_count} winners processed, auction discount Rs.{discount:.2}/member"));
+
+    Ok(ProcessWinnersResponse {
+        auction_discount_per_member: discount,
+        winners,
+        message: format!(
+            "{winner_count} winner(s) processed. Auction discount: Rs.{discount:.2} per eligible member next cycle."
+        ),
+    })
+}
+
+/// Get winners for a cycle.
+#[tauri::command]
+pub fn get_chit_cycle_winners(
+    state: State<Mutex<AppState>>,
+    cycle_id: i64,
+) -> Result<Vec<db::chits::ChitCycleWinner>, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::get_cycle_winners(conn, cycle_id)
         .map_err(|e: AppError| e.to_string())
 }

@@ -10,6 +10,12 @@ import {
   Palette,
   Save,
   Check,
+  Lock,
+  LockOpen,
+  RefreshCw,
+  Download,
+  FileText,
+  Wrench,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -23,6 +29,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { PageHeader } from '@/components/page-header'
 import { Spinner } from '@/components/ui/spinner'
 import { invoke } from '@tauri-apps/api/core'
+import { check as checkUpdate } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { save as saveDialog } from '@tauri-apps/plugin-dialog'
+import { readDir, readFile, writeFile, BaseDirectory } from '@tauri-apps/plugin-fs'
 import {
   getAllSettings,
   saveAllSettings,
@@ -34,6 +44,9 @@ import {
   changeDatabasePassword,
   getBackupList,
   verifyMasterPassword,
+  getPastDataLockStatus,
+  lockPastDataEntry,
+  unlockPastDataEntry,
 } from '@/lib/api/settings'
 import { useAppearance } from '@/lib/appearance-context'
 import { useSettings } from '@/lib/settings-context'
@@ -42,23 +55,43 @@ import type { AppSettings, BackupInfo } from '@/lib/types'
 export default function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false)
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false)
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null)
+  const [isExportingLogs, setIsExportingLogs] = useState(false)
+  const [isDiagnosing, setIsDiagnosing] = useState(false)
+  const [diagnosticText, setDiagnosticText] = useState<string | null>(null)
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [isRestoreLoading, setIsRestoreLoading] = useState(false)
   const [clearDataDialogOpen, setClearDataDialogOpen] = useState(false)
   const [clearDataPassword, setClearDataPassword] = useState('')
   const [isVerifyingPassword, setIsVerifyingPassword] = useState(false)
+  const [changeAdminPinDialogOpen, setChangeAdminPinDialogOpen] = useState(false)
+  const [currentAdminPin, setCurrentAdminPin] = useState('')
+  const [newAdminPin, setNewAdminPin] = useState('')
+  const [confirmAdminPin, setConfirmAdminPin] = useState('')
+  const [isChangingAdminPin, setIsChangingAdminPin] = useState(false)
+  const [pastDataLocked, setPastDataLocked] = useState(false)
+  const [shgOpeningLocked, setShgOpeningLocked] = useState(false)
+  const [shgOpeningCash, setShgOpeningCash] = useState('')
+  const [shgOpeningBank, setShgOpeningBank] = useState('')
+  const [shgOpeningExisting, setShgOpeningExisting] = useState({ cash: 0, bank: 0 })
+  const [isSavingOpening, setIsSavingOpening] = useState(false)
+  const [lockDialogOpen, setLockDialogOpen] = useState(false)
+  const [unlockDialogOpen, setUnlockDialogOpen] = useState(false)
+  const [unlockAdminPin, setUnlockAdminPin] = useState('')
+  const [isTogglingLock, setIsTogglingLock] = useState(false)
   
-  const { settings: globalSettings, updateSettings, refreshSettings } = useSettings()
+  const { settings: globalSettings, updateSettings, refreshSettings, pastDataLocked: globalLocked, refreshPastDataLock } = useSettings()
   const appearance = useAppearance()
 
-  // Local state for form - sync with global settings
+  // Local state for form — initialised empty; synced from DB via useEffect below.
   const [settings, setSettings] = useState<AppSettings>({
     general: {
-      groupName: 'Shakti Self Help Group',
-      registrationNumber: 'SHG-2024-001234',
-      address: 'Village Center, Main Road',
-      contactPhone: '9876543210',
-      contactEmail: 'shakti.shg@example.com',
+      groupName: '',
+      registrationNumber: '',
+      address: '',
+      contactPhone: '',
+      contactEmail: '',
     },
     notifications: {
       enableNotifications: true,
@@ -84,11 +117,11 @@ export default function SettingsPage() {
     if (globalSettings) {
       setSettings({
         general: {
-          groupName: globalSettings.general.groupName || 'Shakti Self Help Group',
-          registrationNumber: globalSettings.general.registrationNumber || 'SHG-2024-001234',
-          address: globalSettings.general.address || 'Village Center, Main Road',
-          contactPhone: globalSettings.general.contactPhone || '9876543210',
-          contactEmail: globalSettings.general.contactEmail || 'shakti.shg@example.com',
+          groupName: globalSettings.general.groupName || '',
+          registrationNumber: globalSettings.general.registrationNumber || '',
+          address: globalSettings.general.address || '',
+          contactPhone: globalSettings.general.contactPhone || '',
+          contactEmail: globalSettings.general.contactEmail || '',
         },
         notifications: {
           enableNotifications: globalSettings.notifications.enableNotifications ?? true,
@@ -111,6 +144,72 @@ export default function SettingsPage() {
       })
     }
   }, [globalSettings, appearance.theme, appearance.language])
+
+  useEffect(() => { setPastDataLocked(globalLocked) }, [globalLocked])
+
+  const handleSetShgOpeningBalance = async () => {
+    const cash = parseFloat(shgOpeningCash) || 0
+    const bank = parseFloat(shgOpeningBank) || 0
+    if (cash < 0 || bank < 0) { toast.error('Amounts cannot be negative'); return }
+    if (cash === 0 && bank === 0) { toast.error('Enter at least one non-zero balance'); return }
+    setIsSavingOpening(true)
+    try {
+      await invoke('set_shg_opening_balance', { cash, bank })
+      setShgOpeningLocked(true)
+      setShgOpeningExisting({ cash, bank })
+      setShgOpeningCash('')
+      setShgOpeningBank('')
+      toast.success('SHG opening balance set and locked')
+    } catch (err: any) {
+      toast.error(err?.toString() || 'Failed to set opening balance')
+    } finally {
+      setIsSavingOpening(false)
+    }
+  }
+
+  // Load SHG opening balance status on mount
+  useEffect(() => {
+    invoke<{ locked: boolean; cash: number; bank: number }>('get_shg_opening_status')
+      .then(s => {
+        setShgOpeningLocked(s.locked)
+        setShgOpeningExisting({ cash: s.cash, bank: s.bank })
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleLockPastData = async () => {
+    setIsTogglingLock(true)
+    try {
+      const res = await lockPastDataEntry()
+      if (res.success) {
+        setLockDialogOpen(false)
+        await refreshPastDataLock()
+        toast.success('Past data entry is now locked')
+      } else {
+        toast.error(res.error || 'Failed to lock')
+      }
+    } finally {
+      setIsTogglingLock(false)
+    }
+  }
+
+  const handleUnlockPastData = async () => {
+    if (!unlockAdminPin.trim()) { toast.error('Enter admin PIN'); return }
+    setIsTogglingLock(true)
+    try {
+      const res = await unlockPastDataEntry(unlockAdminPin)
+      if (res.success) {
+        setUnlockDialogOpen(false)
+        setUnlockAdminPin('')
+        await refreshPastDataLock()
+        toast.success('Past data entry unlocked')
+      } else {
+        toast.error(res.error || 'Incorrect admin PIN')
+      }
+    } finally {
+      setIsTogglingLock(false)
+    }
+  }
 
   const handleSave = async () => {
     setIsSaving(true)
@@ -331,6 +430,37 @@ export default function SettingsPage() {
     }
   }
 
+  const handleChangeAdminPin = async () => {
+    if (!currentAdminPin.trim()) {
+      toast.error('Please enter your current admin PIN')
+      return
+    }
+    if (newAdminPin.length < 4) {
+      toast.error('New admin PIN must be at least 4 characters')
+      return
+    }
+    if (newAdminPin !== confirmAdminPin) {
+      toast.error('New admin PINs do not match')
+      return
+    }
+    setIsChangingAdminPin(true)
+    try {
+      await invoke('change_admin_pin', {
+        currentAdminPin: currentAdminPin,
+        newAdminPin: newAdminPin,
+      })
+      toast.success('Admin PIN changed successfully')
+      setChangeAdminPinDialogOpen(false)
+      setCurrentAdminPin('')
+      setNewAdminPin('')
+      setConfirmAdminPin('')
+    } catch (error) {
+      toast.error((error as string) || 'Failed to change admin PIN')
+    } finally {
+      setIsChangingAdminPin(false)
+    }
+  }
+
   const handleThemeChange = (theme: 'light' | 'dark' | 'system') => {
     setSettings(prev => ({
       ...prev,
@@ -377,9 +507,6 @@ export default function SettingsPage() {
         description="Manage your SHG application settings"
       >
         <div className="flex gap-2">
-          <Button variant="outline" onClick={handleDebugSettings}>
-            Debug Settings
-          </Button>
           <Button onClick={handleSave} disabled={isSaving}>
             {isSaving ? (
               <>
@@ -527,14 +654,14 @@ export default function SettingsPage() {
 
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <Label>Change Database Password</Label>
+                  <Label>Change Admin PIN</Label>
                   <p className="text-sm text-muted-foreground">
-                    Update the encryption password
+                    Update the recovery PIN used to reset your main PIN
                   </p>
                 </div>
-                <Button variant="outline" size="sm">
+                <Button variant="outline" size="sm" onClick={() => setChangeAdminPinDialogOpen(true)}>
                   <Shield className="mr-2 h-4 w-4" />
-                  Change Password
+                  Change Admin PIN
                 </Button>
               </div>
             </CardContent>
@@ -702,6 +829,104 @@ export default function SettingsPage() {
 
               <Separator />
 
+              {/* SHG Opening Balance */}
+              <div className={`p-4 rounded-lg border ${shgOpeningLocked ? 'border-green-500 bg-green-50 dark:bg-green-950/20' : 'border-blue-400 bg-blue-50 dark:bg-blue-950/20'}`}>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    {shgOpeningLocked
+                      ? <Lock className="h-4 w-4 text-green-600" />
+                      : <LockOpen className="h-4 w-4 text-blue-600" />}
+                    <h4 className="font-medium">SHG Opening Balance</h4>
+                  </div>
+                  {shgOpeningLocked ? (
+                    <div className="space-y-1">
+                      <p className="text-sm text-green-700 font-medium">Opening balance is set and locked.</p>
+                      <p className="text-sm text-muted-foreground">
+                        Cash: ₹{shgOpeningExisting.cash.toLocaleString('en-IN')} &nbsp;|&nbsp;
+                        Bank: ₹{shgOpeningExisting.bank.toLocaleString('en-IN')}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        This is the starting balance for the SHG. All future transactions will reflect on top of this.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        Enter the current cash and bank balance of the SHG before you start recording transactions.
+                        This will be the starting point and will be locked once set.
+                      </p>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                          <Label htmlFor="opening-cash">Cash Balance (₹)</Label>
+                          <Input
+                            id="opening-cash"
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="0.00"
+                            value={shgOpeningCash}
+                            onChange={e => setShgOpeningCash(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="opening-bank">Bank Balance (₹)</Label>
+                          <Input
+                            id="opening-bank"
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="0.00"
+                            value={shgOpeningBank}
+                            onChange={e => setShgOpeningBank(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <Button
+                        onClick={handleSetShgOpeningBalance}
+                        disabled={isSavingOpening}
+                        className="w-full"
+                      >
+                        {isSavingOpening && <Spinner className="mr-2 h-4 w-4" />}
+                        <Lock className="mr-2 h-4 w-4" />
+                        Set & Lock Opening Balance
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className={`p-4 rounded-lg border ${pastDataLocked ? 'border-amber-400 bg-amber-50 dark:bg-amber-950/20' : 'border-muted'}`}>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      {pastDataLocked
+                        ? <Lock className="h-4 w-4 text-amber-600" />
+                        : <LockOpen className="h-4 w-4 text-muted-foreground" />
+                      }
+                      <h4 className="font-medium">Past Data Entry Lock</h4>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {pastDataLocked
+                        ? 'Past data entry is locked. Member opening data, past loans, and past chit cycles cannot be modified.'
+                        : 'Lock past data entry once all historical records are entered to prevent accidental changes.'}
+                    </p>
+                  </div>
+                  {pastDataLocked ? (
+                    <Button variant="outline" size="sm" onClick={() => setUnlockDialogOpen(true)}>
+                      <LockOpen className="mr-2 h-4 w-4" />
+                      Unlock
+                    </Button>
+                  ) : (
+                    <Button variant="outline" size="sm" onClick={() => setLockDialogOpen(true)}>
+                      <Lock className="mr-2 h-4 w-4" />
+                      Lock
+                    </Button>
+                  )}
+                </div>
+              </div>
+
               <div className="p-4 rounded-lg border border-destructive/20 bg-destructive/5">
                 <h4 className="font-medium text-destructive mb-2">Danger Zone</h4>
                 <p className="text-sm text-muted-foreground mb-3">
@@ -782,6 +1007,179 @@ export default function SettingsPage() {
         </TabsContent>
       </Tabs>
 
+      {/* ── Support & Updates ─────────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wrench className="h-5 w-5" />
+            Support & Updates
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
+
+          {/* Auto-update */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Software Updates</p>
+            <p className="text-xs text-muted-foreground">
+              Checks GitHub for a newer version and installs it automatically.
+              The app will restart after installation.
+            </p>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                disabled={isCheckingUpdate}
+                onClick={async () => {
+                  setIsCheckingUpdate(true)
+                  setUpdateStatus(null)
+                  try {
+                    const update = await checkUpdate()
+                    if (update) {
+                      setUpdateStatus(`Update available: v${update.version}. Downloading…`)
+                      await update.downloadAndInstall()
+                      setUpdateStatus('Installed. Restarting…')
+                      await relaunch()
+                    } else {
+                      setUpdateStatus('You are on the latest version.')
+                    }
+                  } catch (err: any) {
+                    setUpdateStatus('Could not check for updates. Check your internet connection.')
+                  } finally {
+                    setIsCheckingUpdate(false)
+                  }
+                }}
+              >
+                {isCheckingUpdate
+                  ? <><Spinner className="mr-2 h-4 w-4" />Checking…</>
+                  : <><RefreshCw className="mr-2 h-4 w-4" />Check for Updates</>}
+              </Button>
+              {updateStatus && (
+                <p className="text-sm text-muted-foreground">{updateStatus}</p>
+              )}
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Log export */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Export Logs</p>
+            <p className="text-xs text-muted-foreground">
+              Saves the application log file to a location you choose.
+              Send this to support when reporting a problem.
+            </p>
+            <Button
+              variant="outline"
+              disabled={isExportingLogs}
+              onClick={async () => {
+                setIsExportingLogs(true)
+                try {
+                  const logDir = await invoke<string>('get_log_dir')
+                  // Read the most recent log file
+                  const files = await readDir(logDir)
+                  const logFiles = files
+                    .filter(f => f.name?.endsWith('.log'))
+                    .sort((a, b) => (b.name ?? '').localeCompare(a.name ?? ''))
+                  if (logFiles.length === 0) {
+                    toast.error('No log files found yet. Use the app a bit first.')
+                    return
+                  }
+                  const latestLog = logFiles[0]
+                  const content = await readFile(`${logDir}/${latestLog.name}`)
+                  const savePath = await saveDialog({
+                    defaultPath: `shg-manager-logs-${new Date().toISOString().split('T')[0]}.log`,
+                    filters: [{ name: 'Log Files', extensions: ['log', 'txt'] }],
+                  })
+                  if (savePath) {
+                    await writeFile(savePath, content)
+                    toast.success(`Log exported to ${savePath}`)
+                  }
+                } catch (err: any) {
+                  toast.error('Failed to export logs: ' + err?.toString())
+                } finally {
+                  setIsExportingLogs(false)
+                }
+              }}
+            >
+              {isExportingLogs
+                ? <><Spinner className="mr-2 h-4 w-4" />Exporting…</>
+                : <><Download className="mr-2 h-4 w-4" />Export Logs</>}
+            </Button>
+          </div>
+
+          <Separator />
+
+          {/* Diagnostic report */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Diagnostic Report</p>
+            <p className="text-xs text-muted-foreground">
+              Generates a summary of the app state (version, member count, balances).
+              Share this with support for quick diagnosis — contains no personal data.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                disabled={isDiagnosing}
+                onClick={async () => {
+                  setIsDiagnosing(true)
+                  try {
+                    const report = await invoke<any>('get_diagnostic_report')
+                    const text = [
+                      `SHG Manager Diagnostic Report`,
+                      `Generated: ${report.generatedAt}`,
+                      ``,
+                      `App Version:       ${report.appVersion}`,
+                      `OS:                ${report.os} (${report.arch})`,
+                      `DB Connected:      ${report.dbConnected ? 'Yes' : 'No (DB not unlocked)'}`,
+                      ``,
+                      `Active Members:    ${report.memberCount}`,
+                      `Active Loans:      ${report.activeLoanCount}`,
+                      `Loans Outstanding: Rs. ${report.totalLoanOutstanding?.toFixed(2)}`,
+                      `Active Chit Groups: ${report.chitGroupCount}`,
+                      ``,
+                      `SHG Cash Balance:  Rs. ${report.shgCashBalance?.toFixed(2)}`,
+                      `SHG Bank Balance:  Rs. ${report.shgBankBalance?.toFixed(2)}`,
+                      ``,
+                      `Log Directory: ${report.logDir}`,
+                    ].join('\n')
+                    setDiagnosticText(text)
+                  } catch (err: any) {
+                    toast.error('Failed to generate report: ' + err?.toString())
+                  } finally {
+                    setIsDiagnosing(false)
+                  }
+                }}
+              >
+                {isDiagnosing
+                  ? <><Spinner className="mr-2 h-4 w-4" />Generating…</>
+                  : <><FileText className="mr-2 h-4 w-4" />Generate Report</>}
+              </Button>
+              {diagnosticText && (
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    const savePath = await saveDialog({
+                      defaultPath: `shg-diagnostic-${new Date().toISOString().split('T')[0]}.txt`,
+                      filters: [{ name: 'Text Files', extensions: ['txt'] }],
+                    })
+                    if (savePath) {
+                      await writeFile(savePath, new TextEncoder().encode(diagnosticText))
+                      toast.success('Report saved')
+                    }
+                  }}
+                >
+                  <Download className="mr-2 h-4 w-4" />Save Report
+                </Button>
+              )}
+            </div>
+            {diagnosticText && (
+              <pre className="mt-2 rounded-lg bg-muted p-3 text-xs font-mono whitespace-pre-wrap">
+                {diagnosticText}
+              </pre>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* About Section */}
       <Card>
         <CardHeader>
@@ -794,7 +1192,7 @@ export default function SettingsPage() {
           <div className="grid gap-4 sm:grid-cols-3 text-sm">
             <div>
               <p className="text-muted-foreground">Version</p>
-              <p className="font-medium">1.0.0</p>
+              <p className="font-medium">v1.0.0</p>
             </div>
             <div>
               <p className="text-muted-foreground">Built with</p>
@@ -854,6 +1252,128 @@ export default function SettingsPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setRestoreDialogOpen(false)}>
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Lock Past Data Dialog */}
+      <Dialog open={lockDialogOpen} onOpenChange={setLockDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lock className="h-4 w-4" /> Lock Past Data Entry
+            </DialogTitle>
+            <DialogDescription>
+              Once locked, no new member opening balances, past loans, or past chit cycles can be recorded.
+              You can unlock later using your admin PIN.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLockDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleLockPastData} disabled={isTogglingLock}>
+              {isTogglingLock ? <><Spinner className="mr-2 h-4 w-4" />Locking…</> : <><Lock className="mr-2 h-4 w-4" />Confirm Lock</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Unlock Past Data Dialog */}
+      <Dialog open={unlockDialogOpen} onOpenChange={setUnlockDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LockOpen className="h-4 w-4" /> Unlock Past Data Entry
+            </DialogTitle>
+            <DialogDescription>
+              Enter your admin PIN to re-enable past data entry. If no admin PIN has been set up, your main PIN will work.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <div className="space-y-2">
+              <Label htmlFor="unlockAdminPin">Admin PIN (or main PIN)</Label>
+              <Input
+                id="unlockAdminPin"
+                type="password"
+                placeholder="Enter admin PIN or main PIN"
+                value={unlockAdminPin}
+                onChange={e => setUnlockAdminPin(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleUnlockPastData() }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setUnlockDialogOpen(false); setUnlockAdminPin('') }}>Cancel</Button>
+            <Button onClick={handleUnlockPastData} disabled={isTogglingLock}>
+              {isTogglingLock ? <><Spinner className="mr-2 h-4 w-4" />Verifying…</> : <><LockOpen className="mr-2 h-4 w-4" />Unlock</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change Admin PIN Dialog */}
+      <Dialog open={changeAdminPinDialogOpen} onOpenChange={setChangeAdminPinDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Change Admin PIN</DialogTitle>
+            <DialogDescription>
+              The admin PIN is used to recover access when you forget your main PIN. Enter your current admin PIN and choose a new one.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="currentAdminPin">Current Admin PIN</Label>
+              <Input
+                id="currentAdminPin"
+                type="password"
+                placeholder="Enter current admin PIN"
+                value={currentAdminPin}
+                onChange={(e) => setCurrentAdminPin(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newAdminPin">New Admin PIN</Label>
+              <Input
+                id="newAdminPin"
+                type="password"
+                placeholder="At least 4 characters"
+                value={newAdminPin}
+                onChange={(e) => setNewAdminPin(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirmAdminPin">Confirm New Admin PIN</Label>
+              <Input
+                id="confirmAdminPin"
+                type="password"
+                placeholder="Repeat new admin PIN"
+                value={confirmAdminPin}
+                onChange={(e) => setConfirmAdminPin(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleChangeAdminPin() }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setChangeAdminPinDialogOpen(false)
+                setCurrentAdminPin('')
+                setNewAdminPin('')
+                setConfirmAdminPin('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleChangeAdminPin} disabled={isChangingAdminPin}>
+              {isChangingAdminPin ? (
+                <>
+                  <Spinner className="mr-2 h-4 w-4" />
+                  Updating...
+                </>
+              ) : (
+                'Update Admin PIN'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

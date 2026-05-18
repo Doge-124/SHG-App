@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, CreditCard, MoreHorizontal, History } from 'lucide-react'
+import { Plus, CreditCard, MoreHorizontal, History, CalendarClock } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +28,7 @@ import { useApp } from '@/context/app-context'
 import { useSettings } from '@/lib/settings-context'
 import { issueLoan, recordRepayment } from '@/lib/api/loans'
 import { PastLoanForm } from '@/components/forms/past-loan-form'
+import { LoanScheduleDialog } from '@/components/loan-schedule-dialog'
 import { formatCurrency, formatDate } from '@/lib/format'
 import type { Loan, LoanFormData } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -40,6 +41,7 @@ export default function LoansPage() {
   const [isPastFormOpen, setIsPastFormOpen] = useState(false)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [repaymentLoan, setRepaymentLoan] = useState<Loan | null>(null)
+  const [scheduleLoanId, setScheduleLoanId] = useState<number | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paid' | 'defaulted'>('all')
   const [loanTypeFilter, setLoanTypeFilter] = useState<'all' | 'monthly' | 'weekly'>('all')
@@ -84,13 +86,14 @@ export default function LoansPage() {
     }
   }
 
-  const handleRepayment = async (data: { amount: number; paymentMethod: 'cash' | 'bank' }) => {
+  const handleRepayment = async (data: { amount: number; paymentMethod: 'cash' | 'bank'; interestAmount: number }) => {
     if (!repaymentLoan) return
     setIsSubmitting(true)
     try {
       const response = await recordRepayment(
         repaymentLoan.id,
         data.amount,
+        data.interestAmount,
         data.paymentMethod
       )
       if (response.success) {
@@ -129,8 +132,8 @@ export default function LoansPage() {
       cell: (loan) => (
         <div>
           <span className="font-medium">{formatCurrency(loan.amount)}</span>
-          {loan.interestRate > 0 && (
-            <p className="text-xs text-muted-foreground">{loan.interestRate}% interest</p>
+          {loan.dailyInterestRate > 0 && (
+            <p className="text-xs text-muted-foreground">{loan.dailyInterestRate}%/day</p>
           )}
         </div>
       ),
@@ -208,6 +211,10 @@ export default function LoansPage() {
                 Record Repayment
               </DropdownMenuItem>
             )}
+            <DropdownMenuItem onClick={() => setScheduleLoanId(parseInt(loan.id))}>
+              <CalendarClock className="mr-2 h-4 w-4" />
+              View Schedule
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -346,6 +353,11 @@ export default function LoansPage() {
         open={isPastFormOpen}
         onOpenChange={setIsPastFormOpen}
         onSuccess={refreshLoans}
+      />
+      <LoanScheduleDialog
+        loanId={scheduleLoanId}
+        open={scheduleLoanId !== null}
+        onOpenChange={open => { if (!open) setScheduleLoanId(null) }}
       />
     </div>
   )

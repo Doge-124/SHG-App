@@ -34,7 +34,7 @@ interface DataTableProps<T> {
   onRowClick?: (item: T) => void
 }
 
-export function DataTable<T extends { id: string }>({
+export function DataTable<T extends { id: string | number }>({
   data,
   columns,
   searchPlaceholder = 'Search...',

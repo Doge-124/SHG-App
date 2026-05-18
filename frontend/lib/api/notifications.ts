@@ -21,30 +21,24 @@ export interface NotificationAlerts {
   upcomingChitCycles: ChitCycleUpcomingAlert[]
 }
 
-/** Compute the expected payoff date for a loan. */
-function loanDueDate(issuedAt: string, loanType: string): Date {
-  const d = new Date(issuedAt)
-  if (loanType === 'weekly') {
-    return new Date(d.getTime() + 84 * 24 * 60 * 60 * 1000) // 12 weeks
-  }
-  d.setMonth(d.getMonth() + 12) // 12-month term
-  return d
-}
-
 /** Fetch all actionable alerts by querying existing DB data. */
 export async function getNotificationAlerts(): Promise<NotificationAlerts> {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
   // ── Overdue active loans ────────────────────────────────────────────────
+  // Weekly loans: 100-day term + 20-day grace = overdue after 120 days.
+  // Monthly loans: open-ended, no due date — not included in overdue alerts.
   const overdueLoans: LoanAlert[] = []
   try {
     const loansRes = await getLoans()
     if (loansRes.success && loansRes.data) {
       for (const loan of loansRes.data) {
         if (loan.status !== 'active') continue
-        const due = loanDueDate(loan.issuedAt, loan.loanType)
-        const daysOverdue = Math.floor((today.getTime() - due.getTime()) / 86_400_000)
+        if (loan.loanType !== 'weekly') continue // monthly loans have no fixed term
+        const issued = new Date(loan.issuedAt)
+        const graceEnd = new Date(issued.getTime() + 120 * 86_400_000) // 100-day term + 20-day grace
+        const daysOverdue = Math.floor((today.getTime() - graceEnd.getTime()) / 86_400_000)
         if (daysOverdue > 0) {
           overdueLoans.push({
             loanId: loan.id,

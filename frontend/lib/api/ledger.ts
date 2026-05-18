@@ -20,39 +20,22 @@ export async function recordReceipt(data: ReceiptFormData): Promise<ApiResponse<
     const reason = data.reasonType === 'Other' ? (data.customReason || 'Other transaction') : data.reasonType
     
     
-    // Use the combined reason to determine reference type
-    let referenceType = data.referenceType
-    if (!referenceType || referenceType === '') {
-      // For receipts with members, always use MEMBER_RECEIPT
-      if (data.memberId) {
-        referenceType = 'MEMBER_RECEIPT'
-      } else {
-        // Fallback to determining from reason if no member
-        const reasonLower = reason.toLowerCase()
-        
-        if (reasonLower.includes('donation') || reasonLower.includes('donate')) {
-          referenceType = 'DONATION'
-        } else if (reasonLower.includes('contribution') || reasonLower.includes('contribute')) {
-          referenceType = 'MEMBER_CONTRIBUTION'
-        } else if (reasonLower.includes('chit') || reasonLower.includes('chit payment')) {
-          referenceType = 'CHIT_PAYMENT'
-        } else if (reasonLower.includes('loan') || reasonLower.includes('repayment')) {
-          referenceType = 'LOAN_REPAYMENT'
-        } else {
-          referenceType = 'MEMBER_RECEIPT'
-        }
-      }
+    // Determine the correct reference type based on the reason chosen.
+    // MEMBER_CONTRIBUTION → updates both SHG balance AND member savings balance.
+    // MEMBER_RECEIPT      → updates SHG balance only (generic inflow, no member savings effect).
+    let referenceType: string
+    const reasonLower = reason.toLowerCase()
+
+    if (reasonLower === 'savings deposit') {
+      // Savings deposits must update the member's balance as well as the SHG balance.
+      referenceType = 'MEMBER_CONTRIBUTION'
+    } else if (reasonLower.includes('donation') || reasonLower.includes('donate')) {
+      referenceType = 'DONATION'
+    } else if (reasonLower.includes('grant')) {
+      referenceType = 'GRANT'
     } else {
-      // Convert form reference type to backend reference type
-      const typeMapping: { [key: string]: string } = {
-        'savings': 'MEMBER_CONTRIBUTION',
-        'loan_repayment': 'LOAN_REPAYMENT',
-        'chit_payment': 'CHIT_PAYMENT',
-        'grant': 'GRANT',
-        'donation': 'DONATION',
-        'other': 'MEMBER_RECEIPT'
-      }
-      referenceType = typeMapping[referenceType] || 'MEMBER_RECEIPT'
+      // Fine, Other, etc. — generic SHG inflow, no member balance effect.
+      referenceType = 'MEMBER_RECEIPT'
     }
     
     
@@ -226,7 +209,7 @@ export async function getVouchers(): Promise<ApiResponse<Voucher[]>> {
 
 export async function getShgBalances(): Promise<ApiResponse<{ cash: number; bank: number }>> {
   try {
-    const balances = await invoke('get_shg_balance') as { cash: number; bank: number }
+    const balances = await invoke('get_shg_balances') as { cash: number; bank: number }
     return { success: true, data: balances }
   } catch (error) {
     console.error('Failed to get SHG balances:', error)
@@ -261,29 +244,21 @@ export async function getDashboardStats(): Promise<ApiResponse<DashboardStats>> 
 
 export async function getRecentTransactions(): Promise<ApiResponse<Transaction[]>> {
   try {
-    // Use today's date for daily transactions
-    const today = new Date().toISOString().split('T')[0]
-    const dailyTxns = await invoke('daily_transactions', { 
-      date: today,
-      paymentMethod: null,
-      transactionType: null,
-      memberId: null
-    }) as any[]
-    
-    const transactions: Transaction[] = dailyTxns
-      .map((txn, index) => ({
-        id: txn.id.toString(),
-        type: txn.txn_type.toLowerCase(), // Use txn_type field and convert to lowercase
-        amount: Math.abs(txn.amount),
-        description: txn.reason,
-        paymentMethod: txn.payment_method.toLowerCase(),
-        createdAt: txn.created_at,
-      }))
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) // Sort by date, most recent first
-    
+    const raw = await invoke('get_recent_transactions', { limit: 20 }) as any[]
+
+    const transactions: Transaction[] = raw.map((txn: any) => ({
+      id: txn.id.toString(),
+      type: txn.txn_type.toLowerCase(),
+      amount: Math.abs(txn.amount),
+      description: txn.member_name
+        ? `${txn.reason} — ${txn.member_name}`
+        : txn.reason,
+      paymentMethod: txn.payment_method.toLowerCase(),
+      createdAt: txn.created_at,
+    }))
+
     return { success: true, data: transactions }
   } catch (error) {
-    console.error('Failed to get recent transactions:', error)
     return { success: false, error: 'Failed to load recent transactions' }
   }
 }

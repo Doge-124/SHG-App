@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod audit;
 pub mod members;
 pub mod loans;
 pub mod ledger;
@@ -7,3 +8,5 @@ pub mod reports;
 pub mod settings;
 pub mod contributions;
 pub mod daybook;
+pub mod trial_balance;
+pub mod support;

@@ -27,7 +27,11 @@ pub fn init_settings_table(conn: &mut Connection) -> Result<(), AppError> {
             notification_settings TEXT,
             data_settings TEXT,
             appearance_settings TEXT,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            past_data_locked INTEGER NOT NULL DEFAULT 0,
+            shg_opening_cash REAL NOT NULL DEFAULT 0,
+            shg_opening_bank REAL NOT NULL DEFAULT 0,
+            shg_opening_locked INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
@@ -303,6 +307,36 @@ pub fn save_data_settings(conn: &mut Connection, settings: &DataSettings) -> Res
     Ok(())
 }
 
+/// Return an error if past data entry is locked. Call this at the top of
+/// each past-data command before any write.
+pub fn assert_past_data_unlocked(conn: &Connection) -> Result<(), AppError> {
+    if get_past_data_locked(conn)? {
+        return Err(AppError::business(
+            "Past data entry is locked. Go to Settings → Data to unlock.",
+        ));
+    }
+    Ok(())
+}
+
+/// Read the past-data lock flag.
+pub fn get_past_data_locked(conn: &Connection) -> Result<bool, AppError> {
+    let locked: i64 = conn.query_row(
+        "SELECT COALESCE(past_data_locked, 0) FROM settings WHERE id = 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    Ok(locked != 0)
+}
+
+/// Set the past-data lock flag (true = locked).
+pub fn set_past_data_locked(conn: &mut Connection, locked: bool) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE settings SET past_data_locked = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        [locked as i64],
+    )?;
+    Ok(())
+}
+
 /// Get appearance settings
 pub fn get_appearance_settings(conn: &Connection) -> Result<AppearanceSettings, AppError> {
     let settings_json: String = conn.query_row(
@@ -327,5 +361,89 @@ pub fn save_appearance_settings(conn: &mut Connection, settings: &AppearanceSett
         params![settings_json],
     )?;
 
+    Ok(())
+}
+
+// ── SHG Opening Balance ────────────────────────────────────────────────────
+
+/// Returns whether the SHG opening balance has been locked.
+pub fn get_shg_opening_locked(conn: &Connection) -> Result<bool, AppError> {
+    let locked: i64 = conn.query_row(
+        "SELECT COALESCE(shg_opening_locked, 0) FROM settings WHERE id = 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    Ok(locked != 0)
+}
+
+#[derive(serde::Serialize)]
+pub struct ShgOpeningStatus {
+    pub locked: bool,
+    pub cash: f64,
+    pub bank: f64,
+}
+
+/// Returns the current SHG opening balance status (locked flag + amounts).
+pub fn get_shg_opening_status(conn: &Connection) -> Result<ShgOpeningStatus, AppError> {
+    let (locked, cash, bank): (i64, f64, f64) = conn.query_row(
+        "SELECT COALESCE(shg_opening_locked,0), COALESCE(shg_opening_cash,0), COALESCE(shg_opening_bank,0)
+         FROM settings WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((0, 0.0, 0.0));
+    Ok(ShgOpeningStatus { locked: locked != 0, cash, bank })
+}
+
+/// Set the SHG opening cash and bank balances, then lock them.
+///
+/// This directly updates `shg_balances` and records OPENING transactions
+/// in `shg_transactions`. Can only be called once (locked after first use).
+pub fn set_shg_opening_balance(
+    conn: &mut Connection,
+    cash: f64,
+    bank: f64,
+) -> Result<(), AppError> {
+    if get_shg_opening_locked(conn)? {
+        return Err(AppError::business(
+            "SHG opening balance has already been set and is locked.",
+        ));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = conn.transaction()?;
+
+    if cash > 0.0 {
+        tx.execute(
+            "INSERT INTO shg_transactions
+             (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
+             VALUES ('OPENING', ?1, 'SHG Opening Balance', 'CASH', 'OPENING', NULL, ?2)",
+            (cash, &now),
+        )?;
+        tx.execute(
+            "UPDATE shg_balances SET balance = balance + ?1 WHERE method = 'CASH'",
+            [cash],
+        )?;
+    }
+
+    if bank > 0.0 {
+        tx.execute(
+            "INSERT INTO shg_transactions
+             (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
+             VALUES ('OPENING', ?1, 'SHG Opening Balance', 'BANK', 'OPENING', NULL, ?2)",
+            (bank, &now),
+        )?;
+        tx.execute(
+            "UPDATE shg_balances SET balance = balance + ?1 WHERE method = 'BANK'",
+            [bank],
+        )?;
+    }
+
+    tx.execute(
+        "UPDATE settings SET shg_opening_cash = ?1, shg_opening_bank = ?2,
+         shg_opening_locked = 1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        (cash, bank),
+    )?;
+
+    tx.commit()?;
     Ok(())
 }

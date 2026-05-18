@@ -1,10 +1,10 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SHG Manager",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.shg.manager",
   "build": {
-    "frontendDist": "../frontend/.next",
+    "frontendDist": "../frontend/out",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "cd frontend && npm run dev",
     "beforeBuildCommand": "cd frontend && npm run build"
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "shg-manager",
-        "width": 800,
-        "height": 600,
+        "title": "SHG Manager",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
         "resizable": true,
         "fullscreen": false
       }
@@ -32,6 +34,26 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "SHG Manager",
+    "copyright": "© 2026 SHG Manager"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM1RUYxMjUwRUJBNEQ5RDYKUldUVzJhVHJVQkx2TmFKWDMxYVZ5eEEwZDJIckJYRTBBL2p0RWZsaDg2d1B4b2dUeURjT2hHa3gK",
+      "endpoints": [
+        "https://github.com/Doge-124/SHG-App/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
+    "log": {
+      "level": "info",
+      "targets": [
+        { "kind": "stdout" },
+        { "kind": "logdir", "filename": "shg-manager" }
+      ]
+    }
   }
 }

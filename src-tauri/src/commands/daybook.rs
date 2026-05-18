@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 use tauri::State;
 
-use crate::db::daybook::{DayBookSummary, get_day_book_summary};
+use crate::db::daybook::{DayBookSummary, get_day_book_summary, get_cash_book_summary, get_bank_book_summary};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -24,20 +24,14 @@ pub fn get_day_book(
     start_date: String,
     end_date: String,
 ) -> Result<DayBookSummary, String> {
-    // Validate date format
-    if start_date.len() != 10 || end_date.len() != 10 {
-        return Err("Invalid date format. Use YYYY-MM-DD".to_string());
-    }
+    // Validate date format with actual parsing (rejects nonsense like "99999-99-99").
+    let parsed_start = chrono::NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid start date — use YYYY-MM-DD format".to_string())?;
+    let parsed_end = chrono::NaiveDate::parse_from_str(&end_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid end date — use YYYY-MM-DD format".to_string())?;
 
-    // Validate date range
-    if start_date > end_date {
+    if parsed_start > parsed_end {
         return Err("Start date must be before or equal to end date".to_string());
-    }
-
-    // Prevent future date queries (optional restriction)
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    if start_date > today {
-        return Err("Cannot query future dates".to_string());
     }
 
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
@@ -46,13 +40,74 @@ pub fn get_day_book(
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
 
-    // Set time boundaries for the date range
-    // Start: beginning of start_date (00:00:00)
-    // End: end of end_date (23:59:59)
-    let start_datetime = format!("{}T00:00:00", start_date);
+    // Build comparison boundaries that handle mixed timestamp formats in the DB:
+    //   - Live transactions store full RFC3339:  "2026-04-28T10:30:00+00:00"
+    //   - Past-data entries store date-only:     "2026-04-28"
+    //
+    // Using the bare date as the lower bound means "2026-04-28" >= "2026-04-28" (equal,
+    // so it IS included). Appending T23:59:59 as the upper bound works for both formats
+    // because date-only strings are lexicographically less than any "date + T..." string
+    // with the same date prefix.
+    let start_datetime = start_date.clone();
     let end_datetime = format!("{}T23:59:59", end_date);
 
     let summary = get_day_book_summary(conn, &start_datetime, &end_datetime)
+        .map_err(|e: AppError| e.to_string())?;
+
+    Ok(summary)
+}
+
+/// Get cash book — CASH-only receipts and vouchers for a date range
+#[tauri::command]
+pub fn get_cash_book(
+    state: State<Mutex<AppState>>,
+    start_date: String,
+    end_date: String,
+) -> Result<DayBookSummary, String> {
+    let parsed_start = chrono::NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid start date — use YYYY-MM-DD format".to_string())?;
+    let parsed_end = chrono::NaiveDate::parse_from_str(&end_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid end date — use YYYY-MM-DD format".to_string())?;
+
+    if parsed_start > parsed_end {
+        return Err("Start date must be before or equal to end date".to_string());
+    }
+
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let start_datetime = start_date.clone();
+    let end_datetime = format!("{}T23:59:59", end_date);
+
+    let summary = get_cash_book_summary(conn, &start_datetime, &end_datetime)
+        .map_err(|e: AppError| e.to_string())?;
+
+    Ok(summary)
+}
+
+/// Get bank book — BANK-only receipts and vouchers for a date range
+#[tauri::command]
+pub fn get_bank_book(
+    state: State<Mutex<AppState>>,
+    start_date: String,
+    end_date: String,
+) -> Result<DayBookSummary, String> {
+    let parsed_start = chrono::NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid start date — use YYYY-MM-DD format".to_string())?;
+    let parsed_end = chrono::NaiveDate::parse_from_str(&end_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid end date — use YYYY-MM-DD format".to_string())?;
+
+    if parsed_start > parsed_end {
+        return Err("Start date must be before or equal to end date".to_string());
+    }
+
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let start_datetime = start_date.clone();
+    let end_datetime = format!("{}T23:59:59", end_date);
+
+    let summary = get_bank_book_summary(conn, &start_datetime, &end_datetime)
         .map_err(|e: AppError| e.to_string())?;
 
     Ok(summary)

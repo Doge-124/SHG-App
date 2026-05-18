@@ -125,7 +125,7 @@ export default function DashboardPage() {
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-lg">Recent Transactions</CardTitle>
             <Button variant="ghost" size="sm" asChild>
-              <Link href="/reports">View All</Link>
+              <Link href="/daybook">View All</Link>
             </Button>
           </CardHeader>
           <CardContent>
@@ -150,14 +150,14 @@ export default function DashboardPage() {
                       <div
                         className={cn(
                           'flex h-10 w-10 items-center justify-center rounded-full',
-                          transaction.type === 'receipt' || transaction.type === 'repayment'
+                          ['receipt', 'repayment', 'opening', 'contribution'].includes(transaction.type)
                             ? 'bg-success/10 text-success'
-                            : transaction.type === 'voucher' || transaction.type === 'loan'
+                            : ['voucher', 'loan'].includes(transaction.type)
                             ? 'bg-destructive/10 text-destructive'
                             : 'bg-primary/10 text-primary'
                         )}
                       >
-                        {transaction.type === 'receipt' || transaction.type === 'repayment' ? (
+                        {['receipt', 'repayment', 'opening', 'contribution'].includes(transaction.type) ? (
                           <ArrowDownRight className="h-5 w-5" />
                         ) : (
                           <ArrowUpRight className="h-5 w-5" />
@@ -174,12 +174,12 @@ export default function DashboardPage() {
                       <p
                         className={cn(
                           'font-semibold',
-                          transaction.type === 'receipt' || transaction.type === 'repayment'
+                          ['receipt', 'repayment', 'opening', 'contribution'].includes(transaction.type)
                             ? 'text-success'
                             : 'text-destructive'
                         )}
                       >
-                        {transaction.type === 'receipt' || transaction.type === 'repayment' ? '+' : '-'}
+                        {['receipt', 'repayment', 'opening', 'contribution'].includes(transaction.type) ? '+' : '-'}
                         {formatCurrency(transaction.amount)}
                       </p>
                       <Badge variant="outline" className="text-xs">

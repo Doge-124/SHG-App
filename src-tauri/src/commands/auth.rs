@@ -180,19 +180,119 @@ pub fn has_security(app: tauri::AppHandle) -> bool {
     sec_path.exists()
 }
 
-/// Verify the master password without unlocking the database
+/// Change the admin (recovery) PIN without touching the main DB key.
+#[tauri::command]
+pub fn change_admin_pin(
+    current_admin_pin: String,
+    new_admin_pin: String,
+    state: State<Mutex<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if new_admin_pin.len() < 4 {
+        return Err("New admin PIN must be at least 4 characters".to_string());
+    }
+    if current_admin_pin == new_admin_pin {
+        return Err("New admin PIN must be different from the current one".to_string());
+    }
+
+    let app_dir = app.path().app_data_dir()
+        .map_err(|_| "app_data_dir not available".to_string())?;
+    let sec_path = app_dir.join("data").join("security.json");
+
+    let sec = store::load(&sec_path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No security data found".to_string())?;
+
+    let admin_salt_bytes = hex::decode(
+        sec.admin_salt.as_deref().ok_or_else(|| "No admin PIN configured".to_string())?
+    ).map_err(|_| "Invalid admin salt".to_string())?;
+
+    let recovery_bytes = hex::decode(
+        sec.recovery_blob.as_deref().ok_or_else(|| "No recovery blob found".to_string())?
+    ).map_err(|_| "Invalid recovery data".to_string())?;
+
+    // Recover db_key using the current admin PIN.
+    let current_admin_key = key::derive_key(&current_admin_pin, &admin_salt_bytes)
+        .map_err(|e: AppError| e.to_string())?;
+
+    let recovery_arr: [u8; 32] = recovery_bytes
+        .try_into()
+        .map_err(|_| "Corrupt recovery blob".to_string())?;
+    let recovered_db_key = key::xor_keys(&recovery_arr, &current_admin_key);
+    let recovered_db_key_hex = hex::encode(recovered_db_key);
+
+    // Verify the recovered key matches the in-memory db_key.
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let stored_db_key = guard
+        .db_key
+        .as_deref()
+        .ok_or_else(|| "Database not unlocked".to_string())?;
+
+    if recovered_db_key_hex != stored_db_key {
+        return Err("Incorrect current admin PIN".to_string());
+    }
+    drop(guard);
+
+    // Generate new admin salt + key and recompute recovery blob.
+    let new_admin_salt = key::generate_salt();
+    let new_admin_key = key::derive_key(&new_admin_pin, &new_admin_salt)
+        .map_err(|e: AppError| e.to_string())?;
+    let new_recovery = key::xor_keys(&recovered_db_key, &new_admin_key);
+
+    let new_sec = store::SecurityData {
+        salt: sec.salt,
+        admin_salt: Some(hex::encode(new_admin_salt)),
+        recovery_blob: Some(hex::encode(new_recovery)),
+    };
+    store::save(&sec_path, &new_sec).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Verify the admin PIN (set during app setup) — used to authorise destructive operations.
+/// Derives the admin key from the provided PIN and checks it against the stored recovery blob.
 #[tauri::command]
 pub fn verify_master_password(
     password: String,
+    state: State<Mutex<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
-    // Try to open database with the provided password
-    // If successful, password is correct
-    match db::init_db_with_pin(&app, &password) {
-        Ok((conn, _)) => {
-            drop(conn); // explicitly close so WAL/SHM files are released immediately
-            Ok(true)
-        }
-        Err(_) => Ok(false),
-    }
+    let app_dir = app.path().app_data_dir()
+        .map_err(|_| "app_data_dir not available".to_string())?;
+    let sec_path = app_dir.join("data").join("security.json");
+
+    let sec = match store::load(&sec_path).map_err(|e| e.to_string())? {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    let admin_salt_bytes = match sec.admin_salt.as_deref() {
+        Some(s) => hex::decode(s).map_err(|_| "Invalid admin salt".to_string())?,
+        None => return Ok(false), // admin PIN was never configured
+    };
+
+    let recovery_bytes = match sec.recovery_blob.as_deref() {
+        Some(r) => hex::decode(r).map_err(|_| "Invalid recovery blob".to_string())?,
+        None => return Ok(false),
+    };
+
+    // Derive the admin key from the provided PIN.
+    let admin_key = key::derive_key(&password, &admin_salt_bytes)
+        .map_err(|e: AppError| e.to_string())?;
+
+    // Recover the db key: XOR(recovery_blob, admin_key).
+    let recovery_arr: [u8; 32] = recovery_bytes
+        .try_into()
+        .map_err(|_| "Corrupt recovery blob".to_string())?;
+    let candidate_db_key = key::xor_keys(&recovery_arr, &admin_key);
+    let candidate_hex = hex::encode(candidate_db_key);
+
+    // Compare with the in-memory db key held in AppState.
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let stored = match guard.db_key.as_deref() {
+        Some(k) => k.to_string(),
+        None => return Ok(false),
+    };
+
+    Ok(candidate_hex == stored)
 }

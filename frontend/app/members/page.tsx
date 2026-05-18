@@ -199,7 +199,7 @@ export default function MembersPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={(e) => {
               e.stopPropagation()
-              router.push(`/members/${member.id}`)
+              router.push(`/members/detail?id=${member.id}`)
             }}>
               <Eye className="mr-2 h-4 w-4" />
               View Details
@@ -258,7 +258,7 @@ export default function MembersPage() {
           searchPlaceholder={`Search ${typeLabel.toLowerCase()}...`}
           isLoading={loadingMembers}
           emptyMessage={`No ${typeLabel.toLowerCase()} members`}
-          onRowClick={(member) => router.push(`/members/${member.id}`)}
+          onRowClick={(member) => router.push(`/members/detail?id=${member.id}`)}
         />
       </CardContent>
     </Card>

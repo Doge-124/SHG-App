@@ -1,15 +1,17 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
-import { getAllSettings } from '@/lib/api/settings'
+import { getAllSettings, getPastDataLockStatus } from '@/lib/api/settings'
 import type { AppSettings } from '@/lib/types'
 
 interface SettingsContextType {
   settings: AppSettings | null
   isLoading: boolean
   error: string | null
+  pastDataLocked: boolean
   refreshSettings: () => Promise<void>
   updateSettings: (newSettings: AppSettings) => void
+  refreshPastDataLock: () => Promise<void>
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined)
@@ -18,45 +20,52 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [pastDataLocked, setPastDataLocked] = useState(false)
 
   const loadSettings = async () => {
     setIsLoading(true)
     setError(null)
-    
+
     try {
-      const response = await getAllSettings()
-      if (response.success && response.data) {
-        setSettings(response.data)
+      const [settingsRes, lockRes] = await Promise.all([
+        getAllSettings(),
+        getPastDataLockStatus(),
+      ])
+      if (settingsRes.success && settingsRes.data) {
+        setSettings(settingsRes.data)
       } else {
-        setError(response.error || 'Failed to load settings')
+        setError(settingsRes.error || 'Failed to load settings')
+      }
+      if (lockRes.success && lockRes.data !== undefined) {
+        setPastDataLocked(lockRes.data)
       }
     } catch (error) {
-      console.error('Failed to load settings:', error)
       setError('Failed to load settings')
     } finally {
       setIsLoading(false)
     }
   }
 
-  const refreshSettings = async () => {
-    await loadSettings()
+  const refreshSettings = async () => { await loadSettings() }
+
+  const refreshPastDataLock = async () => {
+    const res = await getPastDataLockStatus()
+    if (res.success && res.data !== undefined) setPastDataLocked(res.data)
   }
 
-  const updateSettings = (newSettings: AppSettings) => {
-    setSettings(newSettings)
-  }
+  const updateSettings = (newSettings: AppSettings) => { setSettings(newSettings) }
 
-  useEffect(() => {
-    loadSettings()
-  }, [])
+  useEffect(() => { loadSettings() }, [])
 
   return (
-    <SettingsContext.Provider value={{ 
-      settings, 
-      isLoading, 
-      error, 
+    <SettingsContext.Provider value={{
+      settings,
+      isLoading,
+      error,
+      pastDataLocked,
       refreshSettings,
-      updateSettings
+      updateSettings,
+      refreshPastDataLock,
     }}>
       {children}
     </SettingsContext.Provider>

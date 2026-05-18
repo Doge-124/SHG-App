@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { invoke } from '@tauri-apps/api/core'
-import { Plus, Trash2, History } from 'lucide-react'
+import { Plus, Trash2, History, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -16,6 +16,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { getMembersByType } from '@/lib/api/members'
 import { formatCurrency, formatDate } from '@/lib/format'
+import { useSettings } from '@/lib/settings-context'
 import type { Member } from '@/lib/types'
 
 interface Repayment {
@@ -32,6 +33,7 @@ interface PastLoanFormProps {
 }
 
 export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProps) {
+  const { pastDataLocked } = useSettings()
   const [members, setMembers] = useState<Member[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -39,7 +41,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   // Loan details
   const [memberId, setMemberId] = useState('')
   const [amount, setAmount] = useState<number>(0)
-  const [interestRate, setInterestRate] = useState<number>(12)
+  const [interestRate, setInterestRate] = useState<number>(0.06)
   const [loanType, setLoanType] = useState<'monthly' | 'weekly'>('monthly')
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'BANK'>('CASH')
   const [note, setNote] = useState('')
@@ -49,13 +51,10 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   const [repayments, setRepayments] = useState<Repayment[]>([])
 
   // Derived values
-  const interestAmount =
-    loanType === 'weekly'
-      ? amount * (interestRate / 100) * (12 / 52)
-      : amount * (interestRate / 100)
-  const totalRepayable = amount + interestAmount
+  const upfrontDays = loanType === 'weekly' ? 100 : 30
+  const upfrontInterest = Math.round(amount * interestRate / 100 * upfrontDays * 100) / 100
   const totalRepaid = repayments.reduce((s, r) => s + r.amount, 0)
-  const outstanding = Math.max(0, totalRepayable - totalRepaid)
+  const outstanding = Math.max(0, (amount - upfrontInterest) - totalRepaid)
   const isFullyRepaid = outstanding <= 0.01
 
   useEffect(() => {
@@ -109,7 +108,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   const handleSubmit = async () => {
     if (!memberId) { toast.error('Please select a member'); return }
     if (amount <= 0) { toast.error('Loan amount must be greater than 0'); return }
-    if (interestRate < 0) { toast.error('Interest rate cannot be negative'); return }
+    if (interestRate < 0) { toast.error('Daily interest rate cannot be negative'); return }
 
     // Validate repayments
     for (const r of repayments) {
@@ -125,7 +124,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
       await invoke('record_past_loan', {
         memberId: parseInt(memberId),
         amount,
-        interestRate,
+        dailyInterestRate: interestRate,
         paymentMethod,
         loanType,
         note: note || 'Past loan entry',
@@ -160,6 +159,15 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
 
         <ScrollArea className="h-[68vh] pr-1">
           <div className="space-y-5">
+
+            {pastDataLocked && (
+              <Alert className="border-amber-400 bg-amber-50">
+                <AlertDescription className="flex items-center gap-2 text-amber-700">
+                  <Lock className="h-4 w-4 flex-shrink-0" />
+                  Past data entry is locked. Go to Settings → Data to unlock.
+                </AlertDescription>
+              </Alert>
+            )}
 
             {/* Loan details */}
             <Card>
@@ -199,8 +207,8 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                     <Select value={loanType} onValueChange={(v: any) => setLoanType(v)}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="monthly">Monthly (12-month term)</SelectItem>
-                        <SelectItem value="weekly">Weekly (12-week term)</SelectItem>
+                        <SelectItem value="monthly">Monthly (open-ended)</SelectItem>
+                        <SelectItem value="weekly">Weekly (100-day term, 20-day grace)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -219,12 +227,12 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Interest Rate (% per annum)</Label>
+                    <Label>Daily Interest Rate (%/day)</Label>
                     <Input
                       type="number"
                       min={0}
-                      max={100}
-                      step="0.5"
+                      max={10}
+                      step="0.01"
                       value={interestRate}
                       onChange={e => setInterestRate(parseFloat(e.target.value) || 0)}
                     />
@@ -252,7 +260,6 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                   </div>
                 </div>
 
-                {/* Interest summary */}
                 {amount > 0 && (
                   <div className="rounded-lg bg-muted p-3 grid grid-cols-3 gap-2 text-sm">
                     <div>
@@ -260,14 +267,12 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                       <p className="font-semibold">{formatCurrency(amount)}</p>
                     </div>
                     <div>
-                      <p className="text-muted-foreground">
-                        Interest ({interestRate}%{loanType === 'weekly' ? ' × 12wk' : ' p.a.'})
-                      </p>
-                      <p className="font-semibold text-warning-foreground">{formatCurrency(interestAmount)}</p>
+                      <p className="text-muted-foreground">Upfront Interest (30 days)</p>
+                      <p className="font-semibold text-orange-600">{formatCurrency(upfrontInterest)}</p>
                     </div>
                     <div>
-                      <p className="text-muted-foreground">Total Repayable</p>
-                      <p className="font-semibold text-primary">{formatCurrency(totalRepayable)}</p>
+                      <p className="text-muted-foreground">Borrower Received</p>
+                      <p className="font-semibold text-green-700">{formatCurrency(amount - upfrontInterest)}</p>
                     </div>
                   </div>
                 )}
@@ -339,8 +344,8 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                     <Separator />
                     <div className="grid grid-cols-3 gap-2 text-sm">
                       <div>
-                        <p className="text-muted-foreground">Total Repayable</p>
-                        <p className="font-semibold">{formatCurrency(totalRepayable)}</p>
+                        <p className="text-muted-foreground">Principal</p>
+                        <p className="font-semibold">{formatCurrency(amount)}</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground">Total Repaid</p>
@@ -371,8 +376,8 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={handleSubmit} disabled={isSubmitting || !memberId || amount <= 0}>
-            {isSubmitting ? 'Recording...' : 'Record Past Loan'}
+          <Button onClick={handleSubmit} disabled={isSubmitting || pastDataLocked || !memberId || amount <= 0}>
+            {isSubmitting ? 'Recording...' : pastDataLocked ? 'Locked' : 'Record Past Loan'}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -99,10 +99,28 @@ pub fn compute_total_shg_funds(conn: &Connection) -> Result<f64, AppError> {
     Ok(total)
 }
 
-/// Compute opening balance as of a given date (exclusive) - for historical view
+/// Compute the opening balance for a period starting at `as_of_date`.
+///
+/// Logic:
+/// - OPENING transactions (member opening-balance migrations) represent money
+///   that existed BEFORE the app was adopted — they always count toward the
+///   opening balance regardless of when they were entered into the app.
+/// - RECEIPT and VOUCHER transactions are time-bound: they're included in the
+///   opening only if their `created_at` is strictly before the period starts.
 pub fn compute_opening_balance(conn: &Connection, as_of_date: &str) -> Result<f64, AppError> {
-    // For daybook display, show total funds instead of historical opening
-    compute_total_shg_funds(conn)
+    let balance: f64 = conn.query_row(
+        "SELECT COALESCE(
+            SUM(CASE
+                WHEN txn_type = 'OPENING' THEN amount
+                WHEN txn_type = 'RECEIPT' AND created_at < ?1 THEN amount
+                WHEN txn_type = 'VOUCHER' AND created_at < ?1 THEN -amount
+                ELSE 0
+            END), 0.0)
+         FROM shg_transactions",
+        [as_of_date],
+        |row| row.get(0),
+    )?;
+    Ok(balance)
 }
 
 /// Get day book entries for a date range
@@ -191,6 +209,174 @@ pub fn compute_totals(
     Ok((total_receipts, total_vouchers))
 }
 
+/// Get cash-only book summary — receipts and vouchers where payment_method = 'CASH'.
+pub fn get_cash_book_summary(
+    conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+) -> Result<DayBookSummary, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            t.id, t.created_at, t.txn_type, t.amount, t.reason,
+            t.payment_method, t.reference_type, t.reference_id,
+            m.id as member_id, m.name as member_name
+         FROM shg_transactions t
+         LEFT JOIN members m ON (
+             t.reference_type IN (
+                 'WEEKLY_CONTRIBUTION','MEMBER_RECEIPT','MEMBER_CONTRIBUTION',
+                 'MEMBER_PAYMENT','CHIT_PAYMENT','CHIT_COMMISSION'
+             ) AND t.reference_id = m.id
+         )
+         WHERE t.created_at >= ?1
+           AND t.created_at <= ?2
+           AND t.txn_type IN ('RECEIPT', 'VOUCHER')
+           AND t.payment_method = 'CASH'
+         ORDER BY t.created_at ASC, t.id ASC",
+    )?;
+
+    let rows = stmt.query_map([start_date, end_date], |row| {
+        let reference_type: Option<String> = row.get(6)?;
+        let reason: String = row.get(4)?;
+        let category = categorize_transaction(reference_type.as_deref(), &reason);
+        Ok(DayBookEntry {
+            id: row.get(0)?,
+            date: row.get(1)?,
+            txn_type: row.get(2)?,
+            amount: row.get(3)?,
+            category,
+            payment_method: row.get(5)?,
+            member_id: row.get(7)?,
+            member_name: row.get(9)?,
+            reference_id: row.get(0)?,
+            reference_type,
+            description: reason,
+        })
+    })?;
+
+    let mut transactions = Vec::new();
+    for row in rows {
+        transactions.push(row?);
+    }
+
+    let total_receipts: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0) FROM shg_transactions
+         WHERE txn_type = 'RECEIPT' AND payment_method = 'CASH'
+           AND created_at >= ?1 AND created_at <= ?2",
+        [start_date, end_date],
+        |row| row.get(0),
+    )?;
+
+    let total_vouchers: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0) FROM shg_transactions
+         WHERE txn_type = 'VOUCHER' AND payment_method = 'CASH'
+           AND created_at >= ?1 AND created_at <= ?2",
+        [start_date, end_date],
+        |row| row.get(0),
+    )?;
+
+    // Opening cash balance = current SHG cash balance minus the period's net cash activity.
+    // Using shg_balances (always in sync) avoids date-string comparison issues.
+    let current_cash: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0.0) FROM shg_balances WHERE method = 'CASH'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let opening_balance = current_cash - total_receipts + total_vouchers;
+    let closing_balance = current_cash;
+
+    Ok(DayBookSummary {
+        opening_balance,
+        total_receipts,
+        total_vouchers,
+        closing_balance,
+        transactions,
+    })
+}
+
+/// Get bank-only book summary — receipts and vouchers where payment_method = 'BANK'.
+pub fn get_bank_book_summary(
+    conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+) -> Result<DayBookSummary, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            t.id, t.created_at, t.txn_type, t.amount, t.reason,
+            t.payment_method, t.reference_type, t.reference_id,
+            m.id as member_id, m.name as member_name
+         FROM shg_transactions t
+         LEFT JOIN members m ON (
+             t.reference_type IN (
+                 'WEEKLY_CONTRIBUTION','MEMBER_RECEIPT','MEMBER_CONTRIBUTION',
+                 'MEMBER_PAYMENT','CHIT_PAYMENT','CHIT_COMMISSION'
+             ) AND t.reference_id = m.id
+         )
+         WHERE t.created_at >= ?1
+           AND t.created_at <= ?2
+           AND t.txn_type IN ('RECEIPT', 'VOUCHER')
+           AND t.payment_method = 'BANK'
+         ORDER BY t.created_at ASC, t.id ASC",
+    )?;
+
+    let rows = stmt.query_map([start_date, end_date], |row| {
+        let reference_type: Option<String> = row.get(6)?;
+        let reason: String = row.get(4)?;
+        let category = categorize_transaction(reference_type.as_deref(), &reason);
+        Ok(DayBookEntry {
+            id: row.get(0)?,
+            date: row.get(1)?,
+            txn_type: row.get(2)?,
+            amount: row.get(3)?,
+            category,
+            payment_method: row.get(5)?,
+            member_id: row.get(7)?,
+            member_name: row.get(9)?,
+            reference_id: row.get(0)?,
+            reference_type,
+            description: reason,
+        })
+    })?;
+
+    let mut transactions = Vec::new();
+    for row in rows {
+        transactions.push(row?);
+    }
+
+    let total_receipts: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0) FROM shg_transactions
+         WHERE txn_type = 'RECEIPT' AND payment_method = 'BANK'
+           AND created_at >= ?1 AND created_at <= ?2",
+        [start_date, end_date],
+        |row| row.get(0),
+    )?;
+
+    let total_vouchers: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0) FROM shg_transactions
+         WHERE txn_type = 'VOUCHER' AND payment_method = 'BANK'
+           AND created_at >= ?1 AND created_at <= ?2",
+        [start_date, end_date],
+        |row| row.get(0),
+    )?;
+
+    let current_bank: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0.0) FROM shg_balances WHERE method = 'BANK'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let opening_balance = current_bank - total_receipts + total_vouchers;
+    let closing_balance = current_bank;
+
+    Ok(DayBookSummary {
+        opening_balance,
+        total_receipts,
+        total_vouchers,
+        closing_balance,
+        transactions,
+    })
+}
+
 /// Get complete day book summary for a date range
 pub fn get_day_book_summary(
     conn: &Connection,
@@ -199,25 +385,19 @@ pub fn get_day_book_summary(
 ) -> Result<DayBookSummary, AppError> {
     // Get all transactions in the date range
     let transactions = get_day_book_entries(conn, start_date, end_date)?;
-    
-    // Compute totals for the period
+
+    // Compute totals for the period (RECEIPT and VOUCHER only)
     let (total_receipts, total_vouchers) = compute_totals(conn, start_date, end_date)?;
-    
-    // Get current total SHG funds (this is what the user wants to see as "Opening Balance")
-    let current_total_funds = compute_total_shg_funds(conn)?;
-    
-    // Calculate what the balance was BEFORE this period started
-    // (Current Funds - Period Receipts + Period Vouchers)
-    let balance_before_period = current_total_funds - total_receipts + total_vouchers;
-    
-    // Opening balance shows total SHG funds (current state)
-    let opening_balance = current_total_funds;
-    
-    // Closing balance is the same as opening (since we show current state)
-    // But for daybook logic, it should reflect: balance_before_period + period_receipts - period_vouchers
-    // Which equals current_total_funds
-    let closing_balance = current_total_funds;
-    
+
+    // Opening balance = sum of all transactions BEFORE this period started.
+    // This is fixed for any given period — it never changes while you add
+    // new transactions to the current period, only when you change the date filter.
+    let opening_balance = compute_opening_balance(conn, start_date)?;
+
+    // Closing balance = opening + period activity. Updates as transactions
+    // are added during the period (since total_receipts/vouchers do).
+    let closing_balance = opening_balance + total_receipts - total_vouchers;
+
     Ok(DayBookSummary {
         opening_balance,
         total_receipts,

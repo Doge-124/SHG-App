@@ -5,6 +5,7 @@
 //! - Repayment: member payment → SHG receipt → member balance decreases.
 
 use rusqlite::Connection;
+use chrono::Datelike;
 
 use crate::error::AppError;
 use crate::db::{ledger, members, validation};
@@ -41,8 +42,10 @@ pub struct Loan {
     pub amount: f64,
     pub outstanding_amount: f64,
     pub interest_rate: f64,
+    pub daily_interest_rate: f64,
     pub total_repayable: f64,
     pub interest_amount: f64,
+    pub upfront_interest_amount: f64,
     pub payment_method: String,
     pub loan_type: String, // 'monthly' or 'weekly'
     pub note: String,
@@ -51,136 +54,142 @@ pub struct Loan {
     pub created_at: String,
 }
 
-/// Create a new loan record with interest calculation
-/// 
-/// Interest calculation:
-/// - Weekly loans: 12 week term, interest = amount * (rate/100) * (12/52)
-/// - Monthly loans: 12 month term, interest = amount * (rate/100) * (12/12) = amount * (rate/100)
+/// Create a new loan.
+///
+/// The SHG deducts the first 30 days of interest upfront:
+///   upfront_interest = principal × daily_rate% × 30  (monthly)
+///                    = principal × daily_rate% × 100 (weekly — full term upfront)
+///   borrower receives: principal − upfront_interest
+///   voucher: full principal (money out), receipt: upfront_interest (money in, auto-collected).
+///
+/// Monthly loans are open-ended. Weekly loans have a 100-day term + 20-day grace (120 days total)
+/// after which a daily fine accrues (calculated at repayment time, not stored here).
 pub fn create_loan(
     conn: &mut Connection,
     member_id: i64,
     amount: f64,
-    interest_rate: f64,
+    daily_interest_rate: f64,
     payment_method: &str,
     loan_type: &str,
     note: &str,
     created_at: &str,
 ) -> Result<i64, AppError> {
-    // Check if member can take loans (must be SHG or LOAN type)
     if !can_take_loans(conn, member_id)? {
         return Err(AppError::business(
             "Only SHG and LOAN members can take loans. CHIT members cannot take loans."
         ));
     }
+    validation::validate_money_amount(amount)?;
 
-    // Calculate interest based on loan type
-    // Standard term: 12 weeks for weekly loans, 12 months for monthly loans
-    let interest_amount = if loan_type == "weekly" {
-        // Weekly: 12 week term, interest = principal * rate * (12/52)
-        amount * (interest_rate / 100.0) * (12.0 / 52.0)
-    } else {
-        // Monthly: 12 month term, interest = principal * rate * (12/12) = principal * rate
-        amount * (interest_rate / 100.0)
-    };
+    let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
+    let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
+    let outstanding = (amount - upfront_interest).max(0.0);
+    let net_outflow = outstanding;
 
-    let total_repayable = amount + interest_amount;
+    // Pre-check: SHG must have enough balance for the net disbursement.
+    let available = ledger::get_shg_balance(conn, payment_method)?;
+    if available + 0.005 < net_outflow {
+        return Err(AppError::business(format!(
+            "Insufficient {payment_method} balance — available: {available:.2}, net outflow: {net_outflow:.2}"
+        )));
+    }
 
-    // Check if the table has the old structure (principal, interest_rate, due_date) before transaction
-    let (has_old_structure, has_loan_type, has_principal) = {
+    // Detect whether legacy columns still exist (principal, due_date).
+    let has_legacy = {
         let mut stmt = conn.prepare("PRAGMA table_info(loans)")?;
-        let columns = stmt.query_map([], |row| {
-            let name: String = row.get(1)?;
-            Ok(name)
-        })?;
-        
-        let mut column_names = Vec::new();
-        for column in columns {
-            column_names.push(column?);
-        }
-        
-        // Check if loan_type column exists (new structure) or if it's truly old structure
-        let has_loan_type = column_names.contains(&"loan_type".to_string());
-        let has_principal = column_names.contains(&"principal".to_string());
-        
-        // Use new structure if loan_type column exists, even if principal also exists
-        // Only use old structure if loan_type doesn't exist but principal does
-        let has_old_structure = has_principal && !has_loan_type;
-        
-        (has_old_structure, has_loan_type, has_principal)
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok()).collect();
+        cols.contains(&"principal".to_string())
     };
-    
-    // Check if principal column exists before starting transaction
-    let principal_exists = {
-        let mut stmt = conn.prepare("PRAGMA table_info(loans)")?;
-        let columns = stmt.query_map([], |row| {
-            let name: String = row.get(1)?;
-            Ok(name)
-        })?;
-        
-        let mut column_names = Vec::new();
-        for column in columns {
-            column_names.push(column?);
-        }
-        
-        column_names.contains(&"principal".to_string())
-    };
-    
+
     let mut tx = conn.transaction()?;
 
-    // Create the loan record based on table structure
-    let loan_id = if has_old_structure {
-        // Old table structure - provide values for old columns
+    let loan_id: i64 = if has_legacy {
         tx.query_row(
-            "INSERT INTO loans (member_id, principal, interest_rate, issued_at, due_date, status, amount, outstanding_amount, payment_method, loan_type, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
-            (member_id, amount, interest_rate, created_at, created_at, amount, total_repayable, payment_method, loan_type, note, created_at),
+            "INSERT INTO loans
+             (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
+              total_repayable, interest_amount, upfront_interest_amount,
+              payment_method, loan_type, note, status, issued_at, created_at,
+              principal, due_date)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14)
+             RETURNING id",
+            (member_id, amount, outstanding, daily_interest_rate, amount,
+             upfront_interest, upfront_interest, payment_method, loan_type, note,
+             created_at, created_at, amount, created_at),
             |row| row.get(0),
         )?
     } else {
-        // New table structure - check if principal column still exists and provide value if needed
-        if principal_exists {
-            // Hybrid structure - new columns plus old principal column with NOT NULL constraint
-            tx.query_row(
-                "INSERT INTO loans (member_id, amount, outstanding_amount, interest_rate, total_repayable, interest_amount, payment_method, loan_type, note, status, issued_at, created_at, principal, due_date)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?11, ?12, ?13) RETURNING id",
-                (member_id, amount, total_repayable, interest_rate, total_repayable, interest_amount, payment_method, loan_type, note, created_at, created_at, amount, created_at),
-                |row| row.get(0),
-            )?
-        } else {
-            // Pure new structure
-            tx.query_row(
-                "INSERT INTO loans (member_id, amount, outstanding_amount, interest_rate, total_repayable, interest_amount, payment_method, loan_type, note, status, issued_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?11) RETURNING id",
-                (member_id, amount, total_repayable, interest_rate, total_repayable, interest_amount, payment_method, loan_type, note, created_at, created_at),
-                |row| row.get(0),
-            )?
-        }
+        tx.query_row(
+            "INSERT INTO loans
+             (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
+              total_repayable, interest_amount, upfront_interest_amount,
+              payment_method, loan_type, note, status, issued_at, created_at)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12)
+             RETURNING id",
+            (member_id, amount, outstanding, daily_interest_rate, amount,
+             upfront_interest, upfront_interest, payment_method, loan_type, note,
+             created_at, created_at),
+            |row| row.get(0),
+        )?
     };
 
-    // 2. Create member transaction
+    // Member transaction: loan issued
     tx.execute(
         "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
          VALUES (?1, ?2, 'LOAN', ?3)",
         (member_id, amount, created_at),
     )?;
 
-    // 3. Update member balance cache
+    // Member balance: +principal (before upfront deduction)
     tx.execute(
-        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2) 
+        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
          ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
         (member_id, amount),
     )?;
 
-    // 4. SHG voucher (money goes out)
-    ledger::record_voucher(
+    // Voucher: full principal disbursed (unchecked — we pre-checked net outflow above).
+    let voucher_note = if note.trim().is_empty() { "Loan disbursement".to_string() } else { note.to_string() };
+    ledger::record_voucher_unchecked(
         &mut tx,
         amount,
-        note,
+        &voucher_note,
         payment_method,
         Some("MEMBER_LOAN"),
         Some(member_id),
         created_at,
     )?;
+
+    // Upfront interest: auto-receipt + first loan_payment entry.
+    if upfront_interest > 0.0 {
+        let upfront_note = "Upfront Interest";
+        ledger::record_receipt(
+            &mut tx,
+            upfront_interest,
+            upfront_note,
+            payment_method,
+            Some("MEMBER_PAYMENT"),
+            Some(member_id),
+            created_at,
+        )?;
+
+        tx.execute(
+            "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (loan_id, member_id, upfront_interest, payment_method, upfront_note, created_at),
+        )?;
+
+        // Member balance and transaction for the upfront collection
+        tx.execute(
+            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
+             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
+            (member_id, upfront_interest),
+        )?;
+        tx.execute(
+            "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
+             VALUES (?1, ?2, 'PAYMENT', ?3)",
+            (member_id, -upfront_interest, created_at),
+        )?;
+    }
 
     tx.commit()?;
     Ok(loan_id)
@@ -189,9 +198,13 @@ pub fn create_loan(
 /// Get all loans for a member
 pub fn get_member_loans(conn: &Connection, member_id: i64) -> Result<Vec<Loan>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, member_id, amount, outstanding_amount, interest_rate, total_repayable, interest_amount, payment_method, loan_type, note, status, issued_at, created_at
-         FROM loans 
-         WHERE member_id = ?1 
+        "SELECT id, member_id, amount, outstanding_amount, interest_rate,
+                COALESCE(daily_interest_rate, 0) as daily_interest_rate,
+                total_repayable, interest_amount,
+                COALESCE(upfront_interest_amount, 0) as upfront_interest_amount,
+                payment_method, loan_type, note, status, issued_at, created_at
+         FROM loans
+         WHERE member_id = ?1
          ORDER BY issued_at DESC"
     )?;
 
@@ -199,18 +212,20 @@ pub fn get_member_loans(conn: &Connection, member_id: i64) -> Result<Vec<Loan>, 
         Ok(Loan {
             id: row.get(0)?,
             member_id: row.get(1)?,
-            member_name: None, // This function doesn't join with members table
+            member_name: None,
             amount: row.get(2)?,
             outstanding_amount: row.get(3)?,
             interest_rate: row.get(4)?,
-            total_repayable: row.get(5)?,
-            interest_amount: row.get(6)?,
-            payment_method: row.get(7)?,
-            loan_type: row.get(8)?,
-            note: row.get(9)?,
-            status: row.get(10)?,
-            issued_at: row.get(11)?,
-            created_at: row.get(12)?,
+            daily_interest_rate: row.get(5)?,
+            total_repayable: row.get(6)?,
+            interest_amount: row.get(7)?,
+            upfront_interest_amount: row.get(8)?,
+            payment_method: row.get(9)?,
+            loan_type: row.get(10)?,
+            note: row.get(11)?,
+            status: row.get(12)?,
+            issued_at: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
 
@@ -223,91 +238,62 @@ pub fn get_member_loans(conn: &Connection, member_id: i64) -> Result<Vec<Loan>, 
 }
 
 /// Record a historical loan with its full repayment history in one atomic transaction.
-///
-/// Used for past data entry (migration from books). Uses unchecked voucher so the
-/// SHG balance check is bypassed for the historical disbursement.
-///
-/// Interest calculation is identical to create_loan:
-/// - Weekly  (12-week term): interest = amount × (rate/100) × (12/52)
-/// - Monthly (12-month term): interest = amount × (rate/100)
+/// Used for past data entry (migration from books). Uses unchecked voucher.
 pub fn record_past_loan(
     conn: &mut Connection,
     member_id: i64,
     amount: f64,
-    interest_rate: f64,
+    daily_interest_rate: f64,
     payment_method: &str,
     loan_type: &str,
     note: &str,
     issued_at: &str,
-    repayments: &[(f64, &str, &str)], // (amount, payment_method, paid_at)
+    repayments: &[(f64, &str, &str)],
 ) -> Result<i64, AppError> {
     if !can_take_loans(conn, member_id)? {
-        return Err(AppError::business(
-            "Only SHG and LOAN members can take loans.",
-        ));
+        return Err(AppError::business("Only SHG and LOAN members can take loans."));
     }
-
     validation::validate_money_amount(amount)?;
     validation::validate_payment_method(payment_method)?;
 
-    let interest_amount = if loan_type.to_lowercase() == "weekly" {
-        amount * (interest_rate / 100.0) * (12.0 / 52.0)
-    } else {
-        amount * (interest_rate / 100.0)
-    };
-    let total_repayable = amount + interest_amount;
+    let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
+    let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
+    let outstanding_start = (amount - upfront_interest).max(0.0);
 
-    // Detect table structure (same logic as create_loan).
-    let (has_new_columns, principal_exists) = {
+    let has_legacy = {
         let mut stmt = conn.prepare("PRAGMA table_info(loans)")?;
-        let cols: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
-            .collect();
-        (
-            cols.contains(&"outstanding_amount".to_string()),
-            cols.contains(&"principal".to_string()),
-        )
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok()).collect();
+        cols.contains(&"principal".to_string())
     };
 
     let mut tx = conn.transaction()?;
 
-    // 1. Insert loan record.
-    let loan_id: i64 = if has_new_columns {
-        if principal_exists {
-            tx.query_row(
-                "INSERT INTO loans
-                 (member_id, amount, outstanding_amount, interest_rate, total_repayable,
-                  interest_amount, payment_method, loan_type, note, status, issued_at, created_at,
-                  principal, due_date)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'active',?10,?11,?12,?13)
-                 RETURNING id",
-                (member_id, amount, total_repayable, interest_rate, total_repayable,
-                 interest_amount, payment_method, loan_type, note, issued_at, issued_at,
-                 amount, issued_at),
-                |row| row.get(0),
-            )?
-        } else {
-            tx.query_row(
-                "INSERT INTO loans
-                 (member_id, amount, outstanding_amount, interest_rate, total_repayable,
-                  interest_amount, payment_method, loan_type, note, status, issued_at, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'active',?10,?11)
-                 RETURNING id",
-                (member_id, amount, total_repayable, interest_rate, total_repayable,
-                 interest_amount, payment_method, loan_type, note, issued_at, issued_at),
-                |row| row.get(0),
-            )?
-        }
+    let loan_id: i64 = if has_legacy {
+        tx.query_row(
+            "INSERT INTO loans
+             (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
+              total_repayable, interest_amount, upfront_interest_amount,
+              payment_method, loan_type, note, status, issued_at, created_at,
+              principal, due_date)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14)
+             RETURNING id",
+            (member_id, amount, outstanding_start, daily_interest_rate,
+             amount, upfront_interest, upfront_interest,
+             payment_method, loan_type, note, issued_at, issued_at, amount, issued_at),
+            |row| row.get(0),
+        )?
     } else {
         tx.query_row(
             "INSERT INTO loans
-             (member_id, principal, interest_rate, issued_at, due_date, status,
-              amount, outstanding_amount, payment_method, loan_type, note, created_at)
-             VALUES (?1,?2,?3,?4,?5,'active',?6,?7,?8,?9,?10,?11)
+             (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
+              total_repayable, interest_amount, upfront_interest_amount,
+              payment_method, loan_type, note, status, issued_at, created_at)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12)
              RETURNING id",
-            (member_id, amount, interest_rate, issued_at, issued_at,
-             amount, total_repayable, payment_method, loan_type, note, issued_at),
+            (member_id, amount, outstanding_start, daily_interest_rate,
+             amount, upfront_interest, upfront_interest,
+             payment_method, loan_type, note, issued_at, issued_at),
             |row| row.get(0),
         )?
     };
@@ -326,19 +312,32 @@ pub fn record_past_loan(
         (member_id, amount),
     )?;
 
-    // 4. SHG voucher (unchecked — historical disbursement).
-    ledger::record_voucher_unchecked(
-        &mut tx,
-        amount,
-        &format!("{} (past data entry)", note),
-        payment_method,
-        Some("MEMBER_LOAN"),
-        Some(member_id),
-        issued_at,
-    )?;
+    // 4. Past data entry: no SHG voucher — disbursement is reference-only.
+    // The SHG opening balance (set in Settings) already accounts for historical funds.
+
+    // 4b. Record upfront interest in loan_payments and member ledger (reference only).
+    if upfront_interest > 0.0 {
+        tx.execute(
+            "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'Upfront Interest', ?5)",
+            (loan_id, member_id, upfront_interest, payment_method, issued_at),
+        )?;
+
+        tx.execute(
+            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
+             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
+            (member_id, upfront_interest),
+        )?;
+
+        tx.execute(
+            "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
+             VALUES (?1, ?2, 'PAYMENT', ?3)",
+            (member_id, -upfront_interest, issued_at),
+        )?;
+    }
 
     // 5. Process each repayment in chronological order.
-    let mut outstanding = total_repayable;
+    let mut outstanding = outstanding_start;
     for (rep_amount, rep_method, rep_date) in repayments {
         validation::validate_money_amount(*rep_amount)?;
         validation::validate_payment_method(rep_method)?;
@@ -357,7 +356,7 @@ pub fn record_past_loan(
         tx.execute(
             "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (loan_id, member_id, applied, rep_method, "Past loan repayment", rep_date),
+            (loan_id, member_id, applied, rep_method, "Loan Repayment", rep_date),
         )?;
 
         // Member transaction: PAYMENT.
@@ -373,28 +372,24 @@ pub fn record_past_loan(
              ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
             (member_id, applied),
         )?;
-
-        // SHG receipt.
-        ledger::record_receipt(
-            &mut tx,
-            applied,
-            "Past loan repayment",
-            rep_method,
-            Some("MEMBER_PAYMENT"),
-            Some(member_id),
-            rep_date,
-        )?;
+        // No SHG receipt — past repayments are reference-only and do not affect SHG balance.
     }
 
     tx.commit()?;
     Ok(loan_id)
 }
 
-/// Record a payment towards a specific loan and update its outstanding amount
+/// Record a payment towards a specific loan.
+///
+/// `interest_amount` is the accrued daily interest portion of the payment
+/// (calculated on the frontend from issued_at, daily_rate, and days elapsed).
+/// Only the principal portion (`amount - interest_amount`) reduces outstanding.
+/// The full `amount` is received by the SHG and recorded as a receipt.
 pub fn record_loan_payment(
     conn: &mut Connection,
     loan_id: i64,
     amount: f64,
+    interest_amount: f64,
     payment_method: &str,
     note: &str,
     created_at: &str,
@@ -404,54 +399,50 @@ pub fn record_loan_payment(
 
     let mut tx = conn.transaction()?;
 
-    // 1. Get loan details and check outstanding amount
-    let (member_id, outstanding_amount): (i64, f64) = tx.query_row(
-        "SELECT member_id, outstanding_amount FROM loans WHERE id = ?1",
+    let (member_id, outstanding_amount, status): (i64, f64, String) = tx.query_row(
+        "SELECT member_id, outstanding_amount, status FROM loans WHERE id = ?1",
         [loan_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
-    if amount > outstanding_amount + 0.01 {
-        return Err(AppError::business(format!(
-            "payment exceeds outstanding balance (outstanding={outstanding_amount}, payment={amount})"
-        )));
+    if status == "paid" {
+        return Err(AppError::business("This loan has already been fully repaid"));
     }
 
-    // 2. Update loan outstanding amount
-    let new_outstanding = outstanding_amount - amount;
+    // Only the principal portion reduces the outstanding balance.
+    let principal_paid = (amount - interest_amount).max(0.0).min(outstanding_amount);
+    let new_outstanding = outstanding_amount - principal_paid;
     let new_status = if new_outstanding <= 0.01 { "paid" } else { "active" };
-    
+
     tx.execute(
         "UPDATE loans SET outstanding_amount = ?1, status = ?2 WHERE id = ?3",
         (new_outstanding, new_status, loan_id),
     )?;
 
-    // 3. Create member transaction (payments are stored as negative amounts)
+    let receipt_note = note.to_string();
+
     tx.execute(
         "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
          VALUES (?1, ?2, 'PAYMENT', ?3)",
-        (member_id, -amount, created_at),
+        (member_id, -principal_paid, created_at),
     )?;
 
-    // 4. Update member balance cache
     tx.execute(
-        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2) 
+        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
          ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-        (member_id, amount),
+        (member_id, principal_paid),
     )?;
 
-    // 5. Record in loan_payments for per-loan repayment history.
     tx.execute(
         "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (loan_id, member_id, amount, payment_method, note, created_at),
+        (loan_id, member_id, amount, payment_method, &receipt_note, created_at),
     )?;
 
-    // 6. SHG receipt (money comes in)
     ledger::record_receipt(
         &mut tx,
         amount,
-        note,
+        &receipt_note,
         payment_method,
         Some("MEMBER_PAYMENT"),
         Some(member_id),
@@ -466,8 +457,11 @@ pub fn record_loan_payment(
 pub fn get_loan_by_id(conn: &Connection, loan_id: i64) -> Result<Option<Loan>, AppError> {
     let result = conn.query_row(
         "SELECT l.id, l.member_id, l.amount, l.outstanding_amount, l.interest_rate,
-                l.total_repayable, l.interest_amount, l.payment_method, l.loan_type,
-                l.note, l.status, l.issued_at, l.created_at, m.name
+                COALESCE(l.daily_interest_rate, 0) as daily_interest_rate,
+                l.total_repayable, l.interest_amount,
+                COALESCE(l.upfront_interest_amount, 0) as upfront_interest_amount,
+                l.payment_method, l.loan_type, l.note, l.status, l.issued_at, l.created_at,
+                m.name
          FROM loans l
          JOIN members m ON l.member_id = m.id
          WHERE l.id = ?1",
@@ -479,15 +473,17 @@ pub fn get_loan_by_id(conn: &Connection, loan_id: i64) -> Result<Option<Loan>, A
                 amount: row.get(2)?,
                 outstanding_amount: row.get(3)?,
                 interest_rate: row.get(4)?,
-                total_repayable: row.get(5)?,
-                interest_amount: row.get(6)?,
-                payment_method: row.get(7)?,
-                loan_type: row.get(8)?,
-                note: row.get(9)?,
-                status: row.get(10)?,
-                issued_at: row.get(11)?,
-                created_at: row.get(12)?,
-                member_name: row.get(13)?,
+                daily_interest_rate: row.get(5)?,
+                total_repayable: row.get(6)?,
+                interest_amount: row.get(7)?,
+                upfront_interest_amount: row.get(8)?,
+                payment_method: row.get(9)?,
+                loan_type: row.get(10)?,
+                note: row.get(11)?,
+                status: row.get(12)?,
+                issued_at: row.get(13)?,
+                created_at: row.get(14)?,
+                member_name: row.get(15)?,
             })
         },
     );
@@ -743,5 +739,207 @@ pub fn record_member_payment(
     let _ = members::get_member_outstanding(conn, member_id)?;
 
     Ok(())
+}
+
+// ─── Repayment Schedule ───────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEntry {
+    pub date: String,
+    pub label: String,
+    pub entry_type: String,  // "issued" | "monthly" | "upfront_end" | "due_date" | "today" | "payment"
+    pub days_elapsed: i64,
+    pub days_after_upfront: i64,
+    pub interest_accrued: f64,   // cumulative since upfront period ended
+    pub projected_outstanding: f64,
+    pub daily_interest: f64,
+    pub is_past: bool,
+    pub is_overdue: bool,
+    // populated for "payment" entries
+    pub payment_amount: f64,
+    pub payment_method: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoanRepaymentSchedule {
+    pub loan_id: i64,
+    pub member_name: String,
+    pub principal: f64,
+    pub daily_rate: f64,
+    pub daily_interest: f64,
+    pub loan_type: String,
+    pub issued_at: String,
+    pub upfront_days: i64,
+    pub upfront_end_date: String,
+    pub upfront_interest: f64,
+    pub outstanding_at_issue: f64,
+    pub due_date: Option<String>,
+    pub current_outstanding: f64,
+    pub total_repaid: f64,
+    pub status: String,
+    pub entries: Vec<ScheduleEntry>,
+}
+
+/// Add N calendar months to a NaiveDate, clamping to the last day of the target month.
+fn add_months(date: chrono::NaiveDate, n: u32) -> chrono::NaiveDate {
+    let mut month = date.month() + n;
+    let mut year  = date.year() + ((month - 1) / 12) as i32;
+    month = ((month - 1) % 12) + 1;
+    let last_day  = chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap())
+        - chrono::Duration::days(1);
+    let day = date.day().min(last_day.day());
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or(last_day)
+}
+
+pub fn get_loan_repayment_schedule(
+    conn: &Connection,
+    loan_id: i64,
+) -> Result<LoanRepaymentSchedule, AppError> {
+    // ── Fetch loan ────────────────────────────────────────────────────────
+    let loan = get_loan_by_id(conn, loan_id)?
+        .ok_or_else(|| AppError::business("Loan not found"))?;
+
+    let principal   = loan.amount;
+    let daily_rate  = loan.daily_interest_rate;
+    let daily_int   = (principal * daily_rate / 100.0 * 100.0).round() / 100.0;
+    let upfront_int = loan.upfront_interest_amount;
+    let outstanding_at_issue = principal - upfront_int;
+
+    let upfront_days: i64 = if loan.loan_type == "weekly" { 100 } else { 30 };
+
+    let issued_date = chrono::NaiveDate::parse_from_str(&loan.issued_at[..10], "%Y-%m-%d")
+        .map_err(|_| AppError::business("Invalid issued_at date"))?;
+    let upfront_end = issued_date + chrono::Duration::days(upfront_days);
+    let due_date_nd = if loan.loan_type == "weekly" {
+        Some(issued_date + chrono::Duration::days(120))
+    } else {
+        None
+    };
+    let today = chrono::Local::now().date_naive();
+
+    // ── Fetch repayments ──────────────────────────────────────────────────
+    let mut pay_stmt = conn.prepare(
+        "SELECT amount, payment_method, created_at FROM loan_payments
+         WHERE loan_id = ?1 ORDER BY created_at ASC"
+    )?;
+    let payments: Vec<(f64, String, chrono::NaiveDate)> = pay_stmt
+        .query_map([loan_id], |r| {
+            let date_str: String = r.get(2)?;
+            Ok((r.get(0)?, r.get(1)?,
+                chrono::NaiveDate::parse_from_str(&date_str[..10], "%Y-%m-%d")
+                    .unwrap_or(today)))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_repaid: f64 = payments.iter().map(|(a, _, _)| a).sum();
+
+    // ── Build date set ────────────────────────────────────────────────────
+    // Monthly snapshots from issued_date for max(today + 3 months, due_date + 3 months, 12 months)
+    let horizon = {
+        let mut h = add_months(issued_date, 12);
+        if let Some(dd) = due_date_nd { h = h.max(dd + chrono::Duration::days(90)); }
+        h = h.max(add_months(today, 3));
+        h
+    };
+
+    // (date, entry_type, label)
+    let mut events: Vec<(chrono::NaiveDate, &str, String)> = vec![
+        (issued_date, "issued", "Loan Issued".to_string()),
+        (upfront_end, "upfront_end",
+         format!("Upfront Period Ends ({} days)", upfront_days)),
+    ];
+
+    // Monthly markers
+    let mut cursor = add_months(issued_date, 1);
+    let mut month_n: u32 = 1;
+    while cursor <= horizon {
+        events.push((cursor, "monthly", format!("Month {}", month_n)));
+        cursor = add_months(issued_date, month_n + 1);
+        month_n += 1;
+    }
+
+    // Due date (weekly only)
+    if let Some(dd) = due_date_nd {
+        events.push((dd, "due_date", "Due Date".to_string()));
+    }
+
+    // Today marker (only if after issued date)
+    if today > issued_date {
+        events.push((today, "today", "Today".to_string()));
+    }
+
+    // Payment events
+    for (amt, method, date) in &payments {
+        events.push((*date, "payment",
+            format!("Repayment ({})", method.to_lowercase())));
+    }
+
+    // Sort by date, then by type priority (payments before same-day markers)
+    events.sort_by(|(da, ta, _), (db, tb, _)| {
+        da.cmp(db).then_with(|| {
+            let rank = |t: &&str| match *t {
+                "payment" => 0, "issued" => 1, _ => 2
+            };
+            rank(&ta).cmp(&rank(tb))
+        })
+    });
+
+    // ── Build entries ──────────────────────────────────────────────────────
+    let mut entries: Vec<ScheduleEntry> = Vec::new();
+
+    for (date, entry_type, label) in &events {
+        let days_elapsed = (*date - issued_date).num_days();
+        let days_after   = (days_elapsed - upfront_days).max(0);
+        let accrued      = (days_after as f64 * daily_int * 100.0).round() / 100.0;
+        let projected    = outstanding_at_issue + accrued;
+        let is_past      = *date <= today;
+        let is_overdue   = due_date_nd.map_or(false, |dd| *date > dd && is_past);
+
+        let (pay_amount, pay_method) = if *entry_type == "payment" {
+            // Find the corresponding payment
+            let p = payments.iter().find(|(_, _, d)| d == date);
+            p.map(|(a, m, _)| (*a, m.clone())).unwrap_or((0.0, String::new()))
+        } else {
+            (0.0, String::new())
+        };
+
+        entries.push(ScheduleEntry {
+            date: date.to_string(),
+            label: label.clone(),
+            entry_type: entry_type.to_string(),
+            days_elapsed,
+            days_after_upfront: days_after,
+            interest_accrued: accrued,
+            projected_outstanding: projected,
+            daily_interest: daily_int,
+            is_past,
+            is_overdue,
+            payment_amount: pay_amount,
+            payment_method: pay_method,
+        });
+    }
+
+    Ok(LoanRepaymentSchedule {
+        loan_id,
+        member_name: loan.member_name.unwrap_or_default(),
+        principal,
+        daily_rate,
+        daily_interest: daily_int,
+        loan_type: loan.loan_type.clone(),
+        issued_at: loan.issued_at[..10].to_string(),
+        upfront_days,
+        upfront_end_date: upfront_end.to_string(),
+        upfront_interest: upfront_int,
+        outstanding_at_issue,
+        due_date: due_date_nd.map(|d| d.to_string()),
+        current_outstanding: loan.outstanding_amount,
+        total_repaid,
+        status: loan.status,
+        entries,
+    })
 }
 

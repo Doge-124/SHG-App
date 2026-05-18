@@ -59,9 +59,11 @@ export interface Loan {
   memberName: string
   amount: number
   outstandingAmount: number
-  interestRate: number
+  interestRate: number          // legacy field, kept for compat
+  dailyInterestRate: number     // % per day
   totalRepayable: number
   interestAmount: number
+  upfrontInterestAmount: number // first 30 days interest collected at disbursement
   paymentMethod: 'cash' | 'bank'
   loanType: 'monthly' | 'weekly'
   note?: string
@@ -73,7 +75,7 @@ export interface Loan {
 export interface LoanFormData {
   memberId: string
   amount: number
-  interestRate: number
+  dailyInterestRate: number     // % per day
   paymentMethod: 'cash' | 'bank'
   loanType: 'monthly' | 'weekly'
   note?: string
@@ -139,12 +141,15 @@ export interface VoucherFormData {
 export interface ChitGroup {
   id: string
   name: string
-  totalAmount: number
-  monthlyContribution: number
-  totalMembers: number
+  totalAmount: number           // P: fixed prize per winner
+  monthlyContribution: number   // C: per member per cycle
+  totalMembers: number          // N
   currentMembers: number
-  durationMonths: number
+  durationMonths: number        // total cycles
   currentCycle: number
+  winnersPerCycle: number       // W
+  commissionPerWinner: number   // F
+  fixedPrizeAmount: number      // P (same as totalAmount for new chits)
   status: 'active' | 'completed' | 'cancelled'
   startDate: string
   createdAt: string
@@ -152,10 +157,12 @@ export interface ChitGroup {
 
 export interface ChitGroupFormData {
   name: string
-  totalAmount: number
-  monthlyContribution: number
-  totalMembers: number
-  durationMonths: number
+  totalAmount: number        // P: fixed prize amount per cycle
+  monthlyContribution: number // C: per member per cycle
+  totalMembers: number       // N
+  durationMonths: number     // total cycles = floor(N/W)
+  winnersPerCycle: number    // W (1 fixed + W-1 auction)
+  commissionPerWinner: number // F: flat commission SHG keeps per winner
   startDate: string
 }
 
@@ -167,6 +174,27 @@ export interface ChitMember {
   joinedAt: string
   isWinner: boolean
   winCycle?: number
+}
+
+export interface ChitCycleWinner {
+  id: string
+  chitGroupId: string
+  cycleId: string
+  memberId: string
+  memberName: string
+  winnerType: 'FIXED' | 'AUCTION'
+  bidDiscount: number
+  commission: number
+  payoutAmount: number
+  paymentMethod: 'cash' | 'bank'
+  paidAt: string
+}
+
+export interface MemberEligibility {
+  memberId: string
+  memberName: string
+  isEligible: boolean
+  adminOverride: boolean
 }
 
 export interface ChitCycle {
@@ -307,12 +335,20 @@ export interface MemberPaymentInput {
   paymentMethod: 'cash' | 'bank'
 }
 
+export interface PastWinnerEntry {
+  memberId: string
+  winnerType: 'FIXED' | 'AUCTION'
+  bidDiscount: number
+  commission: number
+  payoutAmount: number
+  paymentMethod: string
+}
+
 export interface PastChitCycleData {
   cycleNumber: number
   auctionDate: string
-  winningMemberId?: string
-  bidDiscount: number
-  winnerPayout?: number
+  winners: PastWinnerEntry[]
+  auctionDiscountPerMember: number
   memberPayments: MemberPaymentInput[]
 }
 

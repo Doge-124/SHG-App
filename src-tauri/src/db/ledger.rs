@@ -95,9 +95,10 @@ pub fn record_voucher(
         |row| row.get::<_, f64>(0),
     )?;
     
-    if current_balance < amount {
+    // 0.005 tolerance absorbs f64 rounding noise (half a paisa).
+    if current_balance + 0.005 < amount {
         return Err(AppError::business(format!(
-            "Insufficient {} balance: available {}, required {}",
+            "Insufficient {} balance: available {:.2}, required {:.2}",
             payment_method, current_balance, amount
         )));
     }

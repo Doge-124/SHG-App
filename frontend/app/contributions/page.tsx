@@ -1,0 +1,418 @@
+'use client'
+
+import { useState, useEffect, useCallback } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Spinner } from '@/components/ui/spinner'
+import { PageHeader } from '@/components/page-header'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { recordWeeklyContribution } from '@/lib/api/receipts'
+import { formatCurrency, formatDate } from '@/lib/format'
+import {
+  CheckCircle2, Clock, ChevronLeft, ChevronRight, RefreshCw,
+  Users, Banknote, AlertCircle, Plus,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+
+interface MemberStatus {
+  memberId: number
+  memberName: string
+  memberCode: string
+  hasPaid: boolean
+  amountPaid: number
+  paymentMethod: string | null
+  paidAt: string | null
+  paymentCount: number
+  totalSavings: number
+}
+
+interface Summary {
+  fromDate: string
+  toDate: string
+  totalMembers: number
+  paidCount: number
+  pendingCount: number
+  totalCollected: number
+  members: MemberStatus[]
+}
+
+// Return Monday of the week containing the given date
+function weekStart(d: Date): Date {
+  const day = d.getDay() // 0=Sun
+  const diff = (day === 0 ? -6 : 1 - day) // Monday
+  const mon = new Date(d)
+  mon.setDate(d.getDate() + diff)
+  mon.setHours(0, 0, 0, 0)
+  return mon
+}
+
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d)
+  r.setDate(r.getDate() + n)
+  return r
+}
+
+function toISO(d: Date) {
+  return d.toISOString().split('T')[0]
+}
+
+function formatRange(from: string, to: string) {
+  return `${formatDate(from)} — ${formatDate(to)}`
+}
+
+export default function ContributionsPage() {
+  const [weekOf, setWeekOf] = useState<Date>(() => weekStart(new Date()))
+  const [summary, setSummary] = useState<Summary | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [filter, setFilter] = useState<'all' | 'paid' | 'pending'>('all')
+  const [search, setSearch] = useState('')
+
+  // Quick-pay dialog
+  const [payDialog, setPayDialog] = useState<{ open: boolean; member: MemberStatus | null }>({ open: false, member: null })
+  const [payAmount, setPayAmount] = useState('')
+  const [payMethod, setPayMethod] = useState<'CASH' | 'BANK'>('CASH')
+  const [isPaying, setIsPaying] = useState(false)
+
+  const fromDate = toISO(weekOf)
+  const toDate = toISO(addDays(weekOf, 6))
+
+  const load = useCallback(async (from: string, to: string) => {
+    setIsLoading(true)
+    try {
+      const result = await invoke<Summary>('get_weekly_contribution_status_cmd', {
+        fromDate: from,
+        toDate: to,
+      })
+      setSummary(result)
+    } catch (err: any) {
+      toast.error(err?.toString() || 'Failed to load contributions')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load(fromDate, toDate) }, [fromDate, toDate])
+
+  const prevWeek = () => setWeekOf(w => addDays(w, -7))
+  const nextWeek = () => setWeekOf(w => addDays(w, 7))
+  const thisWeek = () => setWeekOf(weekStart(new Date()))
+  const isCurrentWeek = toISO(weekOf) === toISO(weekStart(new Date()))
+  const isInFuture = weekOf > weekStart(new Date())
+
+  // Filtered members
+  const displayed = (summary?.members ?? []).filter(m => {
+    if (filter === 'paid' && !m.hasPaid) return false
+    if (filter === 'pending' && m.hasPaid) return false
+    if (search) {
+      const q = search.toLowerCase()
+      return m.memberName.toLowerCase().includes(q) || m.memberCode.toLowerCase().includes(q)
+    }
+    return true
+  })
+
+  // Quick-pay submit
+  const handlePay = async () => {
+    if (!payDialog.member) return
+    const amount = parseFloat(payAmount)
+    if (!amount || amount <= 0) { toast.error('Enter a valid amount'); return }
+    setIsPaying(true)
+    try {
+      const res = await recordWeeklyContribution({
+        member_id: payDialog.member.memberId,
+        amount,
+        payment_method: payMethod,
+      })
+      if (res.success) {
+        toast.success(`Recorded ${formatCurrency(amount)} for ${payDialog.member.memberName}`)
+        setPayDialog({ open: false, member: null })
+        setPayAmount('')
+        setPayMethod('CASH')
+        load(fromDate, toDate)
+      } else {
+        toast.error(res.error || 'Failed to record')
+      }
+    } catch (e: any) {
+      toast.error(e?.toString() || 'Error')
+    } finally {
+      setIsPaying(false)
+    }
+  }
+
+  const openPayDialog = (m: MemberStatus) => {
+    setPayDialog({ open: true, member: m })
+    setPayAmount('')
+    setPayMethod('CASH')
+  }
+
+  const paidPct = summary ? Math.round((summary.paidCount / summary.totalMembers) * 100) : 0
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Weekly Contributions"
+        description="Track who has paid their savings contribution for the week"
+      >
+        <Button variant="outline" onClick={() => load(fromDate, toDate)} disabled={isLoading}>
+          {isLoading ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+          Refresh
+        </Button>
+      </PageHeader>
+
+      {/* Week navigator */}
+      <Card>
+        <CardContent className="pt-4 pb-4">
+          <div className="flex items-center justify-between gap-4">
+            <Button variant="outline" size="icon" onClick={prevWeek}>
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <div className="text-center flex-1">
+              <p className="font-semibold text-base">
+                {isCurrentWeek ? 'This Week' : isInFuture ? 'Upcoming Week' : 'Past Week'}
+              </p>
+              <p className="text-sm text-muted-foreground">{formatRange(fromDate, toDate)}</p>
+            </div>
+            <Button variant="outline" size="icon" onClick={nextWeek}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+          {!isCurrentWeek && (
+            <div className="flex justify-center mt-3">
+              <Button variant="ghost" size="sm" onClick={thisWeek}>
+                Jump to current week
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {isLoading && (
+        <div className="flex justify-center py-12">
+          <Spinner className="h-8 w-8" />
+        </div>
+      )}
+
+      {!isLoading && summary && (
+        <>
+          {/* Summary cards */}
+          <div className="grid gap-4 sm:grid-cols-4">
+            <Card>
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
+                    <Users className="h-5 w-5 text-muted-foreground" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total Members</p>
+                    <p className="font-bold text-lg">{summary.totalMembers}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-green-200">
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-100">
+                    <CheckCircle2 className="h-5 w-5 text-green-700" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Paid</p>
+                    <p className="font-bold text-lg text-green-700">
+                      {summary.paidCount}
+                      <span className="text-xs font-normal text-muted-foreground ml-1">({paidPct}%)</span>
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className={cn(summary.pendingCount > 0 ? 'border-orange-300' : 'border-green-200')}>
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className={cn('flex h-10 w-10 items-center justify-center rounded-lg', summary.pendingCount > 0 ? 'bg-orange-100' : 'bg-green-100')}>
+                    <Clock className={cn('h-5 w-5', summary.pendingCount > 0 ? 'text-orange-600' : 'text-green-700')} />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Pending</p>
+                    <p className={cn('font-bold text-lg', summary.pendingCount > 0 ? 'text-orange-600' : 'text-green-700')}>
+                      {summary.pendingCount}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-blue-200">
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100">
+                    <Banknote className="h-5 w-5 text-blue-700" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Collected</p>
+                    <p className="font-bold text-lg text-blue-700">{formatCurrency(summary.totalCollected)}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Progress bar */}
+          <div className="space-y-1">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>{summary.paidCount} of {summary.totalMembers} paid</span>
+              <span>{paidPct}%</span>
+            </div>
+            <div className="h-2.5 rounded-full bg-muted overflow-hidden">
+              <div
+                className={cn('h-full rounded-full transition-all', paidPct === 100 ? 'bg-green-500' : 'bg-blue-500')}
+                style={{ width: `${paidPct}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="flex flex-wrap gap-3 items-center">
+            <Input
+              placeholder="Search member…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-48"
+            />
+            <div className="flex gap-1 rounded-lg border p-1">
+              {(['all', 'paid', 'pending'] as const).map(f => (
+                <Button
+                  key={f}
+                  variant={filter === f ? 'default' : 'ghost'}
+                  size="sm"
+                  className="h-7 px-3"
+                  onClick={() => setFilter(f)}
+                >
+                  {f === 'all' ? 'All' : f === 'paid' ? `Paid (${summary.paidCount})` : `Pending (${summary.pendingCount})`}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {/* Member list */}
+          <div className="space-y-2">
+            {displayed.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                <AlertCircle className="h-8 w-8 mb-2 opacity-40" />
+                <p>No members match your filter</p>
+              </div>
+            )}
+            {displayed.map(member => (
+              <div
+                key={member.memberId}
+                className={cn(
+                  'flex items-center gap-4 rounded-lg border px-4 py-3 transition-colors',
+                  member.hasPaid
+                    ? 'bg-green-50/40 border-green-200'
+                    : 'bg-orange-50/30 border-orange-200'
+                )}
+              >
+                {/* Status icon */}
+                {member.hasPaid
+                  ? <CheckCircle2 className="h-5 w-5 text-green-600 flex-shrink-0" />
+                  : <Clock className="h-5 w-5 text-orange-500 flex-shrink-0" />
+                }
+
+                {/* Member info */}
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm truncate">{member.memberName}</p>
+                  <p className="text-xs text-muted-foreground">{member.memberCode}</p>
+                </div>
+
+                {/* Paid info or pending */}
+                {member.hasPaid ? (
+                  <div className="text-right flex-shrink-0">
+                    <p className="font-semibold text-green-700 text-sm">{formatCurrency(member.amountPaid)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {member.paymentMethod} · {member.paidAt ? formatDate(member.paidAt) : ''}
+                      {member.paymentCount > 1 && ` · ${member.paymentCount} entries`}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="text-xs text-muted-foreground">Not paid</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1 text-xs"
+                      onClick={() => openPayDialog(member)}
+                    >
+                      <Plus className="h-3 w-3" />Record
+                    </Button>
+                  </div>
+                )}
+
+                {/* Total savings badge */}
+                <Badge variant="secondary" className="text-xs flex-shrink-0 hidden sm:flex">
+                  Total: {formatCurrency(member.totalSavings)}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Quick-pay dialog */}
+      <Dialog open={payDialog.open} onOpenChange={open => !open && setPayDialog({ open: false, member: null })}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Record Contribution</DialogTitle>
+          </DialogHeader>
+          {payDialog.member && (
+            <div className="space-y-4">
+              <div className="rounded-lg bg-muted p-3 text-sm">
+                <p className="font-medium">{payDialog.member.memberName}</p>
+                <p className="text-muted-foreground text-xs">{payDialog.member.memberCode}</p>
+                <p className="text-xs mt-1 text-muted-foreground">
+                  Week: {formatRange(fromDate, toDate)}
+                </p>
+              </div>
+              <div className="space-y-1">
+                <Label>Amount</Label>
+                <Input
+                  type="number" min="1" step="0.01" placeholder="0.00"
+                  value={payAmount}
+                  onChange={e => setPayAmount(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Payment Method</Label>
+                <RadioGroup value={payMethod} onValueChange={v => setPayMethod(v as 'CASH' | 'BANK')}
+                  className="flex gap-4">
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="CASH" id="r-cash" /><Label htmlFor="r-cash">Cash</Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="BANK" id="r-bank" /><Label htmlFor="r-bank">Bank</Label>
+                  </div>
+                </RadioGroup>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPayDialog({ open: false, member: null })} disabled={isPaying}>
+              Cancel
+            </Button>
+            <Button onClick={handlePay} disabled={isPaying || !payAmount}>
+              {isPaying ? <Spinner className="mr-2 h-4 w-4" /> : null}
+              Record
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
