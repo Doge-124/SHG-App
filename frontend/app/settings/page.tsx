@@ -60,6 +60,10 @@ export default function SettingsPage() {
   const [isExportingLogs, setIsExportingLogs] = useState(false)
   const [isDiagnosing, setIsDiagnosing] = useState(false)
   const [diagnosticText, setDiagnosticText] = useState<string | null>(null)
+  const [isCheckingIntegrity, setIsCheckingIntegrity] = useState(false)
+  const [integrityReport, setIntegrityReport] = useState<any | null>(null)
+  const [crashStatus, setCrashStatus] = useState<{ configured: boolean; enabled: boolean } | null>(null)
+  const [isTestingCrash, setIsTestingCrash] = useState(false)
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [isRestoreLoading, setIsRestoreLoading] = useState(false)
   const [clearDataDialogOpen, setClearDataDialogOpen] = useState(false)
@@ -175,6 +179,12 @@ export default function SettingsPage() {
         setShgOpeningExisting({ cash: s.cash, bank: s.bank })
       })
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    invoke<{ configured: boolean; enabled: boolean }>('get_crash_reporting_status')
+      .then(setCrashStatus)
+      .catch(() => setCrashStatus({ configured: false, enabled: false }))
   }, [])
 
   const handleLockPastData = async () => {
@@ -1108,6 +1118,131 @@ export default function SettingsPage() {
 
           <Separator />
 
+          {/* Database integrity check */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Database Integrity Check</p>
+            <p className="text-xs text-muted-foreground">
+              Validates database structure, foreign-key constraints, and balance invariants.
+              Run if you suspect data inconsistency or before submitting a support ticket.
+            </p>
+            <Button
+              variant="outline"
+              disabled={isCheckingIntegrity}
+              onClick={async () => {
+                setIsCheckingIntegrity(true)
+                setIntegrityReport(null)
+                try {
+                  const report = await invoke<any>('check_db_integrity')
+                  setIntegrityReport(report)
+                  if (report.overallOk) {
+                    toast.success('Database integrity OK')
+                  } else {
+                    toast.error(`Database integrity check found ${report.errorCount} error(s)`)
+                  }
+                } catch (err: any) {
+                  toast.error('Integrity check failed: ' + err?.toString())
+                } finally {
+                  setIsCheckingIntegrity(false)
+                }
+              }}
+            >
+              {isCheckingIntegrity
+                ? <><Spinner className="mr-2 h-4 w-4" />Checking…</>
+                : <><Check className="mr-2 h-4 w-4" />Run Integrity Check</>}
+            </Button>
+
+            {integrityReport && (
+              <div className={`mt-2 rounded-lg border p-3 space-y-2 ${
+                integrityReport.overallOk ? 'bg-green-50 border-green-300' : 'bg-red-50 border-red-300'
+              }`}>
+                <p className={`text-sm font-semibold ${integrityReport.overallOk ? 'text-green-800' : 'text-red-800'}`}>
+                  {integrityReport.overallOk
+                    ? '✓ All integrity checks passed'
+                    : `✗ ${integrityReport.errorCount} error(s), ${integrityReport.warnCount} warning(s)`}
+                </p>
+                <div className="space-y-1.5 text-xs">
+                  {integrityReport.checks.map((c: any, i: number) => (
+                    <div key={i} className="flex items-start gap-2">
+                      <span className={`flex-shrink-0 w-4 ${
+                        c.severity === 'error' ? 'text-red-600'
+                        : c.severity === 'warn' ? 'text-orange-600'
+                        : c.severity === 'info' ? 'text-blue-600'
+                        : 'text-green-600'
+                      }`}>
+                        {c.severity === 'error' ? '✗' : c.severity === 'warn' ? '⚠' : c.severity === 'info' ? 'ℹ' : '✓'}
+                      </span>
+                      <div className="flex-1">
+                        <span className={c.passed ? '' : 'font-medium'}>{c.name}</span>
+                        {c.details && (
+                          <p className="text-muted-foreground mt-0.5">{c.details}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <Separator />
+
+          {/* Crash reporting */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Automatic Crash Reporting</p>
+                <p className="text-xs text-muted-foreground max-w-xl">
+                  When the app crashes or hits an unexpected error, send the technical details to the developer
+                  so it can be fixed. <strong>No personal data is sent</strong> — names, phone numbers, and
+                  balances are not included. Only error messages, stack traces, app version, and your installation ID.
+                </p>
+              </div>
+              <Switch
+                checked={crashStatus?.enabled ?? false}
+                disabled={!crashStatus?.configured}
+                onCheckedChange={async checked => {
+                  try {
+                    await invoke('set_crash_reporting_enabled', { enabled: checked })
+                    setCrashStatus(prev => prev ? { ...prev, enabled: checked } : prev)
+                    toast.success(checked ? 'Crash reporting enabled' : 'Crash reporting disabled')
+                  } catch (err: any) {
+                    toast.error('Failed: ' + err?.toString())
+                  }
+                }}
+              />
+            </div>
+            {!crashStatus?.configured && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                Crash reporting is not configured in this build (no Sentry DSN was set).
+                Toggling on has no effect until the next signed release.
+              </p>
+            )}
+            {crashStatus?.configured && crashStatus.enabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isTestingCrash}
+                onClick={async () => {
+                  setIsTestingCrash(true)
+                  try {
+                    const result = await invoke<string>('send_test_crash_event')
+                    toast.success(result)
+                  } catch (err: any) {
+                    toast.error('Test failed: ' + err?.toString())
+                  } finally {
+                    setIsTestingCrash(false)
+                  }
+                }}
+              >
+                {isTestingCrash
+                  ? <><Spinner className="mr-2 h-4 w-4" />Sending…</>
+                  : <>Send Test Event</>}
+              </Button>
+            )}
+          </div>
+
+          <Separator />
+
           {/* Diagnostic report */}
           <div className="space-y-2">
             <p className="text-sm font-medium">Diagnostic Report</p>
@@ -1127,7 +1262,10 @@ export default function SettingsPage() {
                       `SHG Manager Diagnostic Report`,
                       `Generated: ${report.generatedAt}`,
                       ``,
+                      `Installation ID:   ${report.installationId}`,
+                      `Installed Since:   ${report.installationCreatedAt}`,
                       `App Version:       ${report.appVersion}`,
+                      `Schema Version:    v${report.schemaVersion}`,
                       `OS:                ${report.os} (${report.arch})`,
                       `DB Connected:      ${report.dbConnected ? 'Yes' : 'No (DB not unlocked)'}`,
                       ``,

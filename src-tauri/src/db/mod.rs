@@ -38,6 +38,8 @@ pub mod contributions;
 pub mod trial_balance;
 pub mod balance_sheet;
 pub mod income_expenditure;
+pub mod migrations;
+pub mod integrity;
 
 /// Open or create the encrypted SQLCipher database using a PIN-derived key.
 ///
@@ -61,19 +63,29 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
     let db_path = data_dir.join("shg.db");
     let sec_path = data_dir.join("security.json");
 
+    let backup_dir = app_dir.join("backups");
+
     if !db_path.exists() {
+        // ── Fresh install ─────────────────────────────────────────────
         let salt = key::generate_salt();
         let derived_key = key::derive_key(pin, &salt)?;
         let db_key = hex::encode(&derived_key);
 
         let conn = connection::open_db(&db_path, &db_key)?;
+        let mut conn = conn;
 
         conn.execute_batch(schema::SCHEMA_SQL)?;
-        let mut conn = conn;
         schema::apply_migrations(&mut conn)?;
-
-        // Initialize settings table for new database
         settings::init_settings_table(&mut conn)?;
+
+        // Initialise migration tracking and baseline at v1 (everything above).
+        migrations::init_schema_migrations_table(&conn)?;
+        migrations::baseline_to(&conn, migrations::CURRENT_SCHEMA_VERSION)?;
+
+        // Run any new migrations (versions > 1). On a fresh install there
+        // typically aren't any, but if there are they go through the same
+        // tracked path with a backup beforehand.
+        migrations::run_pending_migrations(&mut conn, &db_path, &backup_dir)?;
 
         store::save(
             &sec_path,
@@ -87,6 +99,7 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
         return Ok((conn, db_key));
     }
 
+    // ── Existing DB ──────────────────────────────────────────────────
     let sec = store::load(&sec_path)?
         .ok_or_else(|| AppError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -100,13 +113,22 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
     let db_key = hex::encode(&derived_key);
 
     let mut conn = connection::open_db(&db_path, &db_key)?;
+
+    // Legacy idempotent setup — runs every time, safe to keep.
     schema::apply_migrations(&mut conn)?;
-
-    // Initialize the loans table for existing databases
     loans::init_loans_table(&mut conn)?;
-
-    // Initialize settings table
     settings::init_settings_table(&mut conn)?;
+
+    // Migration tracking — baseline an existing pre-v1 DB so versioned
+    // migrations going forward run only when they should.
+    migrations::init_schema_migrations_table(&conn)?;
+    if migrations::current_version(&conn)? == 0 {
+        log::info!("Existing database detected — baselining at schema v{}", migrations::CURRENT_SCHEMA_VERSION);
+        migrations::baseline_to(&conn, migrations::CURRENT_SCHEMA_VERSION)?;
+    }
+
+    // Apply any new migrations (with auto-backup beforehand).
+    migrations::run_pending_migrations(&mut conn, &db_path, &backup_dir)?;
 
     Ok((conn, db_key))
 }

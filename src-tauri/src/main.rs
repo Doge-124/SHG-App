@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod crash_reporting;
 mod db;
 mod error;
+mod installation;
 mod security;
 mod state;
 mod types;
@@ -10,6 +12,12 @@ mod types;
 use state::AppState;
 
 fn main() {
+    // Must run before Sentry init so crash-reporting flag is loaded from disk.
+    let _ = installation::bootstrap();
+
+    // Sentry init returns a guard that flushes on drop (kept alive for whole program).
+    let _sentry_guard = crash_reporting::init();
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -128,6 +136,12 @@ fn main() {
             commands::settings::set_shg_opening_balance,
             commands::support::get_diagnostic_report,
             commands::support::get_log_dir,
+            commands::support::check_db_integrity,
+            commands::support::get_installation_id,
+            commands::support::get_schema_info,
+            commands::support::set_crash_reporting_enabled,
+            commands::support::get_crash_reporting_status,
+            commands::support::send_test_crash_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
