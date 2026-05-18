@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "publisher": "SHG Manager",
-    "copyright": "Â© 2026 SHG Manager"
+    "copyright": "Copyright 2026 SHG Manager"
   },
   "plugins": {
     "updater": {
@@ -47,13 +47,6 @@
       "windows": {
         "installMode": "passive"
       }
-    },
-    "log": {
-      "level": "info",
-      "targets": [
-        { "kind": "stdout" },
-        { "kind": "logdir", "filename": "shg-manager" }
-      ]
     }
   }
 }
