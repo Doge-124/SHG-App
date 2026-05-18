@@ -70,13 +70,21 @@ if ($currentVersion -eq $Version) {
 
 # ---- Update version files ------------------------------------------------
 # Using simple string concat for replacement to avoid PS quote-escape issues.
+# IMPORTANT: write with [System.IO.File]::WriteAllText (UTF-8 NO BOM).
+# Set-Content -Encoding UTF8 in PS 5.1 writes UTF-8 *with* BOM, which corrupts
+# JSON files (parsers reject the leading 0xEF 0xBB 0xBF bytes).
 Write-Host "Updating version files..." -ForegroundColor Cyan
+
+function Write-FileUtf8NoBom([string]$Path, [string]$Content) {
+    $absolutePath = [System.IO.Path]::GetFullPath($Path)
+    [System.IO.File]::WriteAllText($absolutePath, $Content)
+}
 
 # src-tauri/Cargo.toml -- TOML format: version = "x.y.z"
 $cargoPattern = '(?m)^version\s*=\s*"[^"]+"'
 $cargoReplacement = 'version = "' + $Version + '"'
 $cargoNew = $cargoToml -replace $cargoPattern, $cargoReplacement
-Set-Content -Path 'src-tauri\Cargo.toml' -Value $cargoNew -Encoding UTF8 -NoNewline
+Write-FileUtf8NoBom 'src-tauri\Cargo.toml' $cargoNew
 Write-Host "  [OK] src-tauri/Cargo.toml" -ForegroundColor Green
 
 # JSON files: "version": "x.y.z"
@@ -86,14 +94,14 @@ $jsonReplacement = '"version": "' + $Version + '"'
 # src-tauri/tauri.conf.json
 $tauriConf = Get-Content 'src-tauri\tauri.conf.json' -Raw
 $tauriNew = $tauriConf -replace $jsonPattern, $jsonReplacement
-Set-Content -Path 'src-tauri\tauri.conf.json' -Value $tauriNew -Encoding UTF8 -NoNewline
+Write-FileUtf8NoBom 'src-tauri\tauri.conf.json' $tauriNew
 Write-Host "  [OK] src-tauri/tauri.conf.json" -ForegroundColor Green
 
 # package.json (root, optional)
 if (Test-Path 'package.json') {
     $pkgJson = Get-Content 'package.json' -Raw
     $pkgNew = $pkgJson -replace $jsonPattern, $jsonReplacement
-    Set-Content -Path 'package.json' -Value $pkgNew -Encoding UTF8 -NoNewline
+    Write-FileUtf8NoBom 'package.json' $pkgNew
     Write-Host "  [OK] package.json" -ForegroundColor Green
 }
 
@@ -101,20 +109,29 @@ if (Test-Path 'package.json') {
 if (Test-Path 'frontend\package.json') {
     $feJson = Get-Content 'frontend\package.json' -Raw
     $feNew = $feJson -replace $jsonPattern, $jsonReplacement
-    Set-Content -Path 'frontend\package.json' -Value $feNew -Encoding UTF8 -NoNewline
+    Write-FileUtf8NoBom 'frontend\package.json' $feNew
     Write-Host "  [OK] frontend/package.json" -ForegroundColor Green
 }
 
 Write-Host ""
 
 # ---- Compile checks ------------------------------------------------------
+# Note: do NOT use `2>&1` here. In Windows PowerShell 5.1, redirecting a native
+# command's stderr wraps each line as a NativeCommandError, which combined with
+# $ErrorActionPreference='Stop' aborts the script even on a successful exit.
+# Cargo writes normal status messages (file locks, build progress) to stderr.
 if (-not $SkipChecks) {
     Write-Host "Running cargo check..." -ForegroundColor Cyan
     Push-Location src-tauri
     try {
-        cargo check 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: cargo check failed. Run 'cd src-tauri; cargo check' to see errors." -ForegroundColor Red
+        # Temporarily relax ErrorActionPreference so native stderr doesn't abort.
+        $oldEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & cargo check
+        $cargoExit = $LASTEXITCODE
+        $ErrorActionPreference = $oldEAP
+        if ($cargoExit -ne 0) {
+            Write-Host "ERROR: cargo check failed (exit $cargoExit)." -ForegroundColor Red
             Pop-Location
             exit 1
         }
@@ -126,9 +143,22 @@ if (-not $SkipChecks) {
     Write-Host "Running tsc --noEmit..." -ForegroundColor Cyan
     Push-Location frontend
     try {
-        npx tsc --noEmit 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: TypeScript check failed. Run 'cd frontend; npx tsc --noEmit' to see errors." -ForegroundColor Red
+        $oldEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        # Call tsc.cmd directly. npx can fail in PS 5.1 with "could not determine
+        # executable to run" even when the local binary is present, so we bypass it.
+        $tscBin = Join-Path (Get-Location) 'node_modules\.bin\tsc.cmd'
+        if (Test-Path $tscBin) {
+            & $tscBin --noEmit
+        } else {
+            Write-Host "WARNING: tsc.cmd not found at $tscBin -- run 'npm install' in frontend/ first" -ForegroundColor Yellow
+            Write-Host "         Falling back to npx (may fail)..." -ForegroundColor Yellow
+            & npx tsc --noEmit
+        }
+        $tscExit = $LASTEXITCODE
+        $ErrorActionPreference = $oldEAP
+        if ($tscExit -ne 0) {
+            Write-Host "ERROR: TypeScript check failed (exit $tscExit)." -ForegroundColor Red
             Pop-Location
             exit 1
         }

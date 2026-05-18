@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SHG Manager",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "identifier": "com.shg.manager",
   "build": {
     "frontendDist": "../frontend/out",
@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "publisher": "SHG Manager",
-    "copyright": "© 2026 SHG Manager"
+    "copyright": "Â© 2026 SHG Manager"
   },
   "plugins": {
     "updater": {
