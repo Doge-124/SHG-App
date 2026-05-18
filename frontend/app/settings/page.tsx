@@ -1052,7 +1052,15 @@ export default function SettingsPage() {
                       setUpdateStatus('You are on the latest version.')
                     }
                   } catch (err: any) {
-                    setUpdateStatus('Could not check for updates. Check your internet connection.')
+                    const msg = err?.toString() ?? 'unknown error'
+                    // 404 on latest.json usually means the release hasn't published
+                    // its updater manifest yet. Anything else is genuinely a network
+                    // or signature issue.
+                    if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+                      setUpdateStatus('No updater manifest found on the latest release yet. Try again later.')
+                    } else {
+                      setUpdateStatus('Update check failed: ' + msg)
+                    }
                   } finally {
                     setIsCheckingUpdate(false)
                   }

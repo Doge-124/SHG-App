@@ -62,5 +62,7 @@ jobs:
             - **Existing users**: The app will prompt you to update automatically
           releaseDraft: false
           prerelease: false
-          # This generates latest.json automatically alongside the installers
+          # Generates latest.json (the updater manifest) alongside the installers.
+          # Without this the Tauri updater plugin gets 404 on the manifest URL.
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
