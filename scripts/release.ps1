@@ -37,13 +37,21 @@ Write-Host ""
 
 # ---- Git status check ----------------------------------------------------
 # Auto-revert no-op CRLF/LF-only changes to Cargo.lock (recurring PS5.1/cargo papercut).
-$lockStat = git diff --numstat src-tauri/Cargo.lock 2>$null
+# Wrap git in a relaxed ErrorActionPreference because git writes harmless warnings
+# to stderr (CRLF/LF normalisation) which PS5.1 + Stop would treat as fatal.
+$oldEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$lockStat = & git diff --numstat src-tauri/Cargo.lock 2>$null
+$ErrorActionPreference = $oldEAP
 if ($lockStat) {
     $parts = $lockStat -split "\s+"
     # If only 1 line added + 1 line removed, it's pure line-ending churn -- safe to revert.
     if ($parts[0] -eq '1' -and $parts[1] -eq '1') {
         Write-Host "Auto-reverting Cargo.lock (line-ending noise only, no real diff)" -ForegroundColor DarkGray
-        git checkout -- src-tauri/Cargo.lock
+        $oldEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & git checkout -- src-tauri/Cargo.lock 2>$null | Out-Null
+        $ErrorActionPreference = $oldEAP
     }
 }
 
