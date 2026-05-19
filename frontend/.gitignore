@@ -12,3 +12,4 @@ node_modules/
 # Next.js auto-generated -- regenerated on every build, should never be tracked
 next-env.d.ts
 out/
+tsconfig.tsbuildinfo

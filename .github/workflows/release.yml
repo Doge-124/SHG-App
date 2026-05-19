@@ -62,7 +62,58 @@ jobs:
             - **Existing users**: The app will prompt you to update automatically
           releaseDraft: false
           prerelease: false
-          # Generates latest.json (the updater manifest) alongside the installers.
-          # Without this the Tauri updater plugin gets 404 on the manifest URL.
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          # tauri-action v0 doesn't reliably upload the updater bundle for Tauri v2.
+          # We handle latest.json + the .nsis.zip payload manually in the next step.
+          includeUpdaterJson: false
+
+      # Workaround: tauri-action above builds the .nsis.zip and .nsis.zip.sig but
+      # doesn't upload them or generate latest.json. We do that manually here.
+      # Without this the Tauri updater plugin gets 404 on the manifest URL.
+      - name: Upload updater bundle + manifest
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $bundleDir = 'src-tauri/target/release/bundle/nsis'
+
+          $zipFile = Get-ChildItem -Path $bundleDir -Filter '*-setup.nsis.zip' | Select-Object -First 1
+          $sigFile = Get-ChildItem -Path $bundleDir -Filter '*-setup.nsis.zip.sig' | Select-Object -First 1
+          if (-not $zipFile -or -not $sigFile) {
+            Write-Host "::error::Updater bundle missing -- expected .nsis.zip + .nsis.zip.sig in $bundleDir"
+            Get-ChildItem -Path $bundleDir
+            exit 1
+          }
+
+          $signature = (Get-Content $sigFile.FullName -Raw).Trim()
+          $assetName = "SHG.Manager_${version}_x64-setup.nsis.zip"
+          $repo = '${{ github.repository }}'
+          $tag = '${{ github.ref_name }}'
+
+          # Upload the .zip and .sig as release assets so the updater can fetch them.
+          Write-Host "Uploading $assetName + .sig"
+          gh release upload $tag "$($zipFile.FullName)#$assetName" --clobber
+          gh release upload $tag "$($sigFile.FullName)#$assetName.sig" --clobber
+
+          # Build latest.json — the updater manifest the app polls.
+          $pubDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $manifest = @{
+              version    = $version
+              notes      = "See https://github.com/$repo/releases/tag/$tag"
+              pub_date   = $pubDate
+              platforms  = @{
+                  'windows-x86_64' = @{
+                      signature = $signature
+                      url       = "https://github.com/$repo/releases/download/$tag/$assetName"
+                  }
+              }
+          } | ConvertTo-Json -Depth 8
+
+          [System.IO.File]::WriteAllText("$PWD/latest.json", $manifest)
+          Write-Host "Generated latest.json:"
+          Get-Content latest.json
+
+          gh release upload $tag 'latest.json' --clobber
+          Write-Host "Done. Customers' updater can now find this release."
