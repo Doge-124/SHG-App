@@ -35,6 +35,45 @@ Write-Host "  SHG Manager Release: $Tag" -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ---- GitHub Actions workflow YAML validation -----------------------------
+# Catches YAML syntax bugs in .github/workflows/*.yml before push, so we don't
+# discover them as "workflow file issue" instant-failures after pushing the tag.
+# Uses Python (which is required for the build chain anyway -- Strawberry Perl
+# is the only optional one). Soft-fails if Python isn't on PATH.
+$workflowFiles = Get-ChildItem -Path '.github/workflows' -Filter '*.yml' -ErrorAction SilentlyContinue
+if ($workflowFiles) {
+    $pyExe = $null
+    foreach ($candidate in @('py', 'python', 'python3')) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd) { $pyExe = $candidate; break }
+    }
+
+    if (-not $pyExe) {
+        Write-Host "Skipping workflow YAML validation (no Python on PATH)." -ForegroundColor Yellow
+    } else {
+        Write-Host "Validating workflow YAML..." -ForegroundColor Cyan
+        $oldEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        foreach ($wf in $workflowFiles) {
+            $script = "import sys, yaml`n" +
+                      "try:`n" +
+                      "    yaml.safe_load(open(r'$($wf.FullName)', encoding='utf-8'))`n" +
+                      "    print('  [OK] ' + r'$($wf.Name)')`n" +
+                      "except Exception as e:`n" +
+                      "    print('  [FAIL] ' + r'$($wf.Name)' + ': ' + str(e), file=sys.stderr)`n" +
+                      "    sys.exit(1)"
+            & $pyExe -c $script
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "ERROR: workflow YAML invalid; fix before releasing." -ForegroundColor Red
+                $ErrorActionPreference = $oldEAP
+                exit 1
+            }
+        }
+        $ErrorActionPreference = $oldEAP
+    }
+    Write-Host ""
+}
+
 # ---- Git status check ----------------------------------------------------
 # Auto-revert no-op CRLF/LF-only changes to Cargo.lock (recurring PS5.1/cargo papercut).
 # Wrap git in a relaxed ErrorActionPreference because git writes harmless warnings
