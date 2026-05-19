@@ -62,9 +62,11 @@ jobs:
             - **Existing users**: The app will prompt you to update automatically
           releaseDraft: false
           prerelease: false
-          # tauri-action v0 doesn't reliably upload the updater bundle for Tauri v2.
-          # We handle latest.json + the .nsis.zip payload manually in the next step.
-          includeUpdaterJson: false
+          # IMPORTANT: this MUST stay true so the build produces the .nsis.zip +
+          # .nsis.zip.sig pair. The action itself still fails to upload them
+          # ("Signature not found for the updater JSON" — known bug with Tauri v2),
+          # so the next step uploads them + a hand-built latest.json manually.
+          includeUpdaterJson: true
 
       # Workaround: tauri-action above builds the .nsis.zip and .nsis.zip.sig but
       # doesn't upload them or generate latest.json. We do that manually here.
