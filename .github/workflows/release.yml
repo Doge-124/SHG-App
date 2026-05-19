@@ -98,21 +98,18 @@ jobs:
           $sigName = "$zipName.sig"
           $msiName = "SHG.Manager_${version}_x64_en-US.msi"
 
-          # Create the GitHub release (or skip if it already exists from a previous run)
+          # Create the GitHub release (or skip if it already exists from a previous run).
+          # Notes built with `+` instead of a here-string because here-strings would
+          # need their closing `"@` at column 0, which breaks the YAML block scalar.
           $existing = gh release view $tag 2>$null
           if (-not $existing) {
               Write-Host "Creating release $tag"
-              $body = @"
-## What's new in $tag
-
-See the commit history for details.
-
-### Installation
-- **First time**: Download ``$exeName`` and run it
-- **Existing users**: The app will prompt you to update automatically
-"@
-              $body | Out-File -FilePath release_body.md -Encoding utf8 -NoNewline
-              gh release create $tag --title "SHG Manager $tag" --notes-file release_body.md
+              $notes = "## What's new in $tag`n`n" +
+                       "See the commit history for details.`n`n" +
+                       "### Installation`n" +
+                       "- First time: download ``$exeName`` and run it`n" +
+                       "- Existing users: the app will prompt to update automatically"
+              gh release create $tag --title "SHG Manager $tag" --notes $notes
           } else {
               Write-Host "Release $tag already exists, will upload assets with --clobber"
           }
