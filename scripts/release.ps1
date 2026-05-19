@@ -36,6 +36,17 @@ Write-Host "===========================================================" -Foregr
 Write-Host ""
 
 # ---- Git status check ----------------------------------------------------
+# Auto-revert no-op CRLF/LF-only changes to Cargo.lock (recurring PS5.1/cargo papercut).
+$lockStat = git diff --numstat src-tauri/Cargo.lock 2>$null
+if ($lockStat) {
+    $parts = $lockStat -split "\s+"
+    # If only 1 line added + 1 line removed, it's pure line-ending churn -- safe to revert.
+    if ($parts[0] -eq '1' -and $parts[1] -eq '1') {
+        Write-Host "Auto-reverting Cargo.lock (line-ending noise only, no real diff)" -ForegroundColor DarkGray
+        git checkout -- src-tauri/Cargo.lock
+    }
+}
+
 $status = git status --porcelain
 if ($status -and -not $Force) {
     Write-Host "ERROR: Working tree has uncommitted changes:" -ForegroundColor Red
