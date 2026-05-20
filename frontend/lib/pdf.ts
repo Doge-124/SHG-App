@@ -190,8 +190,8 @@ function renderReceipt(doc: jsPDF, receipt: any, shgName?: string, offsetY = 0):
   doc.setFontSize(8)
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(100, 116, 139)
-  doc.text('Receiver\'s Signature', M, sigY + 6)
-  doc.text('Authorised Signatory', W - M, sigY + 6, { align: 'right' })
+  doc.text('Member\'s Signature', M, sigY + 6)
+  doc.text('Secretary\'s Signature', W - M, sigY + 6, { align: 'right' })
 
   // Signature lines
   doc.setDrawColor(148, 163, 184)
@@ -206,7 +206,7 @@ function renderReceipt(doc: jsPDF, receipt: any, shgName?: string, offsetY = 0):
   doc.setFontSize(7)
   doc.setFont('helvetica', 'italic')
   doc.setTextColor(148, 163, 184)
-  doc.text('Computer-generated receipt — valid without physical signature', W / 2, y, { align: 'center' })
+  doc.text('Receipt requires physical signatures to be valid', W / 2, y, { align: 'center' })
 }
 
 // ─── Voucher renderer ─────────────────────────────────────────────────────────
@@ -330,7 +330,7 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   doc.setFontSize(8)
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(100, 116, 139)
-  doc.text('Prepared By', M, sigY + 6)
+  doc.text('Recipient\'s Signature', M, sigY + 6)
   doc.text('Authorised Signatory', W - M, sigY + 6, { align: 'right' })
 
   doc.setDrawColor(148, 163, 184)
@@ -345,7 +345,7 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   doc.setFontSize(7)
   doc.setFont('helvetica', 'italic')
   doc.setTextColor(180, 130, 60)
-  doc.text('Computer-generated voucher — valid without physical signature', W / 2, fY, { align: 'center' })
+  doc.text('Voucher requires physical signatures to be valid', W / 2, fY, { align: 'center' })
 }
 
 // ─── Public download API ──────────────────────────────────────────────────────
