@@ -73,16 +73,17 @@ jobs:
           $msiDir  = 'src-tauri/target/release/bundle/msi'
 
           # Find the artifacts the bundler produced.
-          $setupExe  = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe'         | Select-Object -First 1
-          $nsisZip   = Get-ChildItem -Path $nsisDir -Filter '*-setup.nsis.zip'    | Select-Object -First 1
-          $nsisSig   = Get-ChildItem -Path $nsisDir -Filter '*-setup.nsis.zip.sig'| Select-Object -First 1
-          $msiFile   = Get-ChildItem -Path $msiDir  -Filter '*.msi'               | Select-Object -First 1
+          # Note: with bundle.createUpdaterArtifacts=true, Tauri v2 signs the
+          # installer .exe DIRECTLY (no separate .nsis.zip payload). The updater
+          # downloads and runs the .exe, verifying it against the .sig content.
+          $setupExe = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe'     | Select-Object -First 1
+          $setupSig = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe.sig' | Select-Object -First 1
+          $msiFile  = Get-ChildItem -Path $msiDir  -Filter '*.msi'           | Select-Object -First 1
 
           foreach ($pair in @(
-              @{ name = 'setup.exe'; file = $setupExe },
-              @{ name = 'nsis.zip';  file = $nsisZip  },
-              @{ name = 'nsis.sig';  file = $nsisSig  },
-              @{ name = 'msi';       file = $msiFile  }
+              @{ name = 'setup.exe';     file = $setupExe },
+              @{ name = 'setup.exe.sig'; file = $setupSig },
+              @{ name = 'msi';           file = $msiFile  }
           )) {
               if (-not $pair.file) {
                   Write-Host "::error::Missing build artifact: $($pair.name)"
@@ -90,12 +91,11 @@ jobs:
               }
           }
 
-          $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
+          $signature = (Get-Content $setupSig.FullName -Raw).Trim()
 
           # Stable asset names (no spaces -> no URL-encoding surprises)
           $exeName = "SHG.Manager_${version}_x64-setup.exe"
-          $zipName = "SHG.Manager_${version}_x64-setup.nsis.zip"
-          $sigName = "$zipName.sig"
+          $sigName = "$exeName.sig"
           $msiName = "SHG.Manager_${version}_x64_en-US.msi"
 
           # Create the GitHub release (or skip if it already exists from a previous run).
@@ -115,15 +115,15 @@ jobs:
           }
 
           # Upload all assets
-          Write-Host "Uploading installers + updater bundle..."
+          Write-Host "Uploading installers + updater signature..."
           gh release upload $tag `
             "$($setupExe.FullName)#$exeName" `
+            "$($setupSig.FullName)#$sigName" `
             "$($msiFile.FullName)#$msiName"  `
-            "$($nsisZip.FullName)#$zipName"  `
-            "$($nsisSig.FullName)#$sigName"  `
             --clobber
 
-          # Build and upload latest.json (the updater manifest)
+          # Build and upload latest.json (the updater manifest).
+          # url points to the signed .exe (Tauri v2 updater runs the installer directly).
           $pubDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
           $manifest = @{
               version   = $version
@@ -132,7 +132,7 @@ jobs:
               platforms = @{
                   'windows-x86_64' = @{
                       signature = $signature
-                      url       = "https://github.com/$repo/releases/download/$tag/$zipName"
+                      url       = "https://github.com/$repo/releases/download/$tag/$exeName"
                   }
               }
           } | ConvertTo-Json -Depth 8
