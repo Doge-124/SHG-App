@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Eye, Pencil, UserX, MoreHorizontal, PiggyBank, Users, Banknote } from 'lucide-react'
 import { toast } from 'sonner'
+import { track } from '@/lib/track'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -59,6 +60,7 @@ export default function MembersPage() {
       const response = await addMember(data)
       if (response.success) {
         toast.success('Member added successfully')
+        track('member.created', { member_type: data.memberType })
         setIsFormOpen(false)
         refreshMembers()
       } else {

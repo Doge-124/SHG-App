@@ -29,6 +29,14 @@ import { useSettings } from '@/lib/settings-context'
 import { issueLoan, recordRepayment } from '@/lib/api/loans'
 import { PastLoanForm } from '@/components/forms/past-loan-form'
 import { LoanScheduleDialog } from '@/components/loan-schedule-dialog'
+import { track } from '@/lib/track'
+
+// Bucket a numeric amount into small/medium/large (preserves signal without sending exact amounts)
+function amountBucket(n: number): string {
+  if (n <= 5000) return 'small'
+  if (n <= 20000) return 'medium'
+  return 'large'
+}
 import { formatCurrency, formatDate } from '@/lib/format'
 import type { Loan, LoanFormData } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -74,6 +82,11 @@ export default function LoansPage() {
       const response = await issueLoan(data)
       if (response.success) {
         toast.success('Loan issued successfully')
+        track('loan.issued', {
+          loan_type: data.loanType,
+          amount_bucket: amountBucket(data.amount),
+          payment_method: data.paymentMethod,
+        })
         setIsFormOpen(false)
         refreshLoans()
       } else {
@@ -100,6 +113,11 @@ export default function LoansPage() {
         if (notifs?.enableNotifications && notifs?.paymentConfirmations) {
           toast.success('Payment recorded successfully')
         }
+        track('loan.repaid', {
+          amount_bucket: amountBucket(data.amount),
+          payment_method: data.paymentMethod,
+          has_interest: data.interestAmount > 0,
+        })
         setRepaymentLoan(null)
         refreshLoans()
       } else {

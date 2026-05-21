@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, ArrowDownRight, Printer, Download } from 'lucide-react'
 import { toast } from 'sonner'
+import { track } from '@/lib/track'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -96,6 +97,7 @@ export default function ReceiptsPage() {
       const response = await createReceipt(data)
       if (response.success) {
         toast.success('Receipt created successfully')
+        track('receipt.created', { payment_method: data.paymentMethod })
         setIsFormOpen(false)
         loadReceipts()
       } else {

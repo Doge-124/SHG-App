@@ -189,6 +189,18 @@ pub fn get_crash_reporting_status(app: tauri::AppHandle) -> Result<CrashReportin
     })
 }
 
+/// Frontend-callable event tracking. Queues an event locally; the background
+/// flusher batches it to the telemetry backend within ~5 minutes.
+///
+/// No-op if the build doesn't have TELEMETRY_ENDPOINT_URL configured.
+///
+/// `properties` should contain metadata only (no PII — no names, phones,
+/// specific amounts, etc.).
+#[tauri::command]
+pub fn track_event(name: String, properties: Option<serde_json::Value>) {
+    crate::events::track(&name, properties);
+}
+
 /// Send a test event to Sentry so you can verify the pipeline end-to-end.
 /// Returns a short description of what was sent.
 #[tauri::command]

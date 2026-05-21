@@ -69,12 +69,69 @@ async function versionDistribution(env: Env): Promise<VersionDistRow[]> {
   return results ?? []
 }
 
+interface EventCountRow {
+  event_name: string
+  count: number
+  unique_installs: number
+}
+
+interface DailyActivityRow {
+  day: string
+  events: number
+  installs: number
+}
+
+async function topEvents(env: Env, sinceMs: number): Promise<EventCountRow[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT event_name,
+            COUNT(*) AS count,
+            COUNT(DISTINCT installation_id) AS unique_installs
+     FROM events
+     WHERE occurred_at >= ?1
+     GROUP BY event_name
+     ORDER BY count DESC
+     LIMIT 30`,
+  ).bind(sinceMs).all<EventCountRow>()
+  return results ?? []
+}
+
+async function dailyActivity(env: Env, days: number): Promise<DailyActivityRow[]> {
+  const sinceMs = Date.now() - days * 86400_000
+  // SQLite's strftime works in seconds; events.occurred_at is in ms.
+  const { results } = await env.DB.prepare(
+    `SELECT strftime('%Y-%m-%d', occurred_at / 1000, 'unixepoch') AS day,
+            COUNT(*)                            AS events,
+            COUNT(DISTINCT installation_id)     AS installs
+     FROM events
+     WHERE occurred_at >= ?1
+     GROUP BY day
+     ORDER BY day ASC`,
+  ).bind(sinceMs).all<DailyActivityRow>()
+  return results ?? []
+}
+
+async function totalEventCount(env: Env, sinceMs: number): Promise<number> {
+  const r = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM events WHERE occurred_at >= ?1`,
+  ).bind(sinceMs).first<{ n: number }>()
+  return r?.n ?? 0
+}
+
 export async function handleAdminInstallationsJson(req: Request, env: Env): Promise<Response> {
   if (!isAuthorised(req, env)) return unauthorised()
   const installations = await listInstallations(env)
   const versions = await versionDistribution(env)
+  const sevenDaysAgo = Date.now() - 7 * 86400_000
+  const events_7d = await topEvents(env, sevenDaysAgo)
+  const activity = await dailyActivity(env, 14)
   return new Response(
-    JSON.stringify({ installations, versions, generated_at: new Date().toISOString() }),
+    JSON.stringify({
+      installations,
+      versions,
+      events_7d,
+      activity_14d: activity,
+      generated_at: new Date().toISOString(),
+    }),
     { headers: { 'content-type': 'application/json' } },
   )
 }
@@ -90,12 +147,20 @@ export async function handleAdminDashboard(req: Request, env: Env): Promise<Resp
   const activeLast24h = installations.filter(i => now - i.last_seen_at < 24 * 3600_000).length
   const activeLast7d = installations.filter(i => now - i.last_seen_at < 7 * 24 * 3600_000).length
 
+  const sevenDaysAgo = now - 7 * 86400_000
+  const events7d = await topEvents(env, sevenDaysAgo)
+  const totalEvents7d = await totalEventCount(env, sevenDaysAgo)
+  const activity14d = await dailyActivity(env, 14)
+
   const html = renderHtml({
     totalInstallations,
     activeLast24h,
     activeLast7d,
     versions,
     installations,
+    events7d,
+    totalEvents7d,
+    activity14d,
   })
 
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
@@ -107,6 +172,9 @@ interface DashboardData {
   activeLast7d: number
   versions: VersionDistRow[]
   installations: InstallationRow[]
+  events7d: EventCountRow[]
+  totalEvents7d: number
+  activity14d: DailyActivityRow[]
 }
 
 function renderHtml(d: DashboardData): string {
@@ -116,7 +184,7 @@ function renderHtml(d: DashboardData): string {
       const firstSeen = new Date(i.first_seen_at).toISOString().split('T')[0]
       const isStale = Date.now() - i.last_seen_at > 7 * 24 * 3600_000
       return `<tr class="${isStale ? 'stale' : ''}">
-        <td class="mono">${escapeHtml(i.installation_id.slice(0, 8))}…</td>
+        <td class="mono">${escapeHtml(i.installation_id.slice(0, 8))}...</td>
         <td>${escapeHtml(i.current_version)}</td>
         <td>${escapeHtml(i.os ?? '')} / ${escapeHtml(i.arch ?? '')}</td>
         <td>${escapeHtml(lastSeen)}</td>
@@ -130,6 +198,32 @@ function renderHtml(d: DashboardData): string {
   const versionRows = d.versions
     .map(v => `<tr><td class="mono">${escapeHtml(v.current_version)}</td><td class="r">${v.count}</td></tr>`)
     .join('')
+
+  const eventRows = d.events7d
+    .map(e => `<tr>
+      <td class="mono">${escapeHtml(e.event_name)}</td>
+      <td class="r">${e.count}</td>
+      <td class="r">${e.unique_installs}</td>
+    </tr>`)
+    .join('')
+
+  // Pad activity to 14 days even if some days have zero events.
+  const activityMap = new Map(d.activity14d.map(a => [a.day, a]))
+  const activityBars: string[] = []
+  const maxEvents = Math.max(1, ...d.activity14d.map(a => a.events))
+  for (let i = 13; i >= 0; i--) {
+    const dayMs = Date.now() - i * 86400_000
+    const day = new Date(dayMs).toISOString().split('T')[0]
+    const row = activityMap.get(day)
+    const events = row?.events ?? 0
+    const installs = row?.installs ?? 0
+    const pct = (events / maxEvents) * 100
+    activityBars.push(`<div class="bar-row">
+      <div class="bar-day">${day.slice(5)}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <div class="bar-val">${events}<span class="bar-installs">${installs > 0 ? ` · ${installs} inst` : ''}</span></div>
+    </div>`)
+  }
 
   return `<!doctype html>
 <html lang="en">
@@ -157,6 +251,14 @@ function renderHtml(d: DashboardData): string {
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   tr.stale td { color: #94a3b8; }
   .footer { color: #64748b; font-size: 12px; margin-top: 24px; text-align: center; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid-2 { grid-template-columns: 1fr; } }
+  .bar-row { display: flex; align-items: center; gap: 12px; padding: 4px 16px; font-size: 12px; }
+  .bar-day { width: 48px; color: #64748b; font-family: ui-monospace, monospace; }
+  .bar-track { flex: 1; height: 14px; background: #f1f5f9; border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa); border-radius: 3px; transition: width .2s; }
+  .bar-val { width: 100px; text-align: right; color: #0f172a; font-weight: 500; }
+  .bar-installs { color: #94a3b8; font-weight: 400; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -181,6 +283,28 @@ function renderHtml(d: DashboardData): string {
     <div class="card">
       <div class="label">Versions in use</div>
       <div class="value">${d.versions.length}</div>
+    </div>
+    <div class="card">
+      <div class="label">Events (7d)</div>
+      <div class="value">${d.totalEvents7d}</div>
+    </div>
+    <div class="card">
+      <div class="label">Tracked event types</div>
+      <div class="value">${d.events7d.length}</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="section">
+      <h2>Top events (last 7 days)</h2>
+      <table>
+        <thead><tr><th>Event</th><th class="r">Count</th><th class="r">Installs</th></tr></thead>
+        <tbody>${eventRows || '<tr><td colspan="3" style="text-align:center;padding:24px;color:#94a3b8;">No events recorded yet</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="section">
+      <h2>Activity (last 14 days)</h2>
+      <div style="padding:10px 0;">${activityBars.join('')}</div>
     </div>
   </div>
 

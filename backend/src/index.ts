@@ -10,6 +10,7 @@
 
 import type { Env } from './env'
 import { handleHeartbeat } from './routes/heartbeat'
+import { handleEvents } from './routes/events'
 import { handleAdminDashboard, handleAdminInstallationsJson } from './routes/admin'
 
 export default {
@@ -19,6 +20,11 @@ export default {
     // Heartbeat — anonymous, no auth
     if (url.pathname === '/heartbeat' && req.method === 'POST') {
       return handleHeartbeat(req, env)
+    }
+
+    // Events batch ingestion — anonymous, no auth
+    if (url.pathname === '/events' && req.method === 'POST') {
+      return handleEvents(req, env)
     }
 
     // Admin dashboard — bearer token auth

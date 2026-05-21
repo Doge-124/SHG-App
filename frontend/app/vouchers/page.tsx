@@ -22,6 +22,7 @@ import { generateVoucherPDF, generateMultipleVouchersPDF } from '@/lib/pdf'
 import { PrintPreview } from '@/components/print-preview'
 import { formatCurrency, formatDateTime } from '@/lib/format'
 import type { Voucher, VoucherFormData } from '@/lib/types'
+import { track } from '@/lib/track'
 
 export default function VouchersPage() {
   const { settings } = useSettings()
@@ -87,6 +88,7 @@ export default function VouchersPage() {
       const response = await createVoucher(data)
       if (response.success) {
         toast.success('Voucher created successfully')
+        track('voucher.created', { payment_method: data.paymentMethod })
         setIsFormOpen(false)
         loadVouchers()
       } else {

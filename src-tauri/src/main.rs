@@ -4,6 +4,7 @@ mod commands;
 mod crash_reporting;
 mod db;
 mod error;
+mod events;
 mod installation;
 mod security;
 mod state;
@@ -24,7 +25,12 @@ fn main() {
     if let Ok(info) = installation::get_or_create_pre_app_for_telemetry() {
         crate::telemetry::fire_async(&info);
         crash_reporting::set_installation_id(&info.installation_id);
+        // Track app launch — gives daily-active-user signal in the dashboard.
+        crate::events::track("app.launched", None);
     }
+
+    // Start the background event flusher (best-effort, batches every 5 min).
+    crate::events::start_flusher();
 
     tauri::Builder::default()
         .plugin(
@@ -150,6 +156,7 @@ fn main() {
             commands::support::set_crash_reporting_enabled,
             commands::support::get_crash_reporting_status,
             commands::support::send_test_crash_event,
+            commands::support::track_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
