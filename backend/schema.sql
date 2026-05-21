@@ -78,6 +78,28 @@ CREATE INDEX IF NOT EXISTS idx_lic_status   ON licenses(status);
 CREATE INDEX IF NOT EXISTS idx_lic_bound    ON licenses(bound_installation_id);
 CREATE INDEX IF NOT EXISTS idx_lic_expires  ON licenses(expires_at);
 
+-- ───── Support commands (Phase 5: remote diagnostics inbox) ─────────────
+-- Admin queues a command for a specific installation; the desktop polls on
+-- next launch (after auth, so DB is unlocked) and uploads the result. Only
+-- read-only diagnostic commands are supported — no destructive operations.
+CREATE TABLE IF NOT EXISTS support_commands (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    installation_id     TEXT NOT NULL,
+    command             TEXT NOT NULL
+                        CHECK (command IN ('collect_diagnostic', 'collect_integrity')),
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'completed', 'failed', 'cancelled')),
+    created_at          INTEGER NOT NULL,
+    dispatched_at       INTEGER,
+    completed_at        INTEGER,
+    result_payload      TEXT,        -- JSON blob from desktop
+    error               TEXT,
+    note                TEXT         -- admin-supplied context, e.g. ticket #
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_cmd_install ON support_commands(installation_id, status);
+CREATE INDEX IF NOT EXISTS idx_support_cmd_created ON support_commands(created_at DESC);
+
 -- ───── App config (Phase 4: force-update + future remote settings) ───────
 -- Generic key/value store for server-controlled settings. First use is
 -- min_supported_version: desktop refuses to launch if its version is below

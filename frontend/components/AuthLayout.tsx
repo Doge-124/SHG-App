@@ -31,6 +31,10 @@ export default function AuthLayout({ children }: Props) {
   const handleUnlocked = () => {
     refreshSettings()
     setMode('app')
+    // Fire-and-forget: pick up any pending remote support requests for
+    // this install (admin-queued diagnostics, integrity checks). DB is
+    // unlocked at this point so commands that need it can run.
+    invoke('run_support_inbox').catch(() => {})
   }
 
   if (mode === 'checking') {

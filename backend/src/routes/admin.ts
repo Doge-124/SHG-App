@@ -224,14 +224,19 @@ function renderHtml(d: DashboardData): string {
       const lastSeen = relativeTime(Date.now() - i.last_seen_at)
       const firstSeen = new Date(i.first_seen_at).toISOString().split('T')[0]
       const isStale = Date.now() - i.last_seen_at > 7 * 24 * 3600_000
+      const fullId = escapeHtml(i.installation_id)
       return `<tr class="${isStale ? 'stale' : ''}">
-        <td class="mono">${escapeHtml(i.installation_id.slice(0, 8))}...</td>
+        <td class="mono" title="${fullId}">${escapeHtml(i.installation_id.slice(0, 8))}...</td>
         <td>${escapeHtml(i.current_version)}</td>
         <td>${escapeHtml(i.os ?? '')} / ${escapeHtml(i.arch ?? '')}</td>
         <td>${escapeHtml(lastSeen)}</td>
         <td>${escapeHtml(firstSeen)}</td>
         <td class="r">${i.total_heartbeats}</td>
         <td>${escapeHtml(i.notes ?? '')}</td>
+        <td>
+          <button class="btn-mini" onclick="queueSupport('${fullId}','collect_diagnostic')">Diagnostic</button>
+          <button class="btn-mini" onclick="queueSupport('${fullId}','collect_integrity')">Integrity</button>
+        </td>
       </tr>`
     })
     .join('')
@@ -473,10 +478,16 @@ function renderHtml(d: DashboardData): string {
           <th>First seen</th>
           <th class="r">Heartbeats</th>
           <th>Notes</th>
+          <th>Support</th>
         </tr>
       </thead>
       <tbody>${rows || '<tr><td colspan="7" style="text-align:center;padding:24px;color:#94a3b8;">No installations have reported yet</td></tr>'}</tbody>
     </table>
+  </div>
+
+  <div class="section">
+    <h2>Support reports</h2>
+    <div id="support-list" style="padding:8px 16px;color:#64748b;font-size:13px;">Loading…</div>
   </div>
 
   <div class="footer">
@@ -587,6 +598,100 @@ async function rebindLicense(key) {
     location.reload();
   } catch (e) { alert('Failed: ' + e.message); }
 }
+
+async function queueSupport(installationId, command) {
+  const label = command === 'collect_diagnostic' ? 'diagnostic report' : 'integrity check';
+  const note = prompt('Note for the request (e.g. ticket #) — optional:', '');
+  if (note === null) return;
+  try {
+    const r = await api('/admin/support/command', {
+      method: 'POST',
+      body: JSON.stringify({ installationId, command, note: note.trim() || null }),
+    });
+    alert(r.coalesced
+      ? 'A ' + label + ' is already pending for this install (#' + r.id + ').'
+      : 'Queued ' + label + ' (#' + r.id + '). Customer will run it on next launch.');
+    loadSupportReports();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+function relTime(ms) {
+  const d = Date.now() - ms;
+  if (d < 60_000)    return Math.floor(d / 1000) + 's ago';
+  if (d < 3600_000)  return Math.floor(d / 60_000) + 'm ago';
+  if (d < 86400_000) return Math.floor(d / 3600_000) + 'h ago';
+  return Math.floor(d / 86400_000) + 'd ago';
+}
+
+async function loadSupportReports() {
+  const list = document.getElementById('support-list');
+  try {
+    const r = await api('/admin/support/commands.json', { method: 'GET' });
+    if (!r.commands.length) {
+      list.innerHTML = '<i>No support commands queued yet.</i>';
+      return;
+    }
+    const rows = r.commands.map(c => {
+      const created = new Date(c.created_at).toISOString().split('T')[0];
+      const dispatched = c.dispatched_at ? relTime(c.dispatched_at) : '—';
+      const completed = c.completed_at ? relTime(c.completed_at) : '—';
+      const statusColor = ({
+        pending:   '#92400e',
+        completed: '#166534',
+        failed:    '#991b1b',
+        cancelled: '#64748b',
+      })[c.status] || '#64748b';
+      const installShort = c.installation_id.slice(0, 8);
+      const viewBtn = c.result_payload
+        ? '<button class="btn-mini" onclick="viewSupportResult(' + c.id + ')">View</button>'
+        : (c.status === 'pending'
+            ? '<button class="btn-mini" onclick="cancelSupport(' + c.id + ')">Cancel</button>'
+            : '');
+      return '<tr>'
+        + '<td>#' + c.id + '</td>'
+        + '<td class="mono" title="' + c.installation_id + '">' + installShort + '...</td>'
+        + '<td>' + c.command + '</td>'
+        + '<td style="color:' + statusColor + ';font-weight:600;">' + c.status + '</td>'
+        + '<td>' + created + '</td>'
+        + '<td>' + dispatched + '</td>'
+        + '<td>' + completed + '</td>'
+        + '<td>' + (c.note ? c.note.replace(/</g,'&lt;') : '') + '</td>'
+        + '<td>' + viewBtn + '</td>'
+      + '</tr>';
+    }).join('');
+    list.innerHTML =
+      '<table>'
+        + '<thead><tr><th>#</th><th>Install</th><th>Cmd</th><th>Status</th><th>Created</th><th>Dispatched</th><th>Completed</th><th>Note</th><th></th></tr></thead>'
+        + '<tbody>' + rows + '</tbody>'
+      + '</table>';
+    // Stash payloads for the view-result modal.
+    window.__supportPayloads = Object.fromEntries(r.commands.map(c => [c.id, c.result_payload]));
+  } catch (e) {
+    list.innerHTML = '<span style="color:#991b1b">Failed: ' + e.message + '</span>';
+  }
+}
+
+function viewSupportResult(id) {
+  const raw = window.__supportPayloads && window.__supportPayloads[id];
+  if (!raw) { alert('No payload.'); return; }
+  let formatted;
+  try { formatted = JSON.stringify(JSON.parse(raw), null, 2); }
+  catch { formatted = raw; }
+  const w = window.open('', '_blank');
+  if (!w) { alert(formatted); return; }
+  w.document.write('<pre style="font:12px ui-monospace,Menlo,monospace;padding:16px;white-space:pre-wrap;">'
+    + formatted.replace(/</g,'&lt;') + '</pre>');
+}
+
+async function cancelSupport(id) {
+  if (!confirm('Cancel this pending support request?')) return;
+  try {
+    await api('/admin/support/command/' + id, { method: 'DELETE' });
+    loadSupportReports();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+loadSupportReports();
 </script>
 </body>
 </html>`

@@ -36,6 +36,13 @@ import {
   handleDeleteLicense,
 } from './routes/admin-licenses'
 import { handleGetVersionPolicy, handleSetVersionPolicy } from './routes/version-policy'
+import {
+  handleSupportPoll,
+  handleSupportResult,
+  handleQueueSupportCommand,
+  handleListSupportCommands,
+  handleCancelSupportCommand,
+} from './routes/support'
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -50,6 +57,9 @@ export default {
       if (path === '/license/validate')      return handleLicenseValidate(req, env)
       if (path === '/admin/license')         return handleIssueLicense(req, env)
       if (path === '/admin/version-policy')  return handleSetVersionPolicy(req, env)
+      if (path === '/support/poll')          return handleSupportPoll(req, env)
+      if (path === '/support/result')        return handleSupportResult(req, env)
+      if (path === '/admin/support/command') return handleQueueSupportCommand(req, env)
 
       // /admin/license/<key>/{revoke,unbind,extend,reactivate,rebind}
       const m = path.match(/^\/admin\/license\/([^/]+)\/(revoke|unbind|extend|reactivate|rebind)$/)
@@ -66,12 +76,16 @@ export default {
     if (req.method === 'DELETE') {
       const m = path.match(/^\/admin\/license\/([^/]+)$/)
       if (m) return handleDeleteLicense(req, env, decodeURIComponent(m[1]))
+
+      const s = path.match(/^\/admin\/support\/command\/(\d+)$/)
+      if (s) return handleCancelSupportCommand(req, env, parseInt(s[1], 10))
     }
 
     if (req.method === 'GET') {
       if (path === '/admin')                       return handleAdminDashboard(req, env)
       if (path === '/admin/installations.json')    return handleAdminInstallationsJson(req, env)
       if (path === '/admin/licenses.json')         return handleListLicenses(req, env)
+      if (path === '/admin/support/commands.json') return handleListSupportCommands(req, env)
       if (path === '/version-policy')              return handleGetVersionPolicy(req, env)
       if (path === '/') {
         return new Response(

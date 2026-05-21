@@ -9,6 +9,7 @@ mod installation;
 mod license;
 mod security;
 mod state;
+mod support_inbox;
 mod telemetry;
 mod types;
 mod version_policy;
@@ -164,6 +165,7 @@ fn main() {
             commands::license::activate_license,
             commands::license::deactivate_license_local,
             commands::version_policy::get_version_policy,
+            commands::support_inbox::run_support_inbox,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
