@@ -1,4 +1,4 @@
-//! Database integrity checks.
+//! Database integrity checks and repair operations.
 //!
 //! Runs several layers of validation:
 //!   1. SQLite's built-in `PRAGMA integrity_check` (file/page-level corruption)
@@ -185,6 +185,91 @@ fn check_shg_balance(conn: &Connection, method: &str, checks: &mut Vec<Integrity
         },
         severity: if ok { "ok".into() } else { "error".into() },
     });
+}
+
+/// Report from a balance rebuild — useful for surfacing what was repaired.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildReport {
+    pub member_rows_updated: usize,
+    pub shg_cash_before: f64,
+    pub shg_cash_after: f64,
+    pub shg_bank_before: f64,
+    pub shg_bank_after: f64,
+    pub generated_at: String,
+}
+
+/// Rebuild `member_balances` and `shg_balances` from their source-of-truth
+/// transaction tables. Cheap, idempotent, and safe to run any time — if the
+/// caches already match, nothing changes. Use this when the integrity check
+/// flags drift, or as a periodic safety net.
+pub fn rebuild_balances(conn: &mut Connection) -> Result<RebuildReport, AppError> {
+    let shg_cash_before: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0) FROM shg_balances WHERE method = 'CASH'",
+        [], |r| r.get(0),
+    ).unwrap_or(0.0);
+    let shg_bank_before: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0) FROM shg_balances WHERE method = 'BANK'",
+        [], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    let tx = conn.transaction()?;
+
+    // Recompute member_balances from member_transactions. Insert rows for
+    // members that have transactions but no cache entry yet.
+    let mut member_rows_updated = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT member_id, COALESCE(SUM(amount), 0) AS total
+             FROM member_transactions GROUP BY member_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for r in rows {
+            let (mid, total) = r?;
+            tx.execute(
+                "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
+                 ON CONFLICT(member_id) DO UPDATE SET balance = excluded.balance",
+                (mid, total),
+            )?;
+            member_rows_updated += 1;
+        }
+    }
+
+    // Recompute SHG cash + bank from shg_transactions.
+    for method in &["CASH", "BANK"] {
+        let computed: f64 = tx.query_row(
+            "SELECT COALESCE(SUM(
+                CASE WHEN txn_type IN ('RECEIPT','OPENING') THEN amount ELSE -amount END
+             ), 0)
+             FROM shg_transactions WHERE payment_method = ?1",
+            [method], |r| r.get(0),
+        ).unwrap_or(0.0);
+        tx.execute(
+            "INSERT INTO shg_balances (method, balance) VALUES (?1, ?2)
+             ON CONFLICT(method) DO UPDATE SET balance = excluded.balance",
+            (*method, computed),
+        )?;
+    }
+
+    tx.commit()?;
+
+    let shg_cash_after: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0) FROM shg_balances WHERE method = 'CASH'",
+        [], |r| r.get(0),
+    ).unwrap_or(0.0);
+    let shg_bank_after: f64 = conn.query_row(
+        "SELECT COALESCE(balance, 0) FROM shg_balances WHERE method = 'BANK'",
+        [], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    Ok(RebuildReport {
+        member_rows_updated,
+        shg_cash_before, shg_cash_after,
+        shg_bank_before, shg_bank_after,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    })
 }
 
 /// Count rows returned by a SELECT/PRAGMA that returns one row per violation.

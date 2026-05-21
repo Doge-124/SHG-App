@@ -130,6 +130,17 @@ pub fn check_db_integrity(
     integrity::check_integrity(conn).map_err(|e| e.to_string())
 }
 
+/// Rebuild member_balances + shg_balances from their source-of-truth
+/// transaction tables. Idempotent; use when the integrity check flags drift.
+#[tauri::command]
+pub fn rebuild_balances(
+    state: State<Mutex<AppState>>,
+) -> Result<integrity::RebuildReport, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    integrity::rebuild_balances(conn).map_err(|e| e.to_string())
+}
+
 /// Return the installation ID (and creation info).
 #[tauri::command]
 pub fn get_installation_id(app: tauri::AppHandle) -> Result<installation::InstallationInfo, String> {

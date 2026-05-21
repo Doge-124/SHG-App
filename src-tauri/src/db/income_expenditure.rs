@@ -43,6 +43,8 @@ pub struct IncomeExpenditureAccount {
 }
 
 /// Compute loans outstanding as of a given date boundary (inclusive).
+/// Only the principal portion of repayments reduces outstanding — interest
+/// is income, not a loan reduction.
 fn loans_outstanding_as_of(conn: &Connection, date_end: &str) -> f64 {
     conn.query_row(
         "SELECT COALESCE(SUM(outstanding), 0)
@@ -50,7 +52,7 @@ fn loans_outstanding_as_of(conn: &Connection, date_end: &str) -> f64 {
              SELECT l.amount - COALESCE(paid.total, 0) AS outstanding
              FROM loans l
              LEFT JOIN (
-                 SELECT loan_id, SUM(amount) AS total
+                 SELECT loan_id, SUM(principal_amount) AS total
                  FROM loan_payments
                  WHERE created_at <= ?1
                  GROUP BY loan_id
@@ -100,12 +102,20 @@ pub fn get_income_expenditure(
     ).unwrap_or(0.0);
 
     // Principal recovered = how much of the outstanding was paid back.
-    // principal_recovered = L_start + D − L_end
+    // principal_recovered = L_start + D − L_end (working figure for reporting)
     let principal_recovered =
         (loans_outstanding_start + loans_disbursed_in_period - loans_outstanding_end).max(0.0);
 
-    // Interest = total repayments − principal recovered (never negative)
-    let interest_on_loans = (loan_repayments_in_period - principal_recovered).max(0.0);
+    // Interest = sum of the interest portion of every payment in the period.
+    // Use the explicit column rather than the L_start+D−L_end residual, which
+    // tautologically equalled total_repayments under the old gross-payment
+    // formula and produced Rs 0 interest income.
+    let interest_on_loans: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(interest_amount), 0) FROM loan_payments
+         WHERE created_at >= ?1 AND created_at <= ?2",
+        [&from_date, &to_dt],
+        |r| r.get(0),
+    ).unwrap_or(0.0);
 
     // ── Chit commission ───────────────────────────────────────────────────
     let chit_commission: f64 = conn.query_row(

@@ -66,15 +66,17 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     ).unwrap_or(0.0)).max(0.0);
 
     // ── Loans outstanding as of date ──────────────────────────────────────
-    // For each loan issued on or before the date, subtract all repayments
-    // made on or before the date from the original loan amount.
+    // Subtract only the PRINCIPAL portion of repayments — interest paid is
+    // SHG income, not loan reduction. Legacy rows have principal_amount
+    // backfilled to amount (matches the prior reporting behaviour); new rows
+    // have the correct split.
     let loans_to_members: f64 = conn.query_row(
         "SELECT COALESCE(SUM(outstanding), 0)
          FROM (
              SELECT l.amount - COALESCE(paid.total, 0) AS outstanding
              FROM loans l
              LEFT JOIN (
-                 SELECT loan_id, SUM(amount) AS total
+                 SELECT loan_id, SUM(principal_amount) AS total
                  FROM loan_payments
                  WHERE created_at <= ?1
                  GROUP BY loan_id
@@ -127,20 +129,14 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
-    // Interest earned = Total loan repayments received − principal recovered
-    // Principal recovered = (total ever disbursed up to date) − (loans outstanding)
-    let total_disbursed: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(amount), 0) FROM loans WHERE issued_at <= ?1",
+    // Interest earned = sum of the interest portion of every loan payment.
+    // This is now stored explicitly per row (see loans.rs); we no longer derive
+    // it from the difference between outstanding and disbursed, which was
+    // tautologically zero under the old gross-payment formula.
+    let interest_earned: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(interest_amount), 0) FROM loan_payments WHERE created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
-
-    let total_repaid: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(amount), 0) FROM loan_payments WHERE created_at <= ?1",
-        [&date_end], |r| r.get(0),
-    ).unwrap_or(0.0);
-
-    let principal_recovered = (total_disbursed - loans_to_members).max(0.0);
-    let interest_earned = (total_repaid - principal_recovered).max(0.0);
 
     // Other income: any RECEIPT not already categorised above
     let total_receipts: f64 = conn.query_row(
@@ -209,9 +205,16 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let other_expenses = (total_vouchers - loans_disbursed_txn - chit_payouts_txn).max(0.0);
 
     // ── Derived surplus ───────────────────────────────────────────────────
-    let surplus = total_assets - member_savings;
-    let total_liabilities_capital = member_savings + surplus;
-    let is_balanced = (total_assets - total_liabilities_capital).abs() < 0.01;
+    // Two independent computations of surplus:
+    //   1. Derived = total_assets − member_savings (what the SHG has beyond what it owes members)
+    //   2. Independent = total_income − total_expenses (P&L since inception)
+    // They should agree to within rounding. If they don't, something has
+    // mutated assets without flowing through the income/expense ledger
+    // (or vice versa) — a real integrity break that the user needs to see.
+    let surplus_derived     = total_assets - member_savings;
+    let surplus_independent = total_income - other_expenses;
+    let total_liabilities_capital = member_savings + surplus_derived;
+    let is_balanced = (surplus_derived - surplus_independent).abs() < 0.01;
 
     Ok(BalanceSheet {
         as_on_date: as_on_date.to_string(),
@@ -221,7 +224,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         total_assets,
         member_savings,
         total_members_with_savings,
-        surplus,
+        surplus: surplus_derived,
         shg_seed,
         interest_earned,
         chit_commission,

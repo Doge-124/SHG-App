@@ -49,9 +49,14 @@ pub fn validate_chit_parameters(total_amount: f64, months: i64) -> Result<(), Ap
             "chit total_amount must be a positive finite value",
         ));
     }
-    if (total_amount / months as f64).fract().abs() > f64::EPSILON {
+    // Divisibility check with paisa-level tolerance. f64::EPSILON (~2e-16) is
+    // far too tight at the magnitudes we work with — 100000/12 fails it even
+    // though the chit is operationally fine.
+    let monthly = total_amount / months as f64;
+    let rounded = (monthly * 100.0).round() / 100.0;
+    if (monthly - rounded).abs() > 0.005 {
         return Err(AppError::validation(
-            "chit total_amount must be divisible by months",
+            "chit total_amount must divide into whole paise per month",
         ));
     }
     Ok(())

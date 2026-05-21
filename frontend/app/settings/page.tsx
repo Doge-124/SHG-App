@@ -1177,6 +1177,23 @@ export default function SettingsPage() {
                 ? <><Spinner className="mr-2 h-4 w-4" />Checking…</>
                 : <><Check className="mr-2 h-4 w-4" />Run Integrity Check</>}
             </Button>
+            <Button
+              variant="outline"
+              className="ml-2"
+              onClick={async () => {
+                if (!confirm('Recompute member savings and SHG cash/bank balances from the underlying transaction history? This is safe to run — it only writes if the cache is out of sync.')) return
+                try {
+                  const r = await invoke<any>('rebuild_balances')
+                  const cashDelta = (r.shgCashAfter - r.shgCashBefore).toFixed(2)
+                  const bankDelta = (r.shgBankAfter - r.shgBankBefore).toFixed(2)
+                  toast.success(`Rebuilt ${r.memberRowsUpdated} member balance(s). Cash Δ ${cashDelta}, Bank Δ ${bankDelta}`)
+                } catch (err: any) {
+                  toast.error('Rebuild failed: ' + err?.toString())
+                }
+              }}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />Rebuild Balances
+            </Button>
 
             {integrityReport && (
               <div className={`mt-2 rounded-lg border p-3 space-y-2 ${

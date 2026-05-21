@@ -1,17 +1,43 @@
 //! Audit log helpers: write events and query the audit_log table.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use chrono::Utc;
 use crate::error::AppError;
 
-/// Silently insert one audit log row — never propagates errors to the caller.
+const INSERT_SQL: &str =
+    "INSERT INTO audit_log (action, entity, entity_id, details, timestamp)
+     VALUES (?1, ?2, ?3, ?4, ?5)";
+
+/// Best-effort audit insert outside any active transaction.
+///
+/// IMPORTANT: this commits independently of the action's transaction. If the
+/// action rolls back after `log_audit` succeeded, the audit row will outlive
+/// the change it described. For mutations that already own a `Transaction`,
+/// prefer [`log_audit_tx`] so the audit row commits or rolls back together
+/// with the action.
+///
+/// Errors are logged as warnings (previously they were silently dropped).
 pub fn log_audit(conn: &Connection, action: &str, entity: &str, entity_id: Option<i64>, details: &str) {
     let ts = Utc::now().to_rfc3339();
-    let _ = conn.execute(
-        "INSERT INTO audit_log (action, entity, entity_id, details, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![action, entity, entity_id, details, ts],
-    );
+    if let Err(e) = conn.execute(INSERT_SQL, rusqlite::params![action, entity, entity_id, details, ts]) {
+        log::warn!("audit log insert failed (action={action}, entity={entity}): {e}");
+    }
+}
+
+/// Transactional audit insert — commits with the parent transaction. Use this
+/// from any db function that's already inside a `tx.transaction()` block to
+/// guarantee the audit row and the change land (or roll back) together.
+pub fn log_audit_tx(
+    tx: &Transaction,
+    action: &str,
+    entity: &str,
+    entity_id: Option<i64>,
+    details: &str,
+) -> Result<(), AppError> {
+    let ts = Utc::now().to_rfc3339();
+    tx.execute(INSERT_SQL, rusqlite::params![action, entity, entity_id, details, ts])
+        .map_err(|e| AppError::database(e.to_string()))?;
+    Ok(())
 }
 
 #[derive(serde::Serialize)]

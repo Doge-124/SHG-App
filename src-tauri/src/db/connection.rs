@@ -8,7 +8,10 @@ use crate::error::AppError;
 ///
 /// - `foreign_keys = ON` enforces relational integrity at the engine level.
 /// - `journal_mode = WAL` improves concurrency and crash safety.
-/// - `synchronous = NORMAL` balances durability with performance for a desktop app.
+/// - `synchronous = FULL` makes every commit durable across power loss. This
+///   is the conventional setting for financial workloads; the small write-amp
+///   overhead is acceptable for a single-user desktop app where commits are
+///   bursty rather than continuous.
 pub fn open_db(db_path: &Path, key: &str) -> Result<Connection, AppError> {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
@@ -22,7 +25,7 @@ pub fn open_db(db_path: &Path, key: &str) -> Result<Connection, AppError> {
     // Engine configuration for safety and performance.
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-    conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+    conn.execute_batch("PRAGMA synchronous = FULL;")?;
 
     Ok(conn)
 }

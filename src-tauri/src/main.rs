@@ -152,6 +152,7 @@ fn main() {
             commands::support::get_diagnostic_report,
             commands::support::get_log_dir,
             commands::support::check_db_integrity,
+            commands::support::rebuild_balances,
             commands::support::get_installation_id,
             commands::support::get_schema_info,
             commands::support::set_crash_reporting_enabled,

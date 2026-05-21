@@ -84,15 +84,6 @@ pub fn create_loan(
     let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
     let outstanding = (amount - upfront_interest).max(0.0);
-    let net_outflow = outstanding;
-
-    // Pre-check: SHG must have enough balance for the net disbursement.
-    let available = ledger::get_shg_balance(conn, payment_method)?;
-    if available + 0.005 < net_outflow {
-        return Err(AppError::business(format!(
-            "Insufficient {payment_method} balance — available: {available:.2}, net outflow: {net_outflow:.2}"
-        )));
-    }
 
     // Detect whether legacy columns still exist (principal, due_date).
     let has_legacy = {
@@ -147,19 +138,9 @@ pub fn create_loan(
         (member_id, amount),
     )?;
 
-    // Voucher: full principal disbursed (unchecked — we pre-checked net outflow above).
-    let voucher_note = if note.trim().is_empty() { "Loan disbursement".to_string() } else { note.to_string() };
-    ledger::record_voucher_unchecked(
-        &mut tx,
-        amount,
-        &voucher_note,
-        payment_method,
-        Some("MEMBER_LOAN"),
-        Some(member_id),
-        created_at,
-    )?;
-
-    // Upfront interest: auto-receipt + first loan_payment entry.
+    // Order matters: receipt the upfront interest FIRST so the checked voucher
+    // sees the inflated balance and the net-outflow check is atomic with the
+    // disbursement (no TOCTOU between pre-check and write).
     if upfront_interest > 0.0 {
         let upfront_note = "Upfront Interest";
         ledger::record_receipt(
@@ -173,8 +154,10 @@ pub fn create_loan(
         )?;
 
         tx.execute(
-            "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO loan_payments
+               (loan_id, member_id, amount, principal_amount, interest_amount,
+                payment_method, note, created_at)
+             VALUES (?1, ?2, ?3, 0, ?3, ?4, ?5, ?6)",
             (loan_id, member_id, upfront_interest, payment_method, upfront_note, created_at),
         )?;
 
@@ -190,6 +173,19 @@ pub fn create_loan(
             (member_id, -upfront_interest, created_at),
         )?;
     }
+
+    // Voucher: full principal disbursed. record_voucher (checked) enforces
+    // sufficient balance inside the same transaction.
+    let voucher_note = if note.trim().is_empty() { "Loan disbursement".to_string() } else { note.to_string() };
+    ledger::record_voucher(
+        &mut tx,
+        amount,
+        &voucher_note,
+        payment_method,
+        Some("MEMBER_LOAN"),
+        Some(member_id),
+        created_at,
+    )?;
 
     tx.commit()?;
     Ok(loan_id)
@@ -318,8 +314,10 @@ pub fn record_past_loan(
     // 4b. Record upfront interest in loan_payments and member ledger (reference only).
     if upfront_interest > 0.0 {
         tx.execute(
-            "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'Upfront Interest', ?5)",
+            "INSERT INTO loan_payments
+               (loan_id, member_id, amount, principal_amount, interest_amount,
+                payment_method, note, created_at)
+             VALUES (?1, ?2, ?3, 0, ?3, ?4, 'Upfront Interest', ?5)",
             (loan_id, member_id, upfront_interest, payment_method, issued_at),
         )?;
 
@@ -352,10 +350,13 @@ pub fn record_past_loan(
             (outstanding, status, loan_id),
         )?;
 
-        // loan_payments row.
+        // loan_payments row. Past entries are treated as principal-only —
+        // historical interest income was lost in migration anyway.
         tx.execute(
-            "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO loan_payments
+               (loan_id, member_id, amount, principal_amount, interest_amount,
+                payment_method, note, created_at)
+             VALUES (?1, ?2, ?3, ?3, 0, ?4, ?5, ?6)",
             (loan_id, member_id, applied, rep_method, "Loan Repayment", rep_date),
         )?;
 
@@ -397,6 +398,16 @@ pub fn record_loan_payment(
     validation::validate_money_amount(amount)?;
     validation::validate_payment_method(payment_method)?;
 
+    // Sanity bounds on the caller-supplied interest split. We don't try to
+    // re-derive the "true" interest server-side (that needs days-elapsed
+    // logic the frontend owns), but we refuse obviously bad inputs.
+    if !interest_amount.is_finite() || interest_amount < 0.0 {
+        return Err(AppError::validation("interest_amount must be >= 0"));
+    }
+    if interest_amount > amount + 0.005 {
+        return Err(AppError::validation("interest_amount cannot exceed payment amount"));
+    }
+
     let mut tx = conn.transaction()?;
 
     let (member_id, outstanding_amount, status): (i64, f64, String) = tx.query_row(
@@ -409,10 +420,14 @@ pub fn record_loan_payment(
         return Err(AppError::business("This loan has already been fully repaid"));
     }
 
-    // Only the principal portion reduces the outstanding balance.
-    let principal_paid = (amount - interest_amount).max(0.0).min(outstanding_amount);
-    let new_outstanding = outstanding_amount - principal_paid;
-    let new_status = if new_outstanding <= 0.01 { "paid" } else { "active" };
+    // Only the principal portion reduces the outstanding balance. Anything
+    // beyond outstanding is treated as interest-on-top (overpayment of the
+    // declared interest), so the live outstanding stays consistent with
+    // SUM(loan_payments.principal_amount).
+    let principal_paid    = (amount - interest_amount).max(0.0).min(outstanding_amount);
+    let interest_recorded = amount - principal_paid;
+    let new_outstanding   = outstanding_amount - principal_paid;
+    let new_status        = if new_outstanding <= 0.01 { "paid" } else { "active" };
 
     tx.execute(
         "UPDATE loans SET outstanding_amount = ?1, status = ?2 WHERE id = ?3",
@@ -434,9 +449,12 @@ pub fn record_loan_payment(
     )?;
 
     tx.execute(
-        "INSERT INTO loan_payments (loan_id, member_id, amount, payment_method, note, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (loan_id, member_id, amount, payment_method, &receipt_note, created_at),
+        "INSERT INTO loan_payments
+           (loan_id, member_id, amount, principal_amount, interest_amount,
+            payment_method, note, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (loan_id, member_id, amount, principal_paid, interest_recorded,
+         payment_method, &receipt_note, created_at),
     )?;
 
     ledger::record_receipt(

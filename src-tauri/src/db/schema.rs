@@ -15,36 +15,11 @@ CREATE TABLE IF NOT EXISTS members (
     member_type TEXT NOT NULL DEFAULT 'SHG' CHECK(member_type IN ('SHG', 'CHIT', 'LOAN'))
 );
 
-CREATE TABLE IF NOT EXISTS loans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id INTEGER NOT NULL,
-    principal REAL NOT NULL,
-    interest_rate REAL NOT NULL,
-    issued_at TEXT NOT NULL,
-    due_date TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    FOREIGN KEY (member_id) REFERENCES members(id)
-);
-
-CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    loan_id INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    paid_at TEXT NOT NULL,
-    receipt_no TEXT NOT NULL UNIQUE,
-    FOREIGN KEY (loan_id) REFERENCES loans(id)
-);
-
-CREATE TABLE IF NOT EXISTS receipts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    receipt_no TEXT NOT NULL UNIQUE,
-    member_id INTEGER NOT NULL,
-    loan_id INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    generated_at TEXT NOT NULL,
-    FOREIGN KEY (member_id) REFERENCES members(id),
-    FOREIGN KEY (loan_id) REFERENCES loans(id)
-);
+-- (Legacy minimal loans/payments/receipts tables removed — superseded by the
+-- richer `loans` and `loan_payments` definitions below. They were unreachable
+-- because `CREATE TABLE IF NOT EXISTS` skipped the second definition on fresh
+-- installs, leaving the wrong schema. Old installs still have these tables
+-- around (untouched, ignored) — they hold no data the app reads.)
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,6 +142,8 @@ CREATE TABLE IF NOT EXISTS loan_payments (
     loan_id INTEGER NOT NULL,
     member_id INTEGER NOT NULL,
     amount REAL NOT NULL,
+    principal_amount REAL NOT NULL DEFAULT 0,
+    interest_amount  REAL NOT NULL DEFAULT 0,
     payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK')),
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
@@ -323,6 +300,21 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     add_column_if_missing(&tx, "loans", "daily_interest_rate", "REAL NOT NULL DEFAULT 0")?;
     add_column_if_missing(&tx, "loans", "upfront_interest_amount", "REAL NOT NULL DEFAULT 0")?;
 
+    // 10) Split loan_payments.amount into principal_amount + interest_amount so
+    // financial reports can compute interest income correctly. Legacy rows
+    // backfilled as principal=amount, interest=0 (matches the prior buggy
+    // behaviour where reports showed Rs 0 interest historically). Upfront
+    // interest rows are detected by note and corrected to principal=0.
+    let added_principal = add_column_if_missing(&tx, "loan_payments", "principal_amount", "REAL NOT NULL DEFAULT 0")?;
+    let added_interest  = add_column_if_missing(&tx, "loan_payments", "interest_amount",  "REAL NOT NULL DEFAULT 0")?;
+    if added_principal || added_interest {
+        tx.execute_batch(r#"
+            UPDATE loan_payments SET principal_amount = amount, interest_amount = 0;
+            UPDATE loan_payments SET principal_amount = 0, interest_amount = amount
+                WHERE note = 'Upfront Interest';
+        "#)?;
+    }
+
     // 7) Ensure indexes exist for performance.
     tx.execute_batch(
         r#"
@@ -337,24 +329,25 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Returns true if the column was added, false if it already existed.
 fn add_column_if_missing(
     tx: &rusqlite::Transaction,
     table: &str,
     column: &str,
     definition: &str,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     for c in cols {
         if c? == column {
-            return Ok(());
+            return Ok(false);
         }
     }
 
     tx.execute_batch(&format!(
         "ALTER TABLE {table} ADD COLUMN {column} {definition};"
     ))?;
-    Ok(())
+    Ok(true)
 }
 
 fn table_sql(tx: &rusqlite::Transaction, table: &str) -> Result<Option<String>, AppError> {
