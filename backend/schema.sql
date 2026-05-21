@@ -77,3 +77,13 @@ CREATE TABLE IF NOT EXISTS licenses (
 CREATE INDEX IF NOT EXISTS idx_lic_status   ON licenses(status);
 CREATE INDEX IF NOT EXISTS idx_lic_bound    ON licenses(bound_installation_id);
 CREATE INDEX IF NOT EXISTS idx_lic_expires  ON licenses(expires_at);
+
+-- ───── App config (Phase 4: force-update + future remote settings) ───────
+-- Generic key/value store for server-controlled settings. First use is
+-- min_supported_version: desktop refuses to launch if its version is below
+-- this. Empty / unset = no minimum.
+CREATE TABLE IF NOT EXISTS app_config (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);

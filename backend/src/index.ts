@@ -35,6 +35,7 @@ import {
   handleRebindLicense,
   handleDeleteLicense,
 } from './routes/admin-licenses'
+import { handleGetVersionPolicy, handleSetVersionPolicy } from './routes/version-policy'
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -45,9 +46,10 @@ export default {
     if (req.method === 'POST') {
       if (path === '/heartbeat')          return handleHeartbeat(req, env)
       if (path === '/events')             return handleEvents(req, env)
-      if (path === '/license/activate')   return handleLicenseActivate(req, env)
-      if (path === '/license/validate')   return handleLicenseValidate(req, env)
-      if (path === '/admin/license')      return handleIssueLicense(req, env)
+      if (path === '/license/activate')      return handleLicenseActivate(req, env)
+      if (path === '/license/validate')      return handleLicenseValidate(req, env)
+      if (path === '/admin/license')         return handleIssueLicense(req, env)
+      if (path === '/admin/version-policy')  return handleSetVersionPolicy(req, env)
 
       // /admin/license/<key>/{revoke,unbind,extend,reactivate,rebind}
       const m = path.match(/^\/admin\/license\/([^/]+)\/(revoke|unbind|extend|reactivate|rebind)$/)
@@ -70,6 +72,7 @@ export default {
       if (path === '/admin')                       return handleAdminDashboard(req, env)
       if (path === '/admin/installations.json')    return handleAdminInstallationsJson(req, env)
       if (path === '/admin/licenses.json')         return handleListLicenses(req, env)
+      if (path === '/version-policy')              return handleGetVersionPolicy(req, env)
       if (path === '/') {
         return new Response(
           JSON.stringify({

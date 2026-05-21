@@ -152,6 +152,13 @@ interface LicenseRow {
   notes: string | null
 }
 
+async function readMinVersion(env: Env): Promise<string> {
+  const row = await env.DB.prepare(
+    `SELECT value FROM app_config WHERE key = 'min_supported_version'`,
+  ).first<{ value: string }>()
+  return row?.value?.trim() ?? ''
+}
+
 async function listLicensesForDashboard(env: Env): Promise<LicenseRow[]> {
   const { results } = await env.DB.prepare(
     `SELECT * FROM licenses ORDER BY issued_at DESC LIMIT 500`,
@@ -175,6 +182,7 @@ export async function handleAdminDashboard(req: Request, env: Env): Promise<Resp
   const totalEvents7d = await totalEventCount(env, sevenDaysAgo)
   const activity14d = await dailyActivity(env, 14)
   const licenses = await listLicensesForDashboard(env)
+  const minVersion = await readMinVersion(env)
 
   const url = new URL(req.url)
   const adminToken = url.searchParams.get('token') ?? ''
@@ -189,6 +197,7 @@ export async function handleAdminDashboard(req: Request, env: Env): Promise<Resp
     totalEvents7d,
     activity14d,
     licenses,
+    minVersion,
     adminToken,
   })
 
@@ -205,6 +214,7 @@ interface DashboardData {
   totalEvents7d: number
   activity14d: DailyActivityRow[]
   licenses: LicenseRow[]
+  minVersion: string
   adminToken: string
 }
 
@@ -429,6 +439,21 @@ function renderHtml(d: DashboardData): string {
   </div>
 
   <div class="section">
+    <h2>Force-update policy</h2>
+    <div class="issue-form">
+      <form id="minver-form" onsubmit="setMinVersion(event)">
+        <label style="font-size:12px;color:#64748b;margin-right:8px;">Minimum supported version:</label>
+        <input type="text" id="minver-input" placeholder="e.g. 1.0.17 (empty = no minimum)"
+               value="${escapeHtml(d.minVersion)}" style="width: 240px;" />
+        <button type="submit">Save</button>
+        <span style="margin-left:12px;font-size:12px;color:#94a3b8;">
+          Desktops below this version are blocked at launch with an "Update Now" prompt.
+        </span>
+      </form>
+    </div>
+  </div>
+
+  <div class="section">
     <h2>Version distribution</h2>
     <table>
       <thead><tr><th>Version</th><th class="r">Installations</th></tr></thead>
@@ -530,6 +555,22 @@ async function reactivateLicense(key) {
     await api('/admin/license/' + encodeURIComponent(key) + '/reactivate', { method: 'POST' });
     location.reload();
   } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function setMinVersion(e) {
+  e.preventDefault();
+  const minVer = document.getElementById('minver-input').value.trim();
+  try {
+    const r = await api('/admin/version-policy', {
+      method: 'POST', body: JSON.stringify({ minSupportedVersion: minVer }),
+    });
+    alert(r.minSupportedVersion
+      ? 'Minimum version set to ' + r.minSupportedVersion
+      : 'Minimum version cleared. No version gating.');
+    location.reload();
+  } catch (err) {
+    alert('Failed: ' + err.message);
+  }
 }
 
 async function rebindLicense(key) {

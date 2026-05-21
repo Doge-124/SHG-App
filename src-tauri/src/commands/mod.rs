@@ -11,3 +11,4 @@ pub mod daybook;
 pub mod trial_balance;
 pub mod support;
 pub mod license;
+pub mod version_policy;

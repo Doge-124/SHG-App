@@ -11,6 +11,7 @@ mod security;
 mod state;
 mod telemetry;
 mod types;
+mod version_policy;
 
 use state::AppState;
 
@@ -162,6 +163,7 @@ fn main() {
             commands::license::get_license_status,
             commands::license::activate_license,
             commands::license::deactivate_license_local,
+            commands::version_policy::get_version_policy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

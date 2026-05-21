@@ -5,6 +5,7 @@ import AuthLayout from '@/components/AuthLayout'
 import { AppearanceProvider } from '@/lib/appearance-context'
 import { SentryBootstrap } from '@/components/sentry-bootstrap'
 import { LicenseGate } from '@/components/license-gate'
+import { VersionGate } from '@/components/version-gate'
 import './globals.css'
 
 const inter = Inter({ 
@@ -51,11 +52,13 @@ export default function RootLayout({
       <body className="font-sans antialiased">
         <SentryBootstrap>
           <AppearanceProvider>
-            <LicenseGate>
-              <AuthLayout>
-                <AppLayout>{children}</AppLayout>
-              </AuthLayout>
-            </LicenseGate>
+            <VersionGate>
+              <LicenseGate>
+                <AuthLayout>
+                  <AppLayout>{children}</AppLayout>
+                </AuthLayout>
+              </LicenseGate>
+            </VersionGate>
           </AppearanceProvider>
         </SentryBootstrap>
       </body>
