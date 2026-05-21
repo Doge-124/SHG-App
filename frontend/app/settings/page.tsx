@@ -64,6 +64,8 @@ export default function SettingsPage() {
   const [integrityReport, setIntegrityReport] = useState<any | null>(null)
   const [crashStatus, setCrashStatus] = useState<{ configured: boolean; enabled: boolean } | null>(null)
   const [isTestingCrash, setIsTestingCrash] = useState(false)
+  const [licenseStatus, setLicenseStatus] = useState<any | null>(null)
+  const [isRefreshingLicense, setIsRefreshingLicense] = useState(false)
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [isRestoreLoading, setIsRestoreLoading] = useState(false)
   const [clearDataDialogOpen, setClearDataDialogOpen] = useState(false)
@@ -186,6 +188,23 @@ export default function SettingsPage() {
       .then(setCrashStatus)
       .catch(() => setCrashStatus({ configured: false, enabled: false }))
   }, [])
+
+  useEffect(() => {
+    invoke<any>('get_license_status').then(setLicenseStatus).catch(() => {})
+  }, [])
+
+  const refreshLicense = async () => {
+    setIsRefreshingLicense(true)
+    try {
+      const s = await invoke<any>('get_license_status')
+      setLicenseStatus(s)
+      toast.success('License re-validated')
+    } catch (e) {
+      toast.error('Re-validation failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setIsRefreshingLicense(false)
+    }
+  }
 
   const handleLockPastData = async () => {
     setIsTogglingLock(true)
@@ -1323,6 +1342,72 @@ export default function SettingsPage() {
               </pre>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* License Section */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5" />
+            License
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {!licenseStatus ? (
+            <p className="text-sm text-muted-foreground">Loading license info…</p>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 text-sm">
+                <div>
+                  <p className="text-muted-foreground">Status</p>
+                  <p className="font-medium capitalize">{String(licenseStatus.status).replace(/_/g, ' ')}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">License Key</p>
+                  <p className="font-mono text-xs">{licenseStatus.licenseKey ?? '—'}</p>
+                </div>
+                {licenseStatus.customerName && (
+                  <div>
+                    <p className="text-muted-foreground">Issued To</p>
+                    <p className="font-medium">{licenseStatus.customerName}</p>
+                  </div>
+                )}
+                {licenseStatus.expiresAt && (
+                  <div>
+                    <p className="text-muted-foreground">Expires</p>
+                    <p className="font-medium">
+                      {new Date(licenseStatus.expiresAt).toLocaleDateString()}
+                      {typeof licenseStatus.daysUntilExpiry === 'number' &&
+                        ` (${licenseStatus.daysUntilExpiry} days)`}
+                    </p>
+                  </div>
+                )}
+                {licenseStatus.lastValidatedAt && (
+                  <div>
+                    <p className="text-muted-foreground">Last Verified</p>
+                    <p className="font-medium">
+                      {new Date(licenseStatus.lastValidatedAt).toLocaleString()}
+                      {licenseStatus.offlineValidation && ' (offline cache)'}
+                    </p>
+                  </div>
+                )}
+              </div>
+              {licenseStatus.message && (
+                <p className="text-xs text-muted-foreground">{licenseStatus.message}</p>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isRefreshingLicense}
+                onClick={refreshLicense}
+              >
+                {isRefreshingLicense
+                  ? <><Spinner className="mr-2 h-4 w-4" />Verifying…</>
+                  : <><RefreshCw className="mr-2 h-4 w-4" />Re-verify Now</>}
+              </Button>
+            </>
+          )}
         </CardContent>
       </Card>
 

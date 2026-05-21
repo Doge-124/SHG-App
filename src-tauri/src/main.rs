@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod events;
 mod installation;
+mod license;
 mod security;
 mod state;
 mod telemetry;
@@ -157,6 +158,9 @@ fn main() {
             commands::support::get_crash_reporting_status,
             commands::support::send_test_crash_event,
             commands::support::track_event,
+            commands::license::get_license_status,
+            commands::license::activate_license,
+            commands::license::deactivate_license_local,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

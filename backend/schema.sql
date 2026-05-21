@@ -46,3 +46,34 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_ev_install_time ON events(installation_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ev_name_time    ON events(event_name, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ev_received     ON events(received_at DESC);
+
+-- ───── Licenses (Phase 3: subscription + machine binding) ────────────────
+-- One row per issued license key. Status governs everything:
+--   active     → app works
+--   revoked    → hard block, no grace
+--   suspended  → temporary disable (e.g. payment issue), customer can resume
+-- expires_at: required for annual subscriptions; NULL = perpetual (not used yet).
+-- bound_installation_id: set on first activation, NEVER unset by the client.
+--   Admin can clear via /admin/license/<key>/unbind to allow machine transfer.
+-- grace_period_days: how many days after expires_at the app keeps working with
+--   a warning dialog. Default 14.
+CREATE TABLE IF NOT EXISTS licenses (
+    license_key             TEXT PRIMARY KEY,
+    customer_name           TEXT,
+    customer_email          TEXT,
+    issued_at               INTEGER NOT NULL,
+    expires_at              INTEGER,                   -- unix ms; NULL = perpetual
+    grace_period_days       INTEGER NOT NULL DEFAULT 14,
+    status                  TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'revoked', 'suspended')),
+    revoked_at              INTEGER,
+    revoked_reason          TEXT,
+    bound_installation_id   TEXT,
+    bound_at                INTEGER,
+    last_validated_at       INTEGER,
+    notes                   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lic_status   ON licenses(status);
+CREATE INDEX IF NOT EXISTS idx_lic_bound    ON licenses(bound_installation_id);
+CREATE INDEX IF NOT EXISTS idx_lic_expires  ON licenses(expires_at);

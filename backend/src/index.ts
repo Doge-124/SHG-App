@@ -1,51 +1,81 @@
 /**
  * SHG Manager backend — Cloudflare Worker entry point.
  *
- * Routes:
- *   POST /heartbeat       — anonymous, called by desktop app on launch
- *   GET  /admin           — server-rendered HTML dashboard (admin token auth)
- *   GET  /admin/installations.json — JSON API for the dashboard
- *   GET  /                — health check
+ * Public routes (called by desktop app, anonymous):
+ *   POST /heartbeat              — version + last-seen ping
+ *   POST /events                 — batch feature usage events
+ *   POST /license/activate       — first-time license activation
+ *   POST /license/validate       — per-launch license check
+ *
+ * Admin routes (bearer token auth, used by the dev):
+ *   GET  /admin                       — server-rendered HTML dashboard
+ *   GET  /admin/installations.json    — JSON dump for the dashboard
+ *   GET  /admin/licenses.json         — JSON list of licenses
+ *   POST /admin/license               — issue a new license
+ *   POST /admin/license/:key/revoke   — revoke
+ *   POST /admin/license/:key/unbind   — clear binding (for machine transfer)
+ *   POST /admin/license/:key/extend   — update expiry
+ *   DELETE /admin/license/:key        — hard delete
+ *
+ *   GET  /                       — health check
  */
 
 import type { Env } from './env'
 import { handleHeartbeat } from './routes/heartbeat'
 import { handleEvents } from './routes/events'
+import { handleLicenseActivate, handleLicenseValidate } from './routes/license'
 import { handleAdminDashboard, handleAdminInstallationsJson } from './routes/admin'
+import {
+  handleIssueLicense,
+  handleListLicenses,
+  handleRevokeLicense,
+  handleUnbindLicense,
+  handleExtendLicense,
+  handleDeleteLicense,
+} from './routes/admin-licenses'
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
+    const path = url.pathname
 
-    // Heartbeat — anonymous, no auth
-    if (url.pathname === '/heartbeat' && req.method === 'POST') {
-      return handleHeartbeat(req, env)
+    // ── Public app routes ────────────────────────────────────────────
+    if (req.method === 'POST') {
+      if (path === '/heartbeat')          return handleHeartbeat(req, env)
+      if (path === '/events')             return handleEvents(req, env)
+      if (path === '/license/activate')   return handleLicenseActivate(req, env)
+      if (path === '/license/validate')   return handleLicenseValidate(req, env)
+      if (path === '/admin/license')      return handleIssueLicense(req, env)
+
+      // /admin/license/<key>/{revoke,unbind,extend}
+      const m = path.match(/^\/admin\/license\/([^/]+)\/(revoke|unbind|extend)$/)
+      if (m) {
+        const key = decodeURIComponent(m[1])
+        if (m[2] === 'revoke') return handleRevokeLicense(req, env, key)
+        if (m[2] === 'unbind') return handleUnbindLicense(req, env, key)
+        if (m[2] === 'extend') return handleExtendLicense(req, env, key)
+      }
     }
 
-    // Events batch ingestion — anonymous, no auth
-    if (url.pathname === '/events' && req.method === 'POST') {
-      return handleEvents(req, env)
+    if (req.method === 'DELETE') {
+      const m = path.match(/^\/admin\/license\/([^/]+)$/)
+      if (m) return handleDeleteLicense(req, env, decodeURIComponent(m[1]))
     }
 
-    // Admin dashboard — bearer token auth
-    if (url.pathname === '/admin' && req.method === 'GET') {
-      return handleAdminDashboard(req, env)
-    }
-
-    if (url.pathname === '/admin/installations.json' && req.method === 'GET') {
-      return handleAdminInstallationsJson(req, env)
-    }
-
-    // Health check
-    if (url.pathname === '/' && req.method === 'GET') {
-      return new Response(
-        JSON.stringify({
-          name: 'shg-manager-api',
-          status: 'ok',
-          time: new Date().toISOString(),
-        }),
-        { headers: { 'content-type': 'application/json' } },
-      )
+    if (req.method === 'GET') {
+      if (path === '/admin')                       return handleAdminDashboard(req, env)
+      if (path === '/admin/installations.json')    return handleAdminInstallationsJson(req, env)
+      if (path === '/admin/licenses.json')         return handleListLicenses(req, env)
+      if (path === '/') {
+        return new Response(
+          JSON.stringify({
+            name: 'shg-manager-api',
+            status: 'ok',
+            time: new Date().toISOString(),
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        )
+      }
     }
 
     return new Response('Not Found', { status: 404 })

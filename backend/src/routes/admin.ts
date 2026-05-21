@@ -136,6 +136,29 @@ export async function handleAdminInstallationsJson(req: Request, env: Env): Prom
   )
 }
 
+interface LicenseRow {
+  license_key: string
+  customer_name: string | null
+  customer_email: string | null
+  issued_at: number
+  expires_at: number | null
+  grace_period_days: number
+  status: string
+  revoked_at: number | null
+  revoked_reason: string | null
+  bound_installation_id: string | null
+  bound_at: number | null
+  last_validated_at: number | null
+  notes: string | null
+}
+
+async function listLicensesForDashboard(env: Env): Promise<LicenseRow[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM licenses ORDER BY issued_at DESC LIMIT 500`,
+  ).all<LicenseRow>()
+  return results ?? []
+}
+
 export async function handleAdminDashboard(req: Request, env: Env): Promise<Response> {
   if (!isAuthorised(req, env)) return unauthorised()
 
@@ -151,6 +174,10 @@ export async function handleAdminDashboard(req: Request, env: Env): Promise<Resp
   const events7d = await topEvents(env, sevenDaysAgo)
   const totalEvents7d = await totalEventCount(env, sevenDaysAgo)
   const activity14d = await dailyActivity(env, 14)
+  const licenses = await listLicensesForDashboard(env)
+
+  const url = new URL(req.url)
+  const adminToken = url.searchParams.get('token') ?? ''
 
   const html = renderHtml({
     totalInstallations,
@@ -161,6 +188,8 @@ export async function handleAdminDashboard(req: Request, env: Env): Promise<Resp
     events7d,
     totalEvents7d,
     activity14d,
+    licenses,
+    adminToken,
   })
 
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
@@ -175,6 +204,8 @@ interface DashboardData {
   events7d: EventCountRow[]
   totalEvents7d: number
   activity14d: DailyActivityRow[]
+  licenses: LicenseRow[]
+  adminToken: string
 }
 
 function renderHtml(d: DashboardData): string {
@@ -205,6 +236,39 @@ function renderHtml(d: DashboardData): string {
       <td class="r">${e.count}</td>
       <td class="r">${e.unique_installs}</td>
     </tr>`)
+    .join('')
+
+  // Licenses table rows
+  const now = Date.now()
+  const licenseRows = d.licenses
+    .map(lic => {
+      let statusLabel = lic.status
+      let statusClass = lic.status
+      if (lic.status === 'active' && lic.expires_at !== null && lic.expires_at < now) {
+        const graceEnd = lic.expires_at + lic.grace_period_days * 86400_000
+        statusLabel = graceEnd > now ? 'expired (grace)' : 'expired'
+        statusClass = graceEnd > now ? 'grace' : 'expired'
+      }
+      const expiresStr = lic.expires_at !== null
+        ? new Date(lic.expires_at).toISOString().split('T')[0]
+        : 'never'
+      const bound = lic.bound_installation_id
+        ? `<span class="mono" title="${escapeHtml(lic.bound_installation_id)}">${escapeHtml(lic.bound_installation_id.slice(0, 8))}...</span>`
+        : '<span class="muted">not activated</span>'
+      const customer = lic.customer_name || lic.customer_email || '<span class="muted">unnamed</span>'
+      return `<tr>
+        <td class="mono">${escapeHtml(lic.license_key)}</td>
+        <td>${customer === '<span class="muted">unnamed</span>' ? customer : escapeHtml(customer)}</td>
+        <td><span class="badge ${statusClass}">${statusLabel}</span></td>
+        <td>${expiresStr}</td>
+        <td>${bound}</td>
+        <td>
+          <button class="btn-mini" onclick="revokeLicense('${escapeHtml(lic.license_key)}')">Revoke</button>
+          <button class="btn-mini" onclick="unbindLicense('${escapeHtml(lic.license_key)}')">Unbind</button>
+          <button class="btn-mini" onclick="extendLicense('${escapeHtml(lic.license_key)}')">+1yr</button>
+        </td>
+      </tr>`
+    })
     .join('')
 
   // Pad activity to 14 days even if some days have zero events.
@@ -259,6 +323,25 @@ function renderHtml(d: DashboardData): string {
   .bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa); border-radius: 3px; transition: width .2s; }
   .bar-val { width: 100px; text-align: right; color: #0f172a; font-weight: 500; }
   .bar-installs { color: #94a3b8; font-weight: 400; font-size: 11px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.active { background: #dcfce7; color: #166534; }
+  .badge.revoked { background: #fee2e2; color: #991b1b; }
+  .badge.suspended { background: #fef3c7; color: #92400e; }
+  .badge.grace { background: #ffedd5; color: #9a3412; }
+  .badge.expired { background: #f1f5f9; color: #475569; text-decoration: line-through; }
+  .muted { color: #94a3b8; font-style: italic; }
+  .btn-mini { background: #fff; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px 8px;
+              font-size: 11px; cursor: pointer; margin-right: 4px; color: #475569; }
+  .btn-mini:hover { background: #f1f5f9; border-color: #94a3b8; }
+  .issue-form { padding: 12px 16px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+  .issue-form input { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px;
+                      font-size: 13px; margin-right: 8px; }
+  .issue-form button { background: #0f172a; color: #fff; border: 0; border-radius: 4px;
+                       padding: 6px 14px; font-size: 13px; cursor: pointer; font-weight: 500; }
+  .issue-form button:hover { background: #1e293b; }
+  .issued-key { background: #fefce8; border: 1px solid #fde047; padding: 10px 14px;
+                margin: 12px 16px; border-radius: 4px; font-family: ui-monospace, monospace;
+                font-size: 16px; font-weight: 700; color: #713f12; }
 </style>
 </head>
 <body>
@@ -309,6 +392,32 @@ function renderHtml(d: DashboardData): string {
   </div>
 
   <div class="section">
+    <h2>Licenses (${d.licenses.length})</h2>
+    <div class="issue-form">
+      <form id="issue-form" onsubmit="issueLicense(event)">
+        <input type="text" id="issue-name" placeholder="Customer name (optional)" style="width: 200px;" />
+        <input type="email" id="issue-email" placeholder="Email (optional)" style="width: 200px;" />
+        <input type="number" id="issue-days" placeholder="Valid days" value="365" style="width: 100px;" />
+        <button type="submit">Issue License</button>
+      </form>
+      <div id="issued-result"></div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>License Key</th>
+          <th>Customer</th>
+          <th>Status</th>
+          <th>Expires</th>
+          <th>Bound Install</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>${licenseRows || '<tr><td colspan="6" style="text-align:center;padding:24px;color:#94a3b8;">No licenses issued yet</td></tr>'}</tbody>
+    </table>
+  </div>
+
+  <div class="section">
     <h2>Version distribution</h2>
     <table>
       <thead><tr><th>Version</th><th class="r">Installations</th></tr></thead>
@@ -338,6 +447,72 @@ function renderHtml(d: DashboardData): string {
     Rows with grey text haven't been seen in 7+ days.
   </div>
 </main>
+
+<script>
+const TOKEN = ${JSON.stringify(d.adminToken)};
+
+async function api(path, opts = {}) {
+  const res = await fetch(path + '?token=' + encodeURIComponent(TOKEN), {
+    ...opts,
+    headers: { 'content-type': 'application/json', ...(opts.headers || {}) },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error('HTTP ' + res.status + ': ' + text);
+  }
+  return res.json();
+}
+
+async function issueLicense(ev) {
+  ev.preventDefault();
+  const name  = document.getElementById('issue-name').value.trim();
+  const email = document.getElementById('issue-email').value.trim();
+  const days  = parseInt(document.getElementById('issue-days').value, 10) || 365;
+  try {
+    const r = await api('/admin/license', {
+      method: 'POST',
+      body: JSON.stringify({ customerName: name || null, customerEmail: email || null, validForDays: days }),
+    });
+    document.getElementById('issued-result').innerHTML =
+      '<div class="issued-key">' + r.licenseKey +
+      ' <span style="font-weight:400;font-size:12px;color:#a16207;">(valid ' + days + ' days)</span></div>';
+    document.getElementById('issue-name').value = '';
+    document.getElementById('issue-email').value = '';
+    setTimeout(() => location.reload(), 2000);
+  } catch (e) {
+    alert('Failed to issue license: ' + e.message);
+  }
+}
+
+async function revokeLicense(key) {
+  const reason = prompt('Reason for revocation (shown to customer)?', '');
+  if (reason === null) return;
+  try {
+    await api('/admin/license/' + encodeURIComponent(key) + '/revoke', {
+      method: 'POST', body: JSON.stringify({ reason }),
+    });
+    location.reload();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function unbindLicense(key) {
+  if (!confirm('Unbind this license? The customer can then activate on a different machine.')) return;
+  try {
+    await api('/admin/license/' + encodeURIComponent(key) + '/unbind', { method: 'POST' });
+    location.reload();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function extendLicense(key) {
+  if (!confirm('Extend this license by 365 days?')) return;
+  try {
+    await api('/admin/license/' + encodeURIComponent(key) + '/extend', {
+      method: 'POST', body: JSON.stringify({ addDays: 365 }),
+    });
+    location.reload();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+</script>
 </body>
 </html>`
 }
