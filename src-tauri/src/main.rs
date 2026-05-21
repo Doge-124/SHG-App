@@ -7,6 +7,7 @@ mod error;
 mod installation;
 mod security;
 mod state;
+mod telemetry;
 mod types;
 
 use state::AppState;
@@ -17,6 +18,13 @@ fn main() {
 
     // Sentry init returns a guard that flushes on drop (kept alive for whole program).
     let _sentry_guard = crash_reporting::init();
+
+    // Fire a telemetry heartbeat in the background. Non-blocking, best-effort.
+    // Only sends if TELEMETRY_ENDPOINT_URL was set at build time.
+    if let Ok(info) = installation::get_or_create_pre_app_for_telemetry() {
+        crate::telemetry::fire_async(&info);
+        crash_reporting::set_installation_id(&info.installation_id);
+    }
 
     tauri::Builder::default()
         .plugin(

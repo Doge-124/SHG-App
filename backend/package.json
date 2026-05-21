@@ -1,0 +1,19 @@
+{
+  "name": "shg-manager-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 execute shg-manager-db --local --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute shg-manager-db --remote --file=./schema.sql",
+    "db:inspect:remote": "wrangler d1 execute shg-manager-db --remote --command=\"SELECT name FROM sqlite_master WHERE type='table'\"",
+    "secret:set-admin-token": "wrangler secret put ADMIN_TOKEN"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240725.0",
+    "typescript": "^5.5.4",
+    "wrangler": "^3.66.0"
+  }
+}

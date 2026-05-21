@@ -98,7 +98,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "app"
-version = "1.0.8"
+version = "1.0.12"
 dependencies = [
  "argon2",
  "chrono",
@@ -106,6 +106,7 @@ dependencies = [
  "hex",
  "log",
  "rand 0.8.5",
+ "reqwest",
  "rusqlite",
  "sentry",
  "serde",
@@ -118,6 +119,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -4590,7 +4592,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]

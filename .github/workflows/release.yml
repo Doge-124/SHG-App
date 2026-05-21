@@ -49,6 +49,9 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           NEXT_PUBLIC_APP_VERSION: ${{ github.ref_name }}
+          # Phase 1 telemetry — heartbeat endpoint baked in at build time.
+          # Leave secret unset to ship a no-op (zero network calls).
+          TELEMETRY_ENDPOINT_URL: ${{ secrets.TELEMETRY_ENDPOINT_URL }}
         run: npm run tauri build
 
       - name: List build artifacts (debug)

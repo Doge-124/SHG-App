@@ -64,6 +64,12 @@ fn file_path_pre_app() -> Result<PathBuf, AppError> {
     Ok(dir.join("installation.json"))
 }
 
+/// Public wrapper around the pre-app loader. Use this in main() BEFORE the
+/// Tauri builder exists (e.g. for telemetry heartbeat).
+pub fn get_or_create_pre_app_for_telemetry() -> Result<InstallationInfo, AppError> {
+    load_or_create_pre_app()
+}
+
 /// Load installation info using the bootstrap-cached path. Creates if missing.
 fn load_or_create_pre_app() -> Result<InstallationInfo, AppError> {
     let path = file_path_pre_app()?;

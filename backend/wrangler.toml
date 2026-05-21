@@ -1,0 +1,19 @@
+# Cloudflare Workers config for SHG Manager backend.
+# After running `wrangler d1 create shg-manager-db`, paste the returned
+# database_id below.
+
+name = "shg-manager-api"
+main = "src/index.ts"
+compatibility_date = "2026-05-20"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 database binding. Run `wrangler d1 create shg-manager-db` once, then
+# paste the database_id Cloudflare prints into the line below.
+[[d1_databases]]
+binding = "DB"
+database_name = "shg-manager-db"
+database_id = "93f59fe2-1d86-419e-bbb9-a9eef195928a"
+
+# Public env vars (non-secret). Anything sensitive goes via `wrangler secret put`.
+[vars]
+ENV = "production"
