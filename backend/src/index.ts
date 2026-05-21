@@ -31,6 +31,8 @@ import {
   handleRevokeLicense,
   handleUnbindLicense,
   handleExtendLicense,
+  handleReactivateLicense,
+  handleRebindLicense,
   handleDeleteLicense,
 } from './routes/admin-licenses'
 
@@ -47,13 +49,15 @@ export default {
       if (path === '/license/validate')   return handleLicenseValidate(req, env)
       if (path === '/admin/license')      return handleIssueLicense(req, env)
 
-      // /admin/license/<key>/{revoke,unbind,extend}
-      const m = path.match(/^\/admin\/license\/([^/]+)\/(revoke|unbind|extend)$/)
+      // /admin/license/<key>/{revoke,unbind,extend,reactivate,rebind}
+      const m = path.match(/^\/admin\/license\/([^/]+)\/(revoke|unbind|extend|reactivate|rebind)$/)
       if (m) {
         const key = decodeURIComponent(m[1])
-        if (m[2] === 'revoke') return handleRevokeLicense(req, env, key)
-        if (m[2] === 'unbind') return handleUnbindLicense(req, env, key)
-        if (m[2] === 'extend') return handleExtendLicense(req, env, key)
+        if (m[2] === 'revoke')     return handleRevokeLicense(req, env, key)
+        if (m[2] === 'unbind')     return handleUnbindLicense(req, env, key)
+        if (m[2] === 'extend')     return handleExtendLicense(req, env, key)
+        if (m[2] === 'reactivate') return handleReactivateLicense(req, env, key)
+        if (m[2] === 'rebind')     return handleRebindLicense(req, env, key)
       }
     }
 

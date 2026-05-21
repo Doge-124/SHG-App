@@ -192,6 +192,53 @@ export async function handleExtendLicense(req: Request, env: Env, key: string): 
   return json({ ok: true, expiresAt: newExpiresAt })
 }
 
+// ─── POST /admin/license/:key/reactivate ─────────────────────────────────
+// Clears revoked/suspended status and restores 'active'. The original expiry
+// is preserved -- use /extend separately if it needs renewing.
+export async function handleReactivateLicense(req: Request, env: Env, key: string): Promise<Response> {
+  if (!isAuthorised(req, env)) return unauthorised()
+  const lic = await env.DB.prepare(
+    `SELECT status FROM licenses WHERE license_key = ?1`,
+  ).bind(key).first<{ status: string }>()
+  if (!lic) return json({ error: 'license_not_found' }, 404)
+
+  await env.DB.prepare(
+    `UPDATE licenses
+     SET status = 'active', revoked_at = NULL, revoked_reason = NULL
+     WHERE license_key = ?1`,
+  ).bind(key).run()
+
+  return json({ ok: true })
+}
+
+// ─── POST /admin/license/:key/rebind ─────────────────────────────────────
+// Manually bind an unbound (or differently-bound) license to a specific
+// installation_id. Use the customer's installation_id from the Installations
+// table. Overwrites any existing binding.
+// Body: { installationId: "<uuid>" }
+export async function handleRebindLicense(req: Request, env: Env, key: string): Promise<Response> {
+  if (!isAuthorised(req, env)) return unauthorised()
+  let body: { installationId?: string }
+  try { body = await req.json() } catch { return json({ error: 'invalid_json' }, 400) }
+
+  const installationId = body.installationId?.trim()
+  if (!installationId) return json({ error: 'missing_installation_id' }, 400)
+
+  const lic = await env.DB.prepare(
+    `SELECT license_key FROM licenses WHERE license_key = ?1`,
+  ).bind(key).first()
+  if (!lic) return json({ error: 'license_not_found' }, 404)
+
+  const now = Date.now()
+  await env.DB.prepare(
+    `UPDATE licenses
+     SET bound_installation_id = ?1, bound_at = ?2
+     WHERE license_key = ?3`,
+  ).bind(installationId, now, key).run()
+
+  return json({ ok: true, boundInstallationId: installationId })
+}
+
 // ─── DELETE /admin/license/:key ──────────────────────────────────────────
 export async function handleDeleteLicense(req: Request, env: Env, key: string): Promise<Response> {
   if (!isAuthorised(req, env)) return unauthorised()

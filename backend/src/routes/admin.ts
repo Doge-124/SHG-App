@@ -256,17 +256,28 @@ function renderHtml(d: DashboardData): string {
         ? `<span class="mono" title="${escapeHtml(lic.bound_installation_id)}">${escapeHtml(lic.bound_installation_id.slice(0, 8))}...</span>`
         : '<span class="muted">not activated</span>'
       const customer = lic.customer_name || lic.customer_email || '<span class="muted">unnamed</span>'
+      const isRevoked = lic.status === 'revoked' || lic.status === 'suspended'
+      const isUnbound = !lic.bound_installation_id
+      const actions: string[] = []
+      if (isRevoked) {
+        actions.push(`<button class="btn-mini" onclick="reactivateLicense('${escapeHtml(lic.license_key)}')">Reactivate</button>`)
+      } else {
+        actions.push(`<button class="btn-mini" onclick="revokeLicense('${escapeHtml(lic.license_key)}')">Revoke</button>`)
+      }
+      if (isUnbound) {
+        actions.push(`<button class="btn-mini" onclick="rebindLicense('${escapeHtml(lic.license_key)}')">Re-bind</button>`)
+      } else {
+        actions.push(`<button class="btn-mini" onclick="unbindLicense('${escapeHtml(lic.license_key)}')">Unbind</button>`)
+      }
+      actions.push(`<button class="btn-mini" onclick="extendLicense('${escapeHtml(lic.license_key)}')">+1yr</button>`)
+
       return `<tr>
         <td class="mono">${escapeHtml(lic.license_key)}</td>
         <td>${customer === '<span class="muted">unnamed</span>' ? customer : escapeHtml(customer)}</td>
         <td><span class="badge ${statusClass}">${statusLabel}</span></td>
         <td>${expiresStr}</td>
         <td>${bound}</td>
-        <td>
-          <button class="btn-mini" onclick="revokeLicense('${escapeHtml(lic.license_key)}')">Revoke</button>
-          <button class="btn-mini" onclick="unbindLicense('${escapeHtml(lic.license_key)}')">Unbind</button>
-          <button class="btn-mini" onclick="extendLicense('${escapeHtml(lic.license_key)}')">+1yr</button>
-        </td>
+        <td>${actions.join(' ')}</td>
       </tr>`
     })
     .join('')
@@ -508,6 +519,29 @@ async function extendLicense(key) {
   try {
     await api('/admin/license/' + encodeURIComponent(key) + '/extend', {
       method: 'POST', body: JSON.stringify({ addDays: 365 }),
+    });
+    location.reload();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function reactivateLicense(key) {
+  if (!confirm('Reactivate this license? The customer will regain access immediately.')) return;
+  try {
+    await api('/admin/license/' + encodeURIComponent(key) + '/reactivate', { method: 'POST' });
+    location.reload();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function rebindLicense(key) {
+  const installationId = prompt(
+    'Bind this license to which installation ID?\\n' +
+    '(Copy from the Installations table above.)',
+    '',
+  );
+  if (!installationId) return;
+  try {
+    await api('/admin/license/' + encodeURIComponent(key) + '/rebind', {
+      method: 'POST', body: JSON.stringify({ installationId: installationId.trim() }),
     });
     location.reload();
   } catch (e) { alert('Failed: ' + e.message); }

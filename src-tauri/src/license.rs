@@ -138,18 +138,31 @@ pub async fn get_status() -> LicenseStatus {
         };
     };
 
-    // Decide if we need a live check. Always do one on first call per launch.
-    // For now, always try to validate — the server side is cheap.
+    // Always do a live check on launch — server side is cheap.
     let live = validate_with_server(&stored.license_key).await;
 
     match live {
         Ok(s) => {
-            // Persist the fresh result.
             let _ = save_stored(&s);
             build_status(&s, false)
         }
-        Err(e) => {
-            // Fall back to cache.
+        // Server explicitly rejected the license (admin unbound it, deleted it,
+        // etc.). The cache is now stale and misleading — wipe it and force the
+        // customer to re-activate.
+        Err(ValidationError::Authoritative(reason)) => {
+            log::warn!("license: server rejected ({reason}); wiping cache and forcing re-activation");
+            let _ = delete_stored();
+            LicenseStatus {
+                status: "not_activated".to_string(),
+                license_key: None, customer_name: None, expires_at: None,
+                grace_period_ends_at: None, days_until_expiry: None,
+                days_in_grace_remaining: None, revoked_reason: None,
+                last_validated_at: None, offline_validation: false,
+                message: Some(authoritative_reject_message(&reason)),
+            }
+        }
+        // True network failure — fall back to cache up to the offline-grace window.
+        Err(ValidationError::Network(e)) => {
             let age_ms = chrono::Utc::now().timestamp_millis() - stored.last_validated_at;
             log::warn!("license: live check failed ({e}); falling back to cache (age {}d)", age_ms / 86_400_000);
             if age_ms > OFFLINE_GRACE_MS {
@@ -173,6 +186,17 @@ pub async fn get_status() -> LicenseStatus {
             }
             build_status(&stored, true)
         }
+    }
+}
+
+fn authoritative_reject_message(reason: &str) -> String {
+    match reason {
+        "not_activated" => "Your license has been unbound from this machine. \
+                            Please activate again with your license key.".to_string(),
+        "license_not_found" => "Your license key is no longer on file. Contact support.".to_string(),
+        "invalid_license_key_format" => "Stored license key is malformed. Please activate again.".to_string(),
+        "invalid_installation_id" => "Installation ID is invalid. Contact support.".to_string(),
+        other => format!("License rejected by server: {other}. Please activate again."),
     }
 }
 
@@ -245,17 +269,38 @@ pub fn deactivate_local() -> Result<(), String> {
 
 // ─── Internal helpers ────────────────────────────────────────────────────
 
-async fn validate_with_server(license_key: &str) -> Result<StoredLicense, String> {
+/// Why a live validation didn't return a usable result. The distinction matters
+/// because `Network` should fall back to cache (offline grace) while
+/// `Authoritative` should wipe the cache (server explicitly rejected the key).
+enum ValidationError {
+    /// Server reached us and explicitly said no (license deleted, unbound, etc.).
+    /// The cached state is now stale — caller should delete it.
+    Authoritative(String),
+    /// Couldn't reach the server, or got a malformed response. Caller should
+    /// fall back to the offline cache.
+    Network(String),
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authoritative(s) => write!(f, "authoritative: {s}"),
+            Self::Network(s)       => write!(f, "network: {s}"),
+        }
+    }
+}
+
+async fn validate_with_server(license_key: &str) -> Result<StoredLicense, ValidationError> {
     let endpoint = telemetry_endpoint().ok_or_else(||
-        "Licensing not configured in this build.".to_string())?;
+        ValidationError::Network("Licensing not configured in this build.".to_string()))?;
     let installation_id = installation::get_or_create_pre_app_for_telemetry()
-        .map_err(|e| format!("Cannot read installation ID: {e}"))?
+        .map_err(|e| ValidationError::Network(format!("Cannot read installation ID: {e}")))?
         .installation_id;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
+        .map_err(|e| ValidationError::Network(format!("HTTP client: {e}")))?;
 
     let url = format!("{}/license/validate", endpoint);
     let resp = client.post(&url)
@@ -265,11 +310,23 @@ async fn validate_with_server(license_key: &str) -> Result<StoredLicense, String
         }))
         .send()
         .await
-        .map_err(|e| format!("network: {e}"))?;
+        .map_err(|e| ValidationError::Network(format!("send: {e}")))?;
 
-    let body: ValidateResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    // 5xx is server-side trouble — treat as network so we keep the cache.
+    // 4xx is authoritative rejection (404/403/400) — we want to wipe.
+    let http_status = resp.status();
+    if http_status.is_server_error() {
+        return Err(ValidationError::Network(format!("HTTP {}", http_status.as_u16())));
+    }
+
+    let body: ValidateResponse = resp.json().await
+        .map_err(|e| ValidationError::Network(format!("decode: {e}")))?;
+
     if !body.ok {
-        return Err(format!("server error: {}", body.error.unwrap_or_else(|| "unknown".into())));
+        // Server reached us and said no — definitive answer.
+        return Err(ValidationError::Authoritative(
+            body.error.unwrap_or_else(|| "unknown".into())
+        ));
     }
 
     let now = chrono::Utc::now().timestamp_millis();
