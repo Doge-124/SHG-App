@@ -40,6 +40,7 @@ pub mod balance_sheet;
 pub mod income_expenditure;
 pub mod migrations;
 pub mod integrity;
+pub mod past_edit;
 
 /// Open or create the encrypted SQLCipher database using a PIN-derived key.
 ///

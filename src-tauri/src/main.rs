@@ -166,6 +166,9 @@ fn main() {
             commands::license::deactivate_license_local,
             commands::version_policy::get_version_policy,
             commands::support_inbox::run_support_inbox,
+            commands::past_edit::edit_member_opening_data,
+            commands::past_edit::delete_past_loan,
+            commands::past_edit::delete_past_chit_cycle,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

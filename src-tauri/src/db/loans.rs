@@ -126,9 +126,9 @@ pub fn create_loan(
 
     // Member transaction: loan issued
     tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-         VALUES (?1, ?2, 'LOAN', ?3)",
-        (member_id, amount, created_at),
+        "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+         VALUES (?1, ?2, 'LOAN', ?3, ?4)",
+        (member_id, amount, loan_id, created_at),
     )?;
 
     // Member balance: +principal (before upfront deduction)
@@ -168,9 +168,9 @@ pub fn create_loan(
             (member_id, upfront_interest),
         )?;
         tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3)",
-            (member_id, -upfront_interest, created_at),
+            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
+            (member_id, -upfront_interest, loan_id, created_at),
         )?;
     }
 
@@ -271,8 +271,8 @@ pub fn record_past_loan(
              (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
               total_repayable, interest_amount, upfront_interest_amount,
               payment_method, loan_type, note, status, issued_at, created_at,
-              principal, due_date)
-             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14)
+              is_past_entry, principal, due_date)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,1,?13,?14)
              RETURNING id",
             (member_id, amount, outstanding_start, daily_interest_rate,
              amount, upfront_interest, upfront_interest,
@@ -284,8 +284,8 @@ pub fn record_past_loan(
             "INSERT INTO loans
              (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
               total_repayable, interest_amount, upfront_interest_amount,
-              payment_method, loan_type, note, status, issued_at, created_at)
-             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12)
+              payment_method, loan_type, note, status, issued_at, created_at, is_past_entry)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,1)
              RETURNING id",
             (member_id, amount, outstanding_start, daily_interest_rate,
              amount, upfront_interest, upfront_interest,
@@ -296,9 +296,9 @@ pub fn record_past_loan(
 
     // 2. Member transaction: LOAN.
     tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-         VALUES (?1, ?2, 'LOAN', ?3)",
-        (member_id, amount, issued_at),
+        "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+         VALUES (?1, ?2, 'LOAN', ?3, ?4)",
+        (member_id, amount, loan_id, issued_at),
     )?;
 
     // 3. Member balance: +amount.
@@ -328,9 +328,9 @@ pub fn record_past_loan(
         )?;
 
         tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3)",
-            (member_id, -upfront_interest, issued_at),
+            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
+            (member_id, -upfront_interest, loan_id, issued_at),
         )?;
     }
 
@@ -362,9 +362,9 @@ pub fn record_past_loan(
 
         // Member transaction: PAYMENT.
         tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3)",
-            (member_id, -applied, rep_date),
+            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
+            (member_id, -applied, loan_id, rep_date),
         )?;
 
         // Member balance: -applied.
@@ -437,9 +437,9 @@ pub fn record_loan_payment(
     let receipt_note = note.to_string();
 
     tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, created_at)
-         VALUES (?1, ?2, 'PAYMENT', ?3)",
-        (member_id, -principal_paid, created_at),
+        "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
+         VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
+        (member_id, -principal_paid, loan_id, created_at),
     )?;
 
     tx.execute(

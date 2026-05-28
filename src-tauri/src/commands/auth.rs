@@ -249,13 +249,13 @@ pub fn change_admin_pin(
     Ok(())
 }
 
-/// Verify the admin PIN (set during app setup) — used to authorise destructive operations.
-/// Derives the admin key from the provided PIN and checks it against the stored recovery blob.
-#[tauri::command]
-pub fn verify_master_password(
-    password: String,
-    state: State<Mutex<AppState>>,
-    app: tauri::AppHandle,
+/// Verify the admin PIN against the stored recovery blob. Returns true if it
+/// matches. Used both by the public Tauri command and by other commands that
+/// need to gate sensitive operations behind admin re-auth.
+pub fn verify_admin_pin_internal(
+    pin: &str,
+    app: &tauri::AppHandle,
+    state: &Mutex<AppState>,
 ) -> Result<bool, String> {
     let app_dir = app.path().app_data_dir()
         .map_err(|_| "app_data_dir not available".to_string())?;
@@ -268,7 +268,7 @@ pub fn verify_master_password(
 
     let admin_salt_bytes = match sec.admin_salt.as_deref() {
         Some(s) => hex::decode(s).map_err(|_| "Invalid admin salt".to_string())?,
-        None => return Ok(false), // admin PIN was never configured
+        None => return Ok(false),
     };
 
     let recovery_bytes = match sec.recovery_blob.as_deref() {
@@ -276,23 +276,31 @@ pub fn verify_master_password(
         None => return Ok(false),
     };
 
-    // Derive the admin key from the provided PIN.
-    let admin_key = key::derive_key(&password, &admin_salt_bytes)
+    let admin_key = key::derive_key(pin, &admin_salt_bytes)
         .map_err(|e: AppError| e.to_string())?;
 
-    // Recover the db key: XOR(recovery_blob, admin_key).
     let recovery_arr: [u8; 32] = recovery_bytes
         .try_into()
         .map_err(|_| "Corrupt recovery blob".to_string())?;
     let candidate_db_key = key::xor_keys(&recovery_arr, &admin_key);
     let candidate_hex = hex::encode(candidate_db_key);
 
-    // Compare with the in-memory db key held in AppState.
     let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let stored = match guard.db_key.as_deref() {
         Some(k) => k.to_string(),
         None => return Ok(false),
     };
-
     Ok(candidate_hex == stored)
 }
+
+/// Verify the admin PIN (set during app setup) — used to authorise destructive operations.
+/// Derives the admin key from the provided PIN and checks it against the stored recovery blob.
+#[tauri::command]
+pub fn verify_master_password(
+    password: String,
+    state: State<Mutex<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    verify_admin_pin_internal(&password, &app, state.inner())
+}
+

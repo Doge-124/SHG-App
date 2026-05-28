@@ -69,19 +69,21 @@ pub fn record_past_chit_cycle(
 
     let mut tx = conn.transaction()?;
 
-    // Upsert cycle record
+    // Upsert cycle record. is_past_entry stays 1 even on conflict update so
+    // the row always identifies itself as past-data for the delete guard.
     tx.execute(
         "INSERT INTO chit_cycles
          (chit_id, cycle_no, auction_date, winning_member_id, bid_discount, payout_amount,
-          total_bid_discounts, auction_discount_per_member)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+          total_bid_discounts, auction_discount_per_member, is_past_entry)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1)
          ON CONFLICT(chit_id, cycle_no) DO UPDATE SET
              auction_date = excluded.auction_date,
              winning_member_id = excluded.winning_member_id,
              bid_discount = excluded.bid_discount,
              payout_amount = excluded.payout_amount,
              total_bid_discounts = excluded.total_bid_discounts,
-             auction_discount_per_member = excluded.auction_discount_per_member",
+             auction_discount_per_member = excluded.auction_discount_per_member,
+             is_past_entry = 1",
         (chit_id, cycle_no, auction_date, first_winner_id, total_bid_discounts,
          first_payout, total_bid_discounts, auction_discount_per_member),
     )?;

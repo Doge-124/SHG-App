@@ -19,6 +19,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
+import { AdminPinDialog } from '@/components/admin-pin-dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { getMemberProfile, setMemberOpeningData, updateMemberType } from '@/lib/api/members'
 import { useSettings } from '@/lib/settings-context'
 import { getMemberLoans } from '@/lib/api/loans'
@@ -47,6 +49,13 @@ export default function MemberDetailPage() {
   const [openingBalance, setOpeningBalance] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'BANK'>('CASH')
   const [pastInstallments, setPastInstallments] = useState('')
+
+  // Edit-past-data dialog state
+  const [editOpen, setEditOpen] = useState(false)
+  const [editOpening, setEditOpening] = useState('')
+  const [editMethod, setEditMethod] = useState<'CASH' | 'BANK'>('CASH')
+  const [editInstallments, setEditInstallments] = useState('')
+  const [adminPinOpen, setAdminPinOpen] = useState(false)
 
   useEffect(() => {
     async function loadData() {
@@ -387,9 +396,23 @@ export default function MemberDetailPage() {
         ) : (
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <AlertCircle className="h-5 w-5" />
-                Past Data (Migration Record)
+              <CardTitle className="flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <AlertCircle className="h-5 w-5" />
+                  Past Data (Migration Record)
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setEditOpening(String(profile.openingBalance ?? 0))
+                    setEditMethod(((profile.openingBalanceMethod as 'CASH' | 'BANK') || 'CASH'))
+                    setEditInstallments(String(profile.initialInstallments ?? 0))
+                    setEditOpen(true)
+                  }}
+                >
+                  Edit
+                </Button>
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -419,6 +442,67 @@ export default function MemberDetailPage() {
           </Card>
         )
       )}
+
+      {/* Edit-past-data dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Past Data</DialogTitle>
+            <DialogDescription>
+              Replaces the locked opening entry for {profile?.member.name}. Member balance is
+              adjusted by the difference. Requires admin PIN.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <Label htmlFor="editOpening">Opening Balance (₹)</Label>
+              <Input id="editOpening" type="number" step="0.01" min="0"
+                value={editOpening} onChange={e => setEditOpening(e.target.value)} />
+            </div>
+            <div>
+              <Label>Payment Method</Label>
+              <Select value={editMethod} onValueChange={(v) => setEditMethod(v as 'CASH' | 'BANK')}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="CASH">Cash</SelectItem>
+                  <SelectItem value="BANK">Bank</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label htmlFor="editInstallments">Initial Installments Seeded</Label>
+              <Input id="editInstallments" type="number" min="0" step="1"
+                value={editInstallments} onChange={e => setEditInstallments(e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={() => { setEditOpen(false); setAdminPinOpen(true) }}>
+              Save (requires admin PIN)
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AdminPinDialog
+        open={adminPinOpen}
+        onOpenChange={setAdminPinOpen}
+        title="Confirm with admin PIN"
+        description="This rewrites a locked past-data entry. The change is audited."
+        confirmLabel="Save changes"
+        onConfirm={async (adminPin) => {
+          await invoke('edit_member_opening_data', {
+            memberId: parseInt(id),
+            openingBalance: parseFloat(editOpening) || 0,
+            paymentMethod: editMethod,
+            pastInstallments: parseInt(editInstallments) || 0,
+            adminPin,
+          })
+          toast({ title: 'Past data updated' })
+          const refreshed = await getMemberProfile(parseInt(id))
+          setProfile(refreshed)
+        }}
+      />
 
       {/* Address */}
       {profile.member.address && (

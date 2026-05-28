@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, CreditCard, MoreHorizontal, History, CalendarClock } from 'lucide-react'
+import { Plus, CreditCard, MoreHorizontal, History, CalendarClock, Trash2 } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
+import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -50,6 +52,7 @@ export default function LoansPage() {
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [repaymentLoan, setRepaymentLoan] = useState<Loan | null>(null)
   const [scheduleLoanId, setScheduleLoanId] = useState<number | null>(null)
+  const [deleteLoanId, setDeleteLoanId] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paid' | 'defaulted'>('all')
   const [loanTypeFilter, setLoanTypeFilter] = useState<'all' | 'monthly' | 'weekly'>('all')
@@ -233,6 +236,13 @@ export default function LoansPage() {
               <CalendarClock className="mr-2 h-4 w-4" />
               View Schedule
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => setDeleteLoanId(loan.id)}
+              className="text-red-600 focus:text-red-700"
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete (past entry only)
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -376,6 +386,24 @@ export default function LoansPage() {
         loanId={scheduleLoanId}
         open={scheduleLoanId !== null}
         onOpenChange={open => { if (!open) setScheduleLoanId(null) }}
+      />
+
+      <AdminPinDialog
+        open={!!deleteLoanId}
+        onOpenChange={(open) => { if (!open) setDeleteLoanId(null) }}
+        title="Delete past loan entry"
+        description="Past-data loan entries can be deleted with the admin PIN. Live loans (with corresponding SHG vouchers) will be refused by the server."
+        destructive
+        confirmLabel="Delete"
+        onConfirm={async (adminPin) => {
+          await invoke('delete_past_loan', {
+            loanId: parseInt(deleteLoanId!),
+            adminPin,
+          })
+          toast.success('Past loan deleted')
+          setDeleteLoanId(null)
+          refreshLoans()
+        }}
       />
     </div>
   )

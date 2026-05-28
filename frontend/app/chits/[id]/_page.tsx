@@ -14,7 +14,10 @@ import {
   History,
   Gavel,
   Zap,
+  Trash2,
 } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
+import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -62,6 +65,7 @@ export default function ChitDetailPage() {
   const [showManualCycleForm, setShowManualCycleForm] = useState(false)
   const [paymentStatuses, setPaymentStatuses] = useState<MemberPaymentStatus[]>([])
   const [cycleWinners, setCycleWinners] = useState<Record<string, ChitCycleWinner[]>>({})
+  const [deleteCycleId, setDeleteCycleId] = useState<string | null>(null)
 
   useEffect(() => {
     async function loadData() {
@@ -251,12 +255,23 @@ export default function ChitDetailPage() {
                 <span className="font-mono font-semibold text-sm">Cycle #{cycle.cycleNumber}</span>
                 <span className="text-sm text-muted-foreground">{formatDate(cycle.dueDate)}</span>
               </div>
-              <Badge
-                variant={isCompleted ? 'secondary' : 'default'}
-                className={cn(isCompleted && 'bg-green-100 text-green-700 border-green-200')}
-              >
-                {isCompleted ? <><CheckCircle className="mr-1 h-3 w-3" />Completed</> : <><Clock className="mr-1 h-3 w-3" />Active</>}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge
+                  variant={isCompleted ? 'secondary' : 'default'}
+                  className={cn(isCompleted && 'bg-green-100 text-green-700 border-green-200')}
+                >
+                  {isCompleted ? <><CheckCircle className="mr-1 h-3 w-3" />Completed</> : <><Clock className="mr-1 h-3 w-3" />Active</>}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-red-600 hover:text-red-700"
+                  title="Delete past-data cycle (admin PIN required)"
+                  onClick={() => setDeleteCycleId(cycle.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </div>
 
             {winners.length > 0 ? (
@@ -564,6 +579,24 @@ export default function ChitDetailPage() {
           open={showManualCycleForm} onOpenChange={setShowManualCycleForm} onSuccess={reload}
         />
       )}
+
+      <AdminPinDialog
+        open={!!deleteCycleId}
+        onOpenChange={(open) => { if (!open) setDeleteCycleId(null) }}
+        title="Delete past chit cycle"
+        description="Past-data chit cycles (including their winners and member payments) can be deleted with the admin PIN. Live cycles will be refused by the server."
+        destructive
+        confirmLabel="Delete"
+        onConfirm={async (adminPin) => {
+          await invoke('delete_past_chit_cycle', {
+            cycleId: parseInt(deleteCycleId!),
+            adminPin,
+          })
+          toast.success('Past cycle deleted')
+          setDeleteCycleId(null)
+          reload()
+        }}
+      />
     </div>
   )
 }

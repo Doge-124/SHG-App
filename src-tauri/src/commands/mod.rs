@@ -13,3 +13,4 @@ pub mod support;
 pub mod license;
 pub mod version_policy;
 pub mod support_inbox;
+pub mod past_edit;

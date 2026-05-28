@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS member_transactions (
     txn_type TEXT NOT NULL CHECK (txn_type IN ('LOAN', 'PAYMENT', 'OPENING', 'CONTRIBUTION')),
     reason TEXT NOT NULL DEFAULT '',
     reference_txn_id INTEGER,
+    reference_loan_id INTEGER,
+    reference_chit_cycle_id INTEGER,
     created_at TEXT NOT NULL,
     FOREIGN KEY (member_id) REFERENCES members(id)
 );
@@ -315,11 +317,89 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         "#)?;
     }
 
+    // 11) Reference columns on member_transactions so past-data deletions can
+    // cleanly reverse derived ledger rows without fragile (member+date+amount)
+    // matching. Populated by all loan/chit write paths going forward;
+    // legacy rows backfilled by best-effort matching below.
+    let added_loan_ref = add_column_if_missing(&tx, "member_transactions", "reference_loan_id",       "INTEGER")?;
+    let added_chit_ref = add_column_if_missing(&tx, "member_transactions", "reference_chit_cycle_id", "INTEGER")?;
+
+    if added_loan_ref {
+        // LOAN entries: one per loan, identified by member_id + amount + created_at.
+        tx.execute_batch(r#"
+            UPDATE member_transactions AS mt
+            SET reference_loan_id = (
+                SELECT l.id FROM loans l
+                WHERE l.member_id = mt.member_id
+                  AND ABS(l.amount - mt.amount) < 0.005
+                  AND l.issued_at = mt.created_at
+                LIMIT 1
+            )
+            WHERE mt.txn_type = 'LOAN' AND mt.reference_loan_id IS NULL;
+        "#)?;
+        // PAYMENT entries: match by loan_payments row via member+created_at+amount.
+        // member_transactions stores -principal_amount; loan_payments stores principal_amount.
+        tx.execute_batch(r#"
+            UPDATE member_transactions AS mt
+            SET reference_loan_id = (
+                SELECT lp.loan_id FROM loan_payments lp
+                WHERE lp.member_id = mt.member_id
+                  AND lp.created_at = mt.created_at
+                  AND ABS(lp.principal_amount + mt.amount) < 0.005
+                LIMIT 1
+            )
+            WHERE mt.txn_type = 'PAYMENT' AND mt.reference_loan_id IS NULL;
+        "#)?;
+    }
+
+    if added_chit_ref {
+        // Chit installments and payouts haven't been touching member_transactions yet
+        // (chits are reference-only on the member ledger), so no backfill needed.
+        // The column exists for future use and consistency.
+    }
+
+    // 12) is_past_entry markers — let admin-gated deletes know which rows
+    // came from past-data entry (safe to remove) vs live activity (would
+    // orphan SHG ledger rows). Backfill: any pre-existing row without a
+    // matching SHG ledger entry is assumed to be a past entry.
+    let added_loan_past = add_column_if_missing(&tx, "loans", "is_past_entry", "INTEGER NOT NULL DEFAULT 0")?;
+    let added_cycle_past = add_column_if_missing(&tx, "chit_cycles", "is_past_entry", "INTEGER NOT NULL DEFAULT 0")?;
+
+    if added_loan_past {
+        // A live loan creates an shg_transaction with reference_type='MEMBER_LOAN'
+        // at created_at = loan.issued_at and amount = loan.amount. Past loans
+        // don't. Match conservatively (member_id implied via amount equality
+        // tolerance).
+        tx.execute_batch(r#"
+            UPDATE loans SET is_past_entry = 1
+            WHERE NOT EXISTS (
+                SELECT 1 FROM shg_transactions s
+                WHERE s.reference_type = 'MEMBER_LOAN'
+                  AND s.created_at = loans.issued_at
+                  AND ABS(s.amount - loans.amount) < 0.005
+            );
+        "#)?;
+    }
+
+    if added_cycle_past {
+        // A live cycle has CHIT_PAYMENT / CHIT_PAYOUT / CHIT_COMMISSION SHG
+        // entries referencing its id.
+        tx.execute_batch(r#"
+            UPDATE chit_cycles SET is_past_entry = 1
+            WHERE NOT EXISTS (
+                SELECT 1 FROM shg_transactions s
+                WHERE s.reference_type IN ('CHIT_PAYMENT','CHIT_PAYOUT','CHIT_COMMISSION')
+                  AND s.reference_id = chit_cycles.id
+            );
+        "#)?;
+    }
+
     // 7) Ensure indexes exist for performance.
     tx.execute_batch(
         r#"
         CREATE INDEX IF NOT EXISTS idx_member_code ON members(member_code);
         CREATE INDEX IF NOT EXISTS idx_member_tx_member ON member_transactions(member_id);
+        CREATE INDEX IF NOT EXISTS idx_member_tx_loan_ref ON member_transactions(reference_loan_id);
         CREATE INDEX IF NOT EXISTS idx_shg_tx_date ON shg_transactions(created_at);
         CREATE INDEX IF NOT EXISTS idx_chit_cycle ON chit_cycles(chit_id, cycle_no);
         "#,
