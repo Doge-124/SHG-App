@@ -138,6 +138,14 @@ pub async fn get_status() -> LicenseStatus {
         };
     };
 
+    // Dev builds and any build without a telemetry endpoint baked in skip
+    // the live check entirely. We return the cached status as-is — no log
+    // noise, no offline-grace shenanigans, because there's no server to
+    // talk to in the first place.
+    if telemetry_endpoint().is_none() {
+        return build_status(&stored, false);
+    }
+
     // Always do a live check on launch — server side is cheap.
     let live = validate_with_server(&stored.license_key).await;
 
