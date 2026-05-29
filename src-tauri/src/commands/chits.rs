@@ -635,7 +635,21 @@ pub fn get_member_chit_groups(
                      WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as payout_amount,
                     (SELECT cc.cycle_no FROM chit_cycles cc
                      JOIN chit_cycle_winners ccw ON cc.id = ccw.cycle_id
-                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as won_cycle_no
+                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as won_cycle_no,
+                    -- Total this member has paid into this chit (sum of installments,
+                    -- excluding any voided/reversed entries — chit_payments table itself
+                    -- holds only live entries; cancel_chit_installment deletes the row).
+                    (SELECT COALESCE(SUM(cp.amount), 0) FROM chit_payments cp
+                     WHERE cp.chit_id = cg.id AND cp.member_id = ?1) as total_paid,
+                    -- Distinct cycles they've paid in (used to derive 'closed for member').
+                    (SELECT COUNT(DISTINCT cp.cycle_id) FROM chit_payments cp
+                     WHERE cp.chit_id = cg.id AND cp.member_id = ?1) as paid_cycle_count,
+                    -- Gross prize for the one cycle they've won = payout + bid_discount + commission.
+                    -- This is what they would have received before the bid auction discount and
+                    -- the SHG's commission cut. A member can win at most once per chit.
+                    (SELECT COALESCE(ccw.payout_amount + ccw.bid_discount + ccw.commission, 0)
+                     FROM chit_cycle_winners ccw
+                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as gross_won_amount
              FROM chit_groups cg
              JOIN chit_members cm ON cg.id = cm.chit_id
              WHERE cm.member_id = ?1
@@ -645,11 +659,17 @@ pub fn get_member_chit_groups(
 
     let rows = stmt
         .query_map([member_id], |row| {
+            let months: i64 = row.get(3)?;
+            let paid_cycle_count: i64 = row.get(18)?;
+            // "Closed for this member" = they've paid into every scheduled cycle.
+            // We use cg.months as the target so it works for chits still in progress
+            // (paid_cycle_count grows over time, hits months when fully paid).
+            let member_closed = paid_cycle_count >= months;
             Ok(serde_json::json!({
                 "id": row.get::<_, i64>(0)?,
                 "name": row.get::<_, String>(1)?,
                 "totalAmount": row.get::<_, f64>(2)?,
-                "months": row.get::<_, i64>(3)?,
+                "months": months,
                 "totalMembers": row.get::<_, i64>(4)?,
                 "monthlyContribution": row.get::<_, f64>(5)?,
                 "commissionPercent": row.get::<_, f64>(6)?,
@@ -663,6 +683,10 @@ pub fn get_member_chit_groups(
                 "winnerType": row.get::<_, Option<String>>(14)?,
                 "payoutAmount": row.get::<_, Option<f64>>(15)?,
                 "wonCycleNo": row.get::<_, Option<i64>>(16)?,
+                "totalPaid": row.get::<_, f64>(17)?,
+                "paidCycleCount": paid_cycle_count,
+                "grossWonAmount": row.get::<_, f64>(19)?,
+                "memberClosed": member_closed,
             }))
         })
         .map_err(|e| e.to_string())?;

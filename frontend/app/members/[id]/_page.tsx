@@ -649,6 +649,14 @@ function TransactionList({ txns }: { txns: any[] }) {
 }
 
 function ChitList({ chitGroups }: { chitGroups: any[] }) {
+  // Lifetime aggregates across every chit this member belongs to. A member
+  // can win at most once per chit, so "chits won" = count of chits where
+  // winnerType is set.
+  const lifetimePaid = chitGroups.reduce((s, g) => s + (g.totalPaid ?? 0), 0)
+  const lifetimeWonGross = chitGroups.reduce((s, g) => s + (g.grossWonAmount ?? 0), 0)
+  const chitsWonCount = chitGroups.filter(g => !!g.winnerType).length
+  const closedCount = chitGroups.filter(g => g.memberClosed).length
+
   return (
     <Card>
       <CardHeader><CardTitle>Chit Fund Memberships</CardTitle></CardHeader>
@@ -656,11 +664,34 @@ function ChitList({ chitGroups }: { chitGroups: any[] }) {
         {chitGroups.length === 0 ? (
           <p className="text-muted-foreground text-center py-8">Not a member of any chit group</p>
         ) : (
-          <div className="space-y-4">
+          <>
+            {/* Lifetime summary across all chits */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5 p-3 rounded-lg border bg-muted/30">
+              <div>
+                <p className="text-xs text-muted-foreground">Total paid (all chits)</p>
+                <p className="font-semibold text-success">{formatCurrency(lifetimePaid)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Total won (gross)</p>
+                <p className="font-semibold text-blue-700">{formatCurrency(lifetimeWonGross)}</p>
+                <p className="text-[10px] text-muted-foreground">before bid discount + commission</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Chits won</p>
+                <p className="font-semibold">{chitsWonCount} / {chitGroups.length}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Chits closed</p>
+                <p className="font-semibold">{closedCount} / {chitGroups.length}</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
             {chitGroups.map(group => {
               const hasWon = !!group.winnerType
               const isFixed = group.winnerType === 'FIXED'
               const isAuction = group.winnerType === 'AUCTION'
+              const memberClosed = !!group.memberClosed
               return (
                 <div key={group.id} className="p-4 rounded-lg bg-muted/50 space-y-3">
                   <div className="flex items-center justify-between">
@@ -674,6 +705,11 @@ function ChitList({ chitGroups }: { chitGroups: any[] }) {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
+                      {memberClosed && (
+                        <Badge className="bg-green-100 text-green-800 border-green-200">
+                          Closed
+                        </Badge>
+                      )}
                       <Badge
                         variant="outline"
                         className={cn(
@@ -688,6 +724,25 @@ function ChitList({ chitGroups }: { chitGroups: any[] }) {
                           <ExternalLink className="h-4 w-4" />
                         </Link>
                       </Button>
+                    </div>
+                  </div>
+
+                  {/* Per-chit totals for this member */}
+                  <div className="grid grid-cols-3 gap-2 text-sm border rounded-md bg-background p-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Total paid</p>
+                      <p className="font-semibold text-success">{formatCurrency(group.totalPaid ?? 0)}</p>
+                      <p className="text-[10px] text-muted-foreground">{group.paidCycleCount ?? 0} / {group.months} cycles</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Won (gross)</p>
+                      <p className="font-semibold text-blue-700">{formatCurrency(group.grossWonAmount ?? 0)}</p>
+                      <p className="text-[10px] text-muted-foreground">before deductions</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Net received</p>
+                      <p className="font-semibold">{formatCurrency(group.payoutAmount ?? 0)}</p>
+                      <p className="text-[10px] text-muted-foreground">after bid + commission</p>
                     </div>
                   </div>
 
@@ -720,7 +775,8 @@ function ChitList({ chitGroups }: { chitGroups: any[] }) {
                 </div>
               )
             })}
-          </div>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>
