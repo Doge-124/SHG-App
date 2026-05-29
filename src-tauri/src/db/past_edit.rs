@@ -101,10 +101,9 @@ pub fn edit_member_opening_data(
 
 // ───── Delete past loan ──────────────────────────────────────────────────
 
-/// Cascade-delete a loan and every derived row that hangs off it. Reverses
-/// the loan's effect on member_balances using the (still-live) outstanding
-/// figure: each loan ends up changing balance by +outstanding_amount, so
-/// deleting requires -outstanding_amount.
+/// Cascade-delete a loan and every derived row that hangs off it.
+/// Loans no longer touch member_balances or member_transactions, so deletion
+/// is purely a clean-up of the loan-side tables — savings stay untouched.
 pub fn delete_past_loan(conn: &mut Connection, loan_id: i64) -> Result<(), AppError> {
     let tx = conn.transaction()?;
 
@@ -120,17 +119,8 @@ pub fn delete_past_loan(conn: &mut Connection, loan_id: i64) -> Result<(), AppEr
         ));
     }
 
-    // Reverse the loan's net impact on member balance.
-    if outstanding.abs() > 0.005 {
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-            (member_id, outstanding),
-        )?;
-    }
-
-    // Clean up derived rows. reference_loan_id is populated by new writes
-    // and backfilled for legacy rows in the schema migration.
+    // Also clean up any legacy LOAN/PAYMENT rows on member_transactions
+    // (pre-fix writes — current loan paths don't add new ones).
     tx.execute(
         "DELETE FROM member_transactions WHERE reference_loan_id = ?1",
         [loan_id],
@@ -148,7 +138,7 @@ pub fn delete_past_loan(conn: &mut Connection, loan_id: i64) -> Result<(), AppEr
         "delete_past_loan",
         "loan",
         Some(loan_id),
-        &format!("member_id={member_id}, outstanding_reversed={outstanding:.2}"),
+        &format!("member_id={member_id}, deleted_outstanding={outstanding:.2}"),
     )?;
 
     tx.commit()?;

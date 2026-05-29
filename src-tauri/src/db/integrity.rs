@@ -61,13 +61,18 @@ pub fn check_integrity(conn: &Connection) -> Result<IntegrityReport, AppError> {
         severity: if fk_ok { "ok".into() } else { "error".into() },
     });
 
-    // 3a. Member balance invariant
+    // 3a. Member savings balance invariant.
+    // member_balances tracks SAVINGS only (OPENING + CONTRIBUTION). LOAN /
+    // PAYMENT rows are loan-side history that lives on the loans tables
+    // and must not be counted here.
     let member_mismatches: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM (
                 SELECT mb.member_id
                 FROM member_balances mb
-                LEFT JOIN member_transactions mt ON mt.member_id = mb.member_id
+                LEFT JOIN member_transactions mt
+                  ON mt.member_id = mb.member_id
+                 AND mt.txn_type IN ('OPENING','CONTRIBUTION')
                 GROUP BY mb.member_id
                 HAVING ABS(mb.balance - COALESCE(SUM(mt.amount), 0)) > 0.01
             )",
@@ -219,9 +224,12 @@ pub fn rebuild_balances(conn: &mut Connection) -> Result<RebuildReport, AppError
     // members that have transactions but no cache entry yet.
     let mut member_rows_updated = 0usize;
     {
+        // Savings only — see check_integrity's matching invariant.
         let mut stmt = tx.prepare(
             "SELECT member_id, COALESCE(SUM(amount), 0) AS total
-             FROM member_transactions GROUP BY member_id",
+             FROM member_transactions
+             WHERE txn_type IN ('OPENING','CONTRIBUTION')
+             GROUP BY member_id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))

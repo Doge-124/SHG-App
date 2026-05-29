@@ -187,23 +187,9 @@ fn cancel_loan_disbursement(
 
     let tx = conn.transaction()?;
 
-    // Drop derived rows. (loans → loan_payments [upfront only] → member_transactions
-    // → member_balances reversal.)
-    let (outstanding,): (f64,) = tx.query_row(
-        "SELECT outstanding_amount FROM loans WHERE id = ?1",
-        [loan_id], |r| Ok((r.get(0)?,)),
-    )?;
-
-    // Reverse member balance by current outstanding (which equals the principal
-    // owed; we set it to full principal at issuance in record_loan_payment).
-    if outstanding.abs() > 0.005 {
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-            (member_id, outstanding),
-        )?;
-    }
-
+    // Drop derived rows. Loan paths no longer touch member_balances, so we
+    // just clean up the loan-side tables. (The legacy LOAN/PAYMENT entries
+    // on member_transactions, if any, are cleaned up for tidiness.)
     tx.execute("DELETE FROM member_transactions WHERE reference_loan_id = ?1", [loan_id])?;
     tx.execute("DELETE FROM loan_payments WHERE loan_id = ?1", [loan_id])?;
     tx.execute("DELETE FROM loans WHERE id = ?1", [loan_id])?;
@@ -281,13 +267,9 @@ fn cancel_loan_repayment(
         (principal_amt, interest_amt, loan_id),
     )?;
 
-    // Reverse member balance + member_transactions row.
+    // Loan repayments no longer touch member_balances. We still clean up
+    // any legacy PAYMENT row on member_transactions (best-effort match).
     if principal_amt.abs() > 0.005 {
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
-            (member_id, principal_amt),
-        )?;
         tx.execute(
             "DELETE FROM member_transactions
              WHERE reference_loan_id = ?1 AND txn_type = 'PAYMENT'
@@ -295,6 +277,9 @@ fn cancel_loan_repayment(
             (loan_id, principal_amt, &txn.created_at),
         )?;
     }
+    // Suppress "unused" warning — member_id is fetched for symmetry with
+    // other unwinders and may be needed for future audit detail.
+    let _ = member_id;
 
     // Drop the loan_payments row.
     tx.execute("DELETE FROM loan_payments WHERE id = ?1", [payment_id])?;

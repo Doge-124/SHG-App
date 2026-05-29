@@ -129,25 +129,14 @@ pub fn create_loan(
         )?
     };
 
-    // Member transaction: loan issued
-    tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-         VALUES (?1, ?2, 'LOAN', ?3, ?4)",
-        (member_id, amount, loan_id, created_at),
-    )?;
-
-    // Member balance: +full principal — borrower owes the entire amount.
-    tx.execute(
-        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-         ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
-        (member_id, amount),
-    )?;
+    // Loan-side bookkeeping lives ENTIRELY on the loans + loan_payments
+    // tables. We deliberately do NOT touch member_balances or write a LOAN
+    // row to member_transactions: those represent member SAVINGS (what the
+    // SHG owes the member). Mixing loans in there would silently treat
+    // borrowed cash as deposited savings.
 
     // Upfront interest is income, not a principal reduction. Record it as a
     // SHG receipt and a loan_payments row (principal=0, interest=full upfront).
-    // We do NOT touch member_balances or member_transactions for it, because
-    // the borrower's principal debt is unchanged by paying interest.
-    //
     // Order matters: receipt FIRST so the checked voucher below sees the
     // inflated balance and the net-outflow check is atomic.
     if upfront_interest > 0.0 {
@@ -293,19 +282,9 @@ pub fn record_past_loan(
         )?
     };
 
-    // 2. Member transaction: LOAN.
-    tx.execute(
-        "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-         VALUES (?1, ?2, 'LOAN', ?3, ?4)",
-        (member_id, amount, loan_id, issued_at),
-    )?;
-
-    // 3. Member balance: +amount.
-    tx.execute(
-        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-         ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
-        (member_id, amount),
-    )?;
+    // 2-3. Loan-side bookkeeping is tracked on loans + loan_payments only.
+    // No member_balances or member_transactions writes — savings and loans
+    // are separate ledgers.
 
     // 4. Past data entry: no SHG voucher — disbursement is reference-only.
     // The SHG opening balance (set in Settings) already accounts for historical funds.
@@ -366,21 +345,8 @@ pub fn record_past_loan(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Loan Repayment', ?7)",
             (loan_id, member_id, rep_amount, principal_paid, interest_paid, rep_method, rep_date),
         )?;
-
-        // Only the principal portion changes the member's debt ledger.
-        if principal_paid > 0.0 {
-            tx.execute(
-                "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-                 VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
-                (member_id, -principal_paid, loan_id, rep_date),
-            )?;
-            tx.execute(
-                "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-                 ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-                (member_id, principal_paid),
-            )?;
-        }
-        // No SHG receipt — past repayments are reference-only.
+        // No member_balances / member_transactions writes — past repayments
+        // only touch the loan ledger. SHG balance untouched (reference-only).
     }
 
     // Final loan state.
@@ -603,18 +569,9 @@ pub fn record_loan_payment(
 
     let receipt_note = note.to_string();
 
-    if principal_paid > 0.0 {
-        tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
-            (member_id, -principal_paid, loan_id, created_at),
-        )?;
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-            (member_id, principal_paid),
-        )?;
-    }
+    // No writes to member_balances / member_transactions — loan repayment
+    // is tracked on loan_payments and on the loan's outstanding/unpaid
+    // interest balance. The borrower's savings balance is not affected.
 
     tx.execute(
         "INSERT INTO loan_payments

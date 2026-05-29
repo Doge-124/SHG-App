@@ -361,6 +361,24 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         // The column exists for future use and consistency.
     }
 
+    // 15) Recompute member_balances as SAVINGS only (OPENING + CONTRIBUTION).
+    // Prior loan write-paths added LOAN principal to member_balances and
+    // subtracted PAYMENT principal, conflating debt with savings. This one-shot
+    // recompute rewrites the cache to match the live integrity invariant
+    // (which now also excludes LOAN/PAYMENT). Idempotent — running again on
+    // already-correct data is a no-op.
+    tx.execute_batch(r#"
+        INSERT INTO member_balances (member_id, balance)
+            SELECT m.id, 0 FROM members m
+            WHERE NOT EXISTS (SELECT 1 FROM member_balances WHERE member_id = m.id);
+        UPDATE member_balances
+        SET balance = COALESCE((
+            SELECT SUM(amount) FROM member_transactions mt
+            WHERE mt.member_id = member_balances.member_id
+              AND mt.txn_type IN ('OPENING','CONTRIBUTION')
+        ), 0);
+    "#)?;
+
     // 14) Voiding for shg_transactions. Cancellation marks the original
     // row voided and inserts a paired reversing entry (txn_type flipped,
     // reversal_of_id pointing back). Both rows remain in the ledger for
