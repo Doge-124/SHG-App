@@ -138,7 +138,7 @@ export default function MemberDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-12">
         <p className="text-lg text-muted-foreground">Member not found</p>
-        <Button variant="link" onClick={() => router.push('/members')}>Go back to members</Button>
+        <Button variant="link" onClick={() => router.push('/members/shg')}>Go back to members</Button>
       </div>
     )
   }
