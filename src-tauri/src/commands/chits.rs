@@ -647,9 +647,14 @@ pub fn get_member_chit_groups(
                     -- Gross prize for the one cycle they've won = payout + bid_discount + commission.
                     -- This is what they would have received before the bid auction discount and
                     -- the SHG's commission cut. A member can win at most once per chit.
-                    (SELECT COALESCE(ccw.payout_amount + ccw.bid_discount + ccw.commission, 0)
-                     FROM chit_cycle_winners ccw
-                     WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1) as gross_won_amount
+                    -- Outer COALESCE turns the empty-subquery NULL into 0 so row.get::<f64>
+                    -- on the Rust side doesn't fail with InvalidColumnType.
+                    COALESCE(
+                      (SELECT ccw.payout_amount + ccw.bid_discount + ccw.commission
+                       FROM chit_cycle_winners ccw
+                       WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1),
+                      0
+                    ) as gross_won_amount
              FROM chit_groups cg
              JOIN chit_members cm ON cg.id = cm.chit_id
              WHERE cm.member_id = ?1
