@@ -22,6 +22,7 @@ interface BalanceSheet {
   total_assets: number
   member_savings: number
   total_members_with_savings: number
+  chit_funds_held: number
   surplus: number
   shg_seed: number
   interest_earned: number
@@ -187,6 +188,14 @@ export default function BalanceSheetPage() {
                 <Row label="Member Savings Deposits"
                   note={`${data.total_members_with_savings} members`}
                   value={data.member_savings} />
+
+                {data.chit_funds_held > 0 && (
+                  <Row
+                    label="Chit Funds Held"
+                    note="installments collected, not yet paid out"
+                    value={data.chit_funds_held}
+                  />
+                )}
 
                 <Separator className="my-4" />
 

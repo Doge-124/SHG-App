@@ -2,8 +2,12 @@
 //! Supports any "as on" date so year-end sheets (March 31) work correctly.
 //!
 //! Assets   = Cash + Bank + Loans Outstanding
-//! Liabilities & Capital = Member Savings + SHG Surplus
-//! (Surplus is derived so the sheet always balances.)
+//! Liabilities & Capital = Member Savings + Chit Funds Held + SHG Surplus
+//!
+//! `chit_funds_held` captures chit installments that have come into the SHG
+//! cash box but haven't yet been paid out to the cycle's winner — they're
+//! owed to the chit pool. Without this row a mid-cycle chit would inflate
+//! cash with no offsetting entry on the right-hand side.
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -22,6 +26,14 @@ pub struct BalanceSheet {
     // ── Liabilities: Member Savings ───────────────────────────────────────
     pub member_savings: f64,       // total savings the SHG holds for members
     pub total_members_with_savings: i64,
+
+    // ── Liabilities: Chit Funds Held ──────────────────────────────────────
+    // Chit installments collected but not yet disbursed (or net amount over
+    // the lifetime of the chit-payout commission accounting):
+    //   SUM(chit_payments.amount) - SUM(CHIT_PAYOUT vouchers).
+    // Goes to zero when a cycle has been fully paid out and the commission
+    // has been recognised as income.
+    pub chit_funds_held: f64,
 
     // ── Capital: SHG Surplus (= Total Assets − Member Savings) ───────────
     pub surplus: f64,
@@ -104,6 +116,27 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
          WHERE txn_type IN ('CONTRIBUTION', 'OPENING') AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0);
+
+    // ── Chit funds held ───────────────────────────────────────────────────
+    // = installments collected through chit_payments
+    // − payouts disbursed via CHIT_PAYOUT vouchers.
+    // Voided rows are excluded so cancellations don't double-count.
+    let chit_installments_collected: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cp.amount), 0)
+         FROM chit_payments cp
+         WHERE cp.paid_at <= ?1",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    let chit_payouts_disbursed: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+         WHERE txn_type = 'VOUCHER' AND reference_type = 'CHIT_PAYOUT'
+           AND voided_at IS NULL AND reversal_of_id IS NULL
+           AND created_at <= ?1",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    let chit_funds_held = (chit_installments_collected - chit_payouts_disbursed).max(0.0);
 
     // ── Surplus breakdown ─────────────────────────────────────────────────
     // SHG seed (OPENING type in shg_transactions — set via Settings)
@@ -206,14 +239,15 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
 
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:
-    //   1. Derived = total_assets − member_savings (what the SHG has beyond what it owes members)
+    //   1. Derived = total_assets − member_savings − chit_funds_held
+    //      (what the SHG has beyond what it owes members + the chit pool)
     //   2. Independent = total_income − total_expenses (P&L since inception)
     // They should agree to within rounding. If they don't, something has
     // mutated assets without flowing through the income/expense ledger
     // (or vice versa) — a real integrity break that the user needs to see.
-    let surplus_derived     = total_assets - member_savings;
+    let surplus_derived     = total_assets - member_savings - chit_funds_held;
     let surplus_independent = total_income - other_expenses;
-    let total_liabilities_capital = member_savings + surplus_derived;
+    let total_liabilities_capital = member_savings + chit_funds_held + surplus_derived;
     let is_balanced = (surplus_derived - surplus_independent).abs() < 0.01;
 
     Ok(BalanceSheet {
@@ -224,6 +258,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         total_assets,
         member_savings,
         total_members_with_savings,
+        chit_funds_held,
         surplus: surplus_derived,
         shg_seed,
         interest_earned,
