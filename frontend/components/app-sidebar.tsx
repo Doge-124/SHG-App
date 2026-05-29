@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   LayoutDashboard,
   Users,
@@ -78,8 +78,20 @@ const systemNavItems = [
 
 export function AppSidebar() {
   const pathname = usePathname()
+  const router = useRouter()
   const { settings } = useSettings()
   const [overdueCount, setOverdueCount] = useState(0)
+
+  // Eagerly prefetch every sidebar route on mount. Next.js normally
+  // prefetches visible Links via IntersectionObserver, but inside Tauri's
+  // WebView2 the observer can be slow to fire — the first few clicks then
+  // silently "do nothing" because the route chunk hasn't downloaded yet.
+  // Calling router.prefetch directly warms them up the moment the sidebar
+  // mounts so the first click always feels instant.
+  useEffect(() => {
+    const allItems = [...mainNavItems, ...chitNavItems, ...systemNavItems]
+    for (const item of allItems) router.prefetch(item.href)
+  }, [router])
 
   // Re-check overdue count on every navigation so repayments are reflected immediately.
   useEffect(() => {
