@@ -1,8 +1,10 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, ArrowUpRight, Printer, Download } from 'lucide-react'
+import { Plus, ArrowUpRight, Printer, Download, Ban } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
+import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -39,6 +41,7 @@ export default function VouchersPage() {
     type: 'voucher' | 'vouchers'
     data: Voucher | Voucher[]
   }>({ isOpen: false, type: 'voucher', data: [] })
+  const [cancelTarget, setCancelTarget] = useState<Voucher | null>(null)
 
   useEffect(() => {
     loadVouchers()
@@ -141,16 +144,22 @@ export default function VouchersPage() {
     {
       key: 'amount',
       header: 'Amount',
-      cell: (voucher) => (
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-destructive/10">
-            <ArrowUpRight className="h-4 w-4 text-destructive" />
+      cell: (voucher) => {
+        const voided = !!voucher.voidedAt
+        const reversal = !!voucher.reversalOfId
+        return (
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-destructive/10">
+              <ArrowUpRight className="h-4 w-4 text-destructive" />
+            </div>
+            <span className={`font-semibold ${voided ? 'line-through text-muted-foreground' : 'text-destructive'}`}>
+              -{formatCurrency(voucher.amount)}
+            </span>
+            {voided && <Badge variant="outline" className="text-xs border-red-300 text-red-700">VOIDED</Badge>}
+            {reversal && <Badge variant="outline" className="text-xs border-amber-300 text-amber-700">Reversal of #{voucher.reversalOfId}</Badge>}
           </div>
-          <span className="font-semibold text-destructive">
-            -{formatCurrency(voucher.amount)}
-          </span>
-        </div>
-      ),
+        )
+      },
       sortable: true,
     },
     {
@@ -158,11 +167,14 @@ export default function VouchersPage() {
       header: 'Reason',
       cell: (voucher) => (
         <div className="space-y-1">
-          <span className="text-sm">{voucher.reason}</span>
+          <span className={`text-sm ${voucher.voidedAt ? 'line-through text-muted-foreground' : ''}`}>{voucher.reason}</span>
           {voucher.memberName && (
             <span className="text-xs text-muted-foreground block">
               To: {voucher.memberName}
             </span>
+          )}
+          {voucher.voidedAt && voucher.voidedReason && (
+            <span className="text-xs text-red-700 block">Cancelled: {voucher.voidedReason}</span>
           )}
         </div>
       ),
@@ -195,16 +207,33 @@ export default function VouchersPage() {
     {
       key: 'actions',
       header: 'Actions',
-      cell: (voucher) => (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handlePrintVoucher(voucher)}
-          className="h-8 w-8 p-0"
-        >
-          <Printer className="h-4 w-4" />
-        </Button>
-      ),
+      cell: (voucher) => {
+        const cancellable = !voucher.voidedAt && !voucher.reversalOfId
+        return (
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handlePrintVoucher(voucher)}
+              className="h-8 w-8 p-0"
+              title="Print"
+            >
+              <Printer className="h-4 w-4" />
+            </Button>
+            {cancellable && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 w-8 p-0 text-red-600 hover:bg-red-50"
+                onClick={() => setCancelTarget(voucher)}
+                title="Cancel this voucher (admin PIN required)"
+              >
+                <Ban className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        )
+      },
     },
   ]
 
@@ -322,6 +351,28 @@ export default function VouchersPage() {
         type={printPreview.type}
         data={printPreview.data}
         shgName={shgName}
+      />
+
+      <AdminPinDialog
+        open={!!cancelTarget}
+        onOpenChange={(open) => { if (!open) setCancelTarget(null) }}
+        title={`Cancel voucher #${cancelTarget?.id ?? ''}`}
+        description={`This will reverse the voucher (Rs ${cancelTarget?.amount ?? 0}) and roll back any derived state (loan, chit, etc.). The original row stays in the ledger marked VOIDED.`}
+        destructive
+        requireReason
+        reasonLabel="Reason for cancellation"
+        reasonPlaceholder="e.g. amount typed wrong"
+        confirmLabel="Cancel voucher"
+        onConfirm={async (adminPin, reason) => {
+          await invoke('cancel_shg_transaction', {
+            txnId: parseInt(cancelTarget!.id),
+            reason: reason ?? '',
+            adminPin,
+          })
+          toast.success('Voucher cancelled and reversed')
+          setCancelTarget(null)
+          await loadVouchers()
+        }}
       />
     </div>
   )

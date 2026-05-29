@@ -56,6 +56,24 @@ pub fn delete_past_loan(
 }
 
 #[tauri::command]
+pub fn cancel_shg_transaction(
+    txn_id: i64,
+    reason: String,
+    admin_pin: String,
+    state: State<Mutex<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    require_admin(&admin_pin, &app, state.inner())?;
+    if reason.trim().is_empty() {
+        return Err("A reason is required for cancellation.".to_string());
+    }
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    crate::db::cancel::cancel_shg_transaction(conn, txn_id, &reason)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete_past_chit_cycle(
     cycle_id: i64,
     admin_pin: String,

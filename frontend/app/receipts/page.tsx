@@ -1,8 +1,10 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, ArrowDownRight, Printer, Download } from 'lucide-react'
+import { Plus, ArrowDownRight, Printer, Download, Ban } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
+import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { track } from '@/lib/track'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -56,6 +58,7 @@ export default function ReceiptsPage() {
     type: 'receipt' | 'receipts'
     data: ReceiptWithMember | ReceiptWithMember[]
   }>({ isOpen: false, type: 'receipt', data: [] })
+  const [cancelTarget, setCancelTarget] = useState<ReceiptWithMember | null>(null)
 
   useEffect(() => {
     loadReceipts()
@@ -150,16 +153,22 @@ export default function ReceiptsPage() {
     {
       key: 'amount',
       header: 'Amount',
-      cell: (receipt) => (
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-success/10">
-            <ArrowDownRight className="h-4 w-4 text-success" />
+      cell: (receipt) => {
+        const voided = !!receipt.voided_at
+        const reversal = !!receipt.reversal_of_id
+        return (
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-success/10">
+              <ArrowDownRight className="h-4 w-4 text-success" />
+            </div>
+            <span className={`font-semibold ${voided ? 'line-through text-muted-foreground' : 'text-success'}`}>
+              +{formatCurrency(receipt.amount)}
+            </span>
+            {voided && <Badge variant="outline" className="text-xs border-red-300 text-red-700">VOIDED</Badge>}
+            {reversal && <Badge variant="outline" className="text-xs border-amber-300 text-amber-700">Reversal of #{receipt.reversal_of_id}</Badge>}
           </div>
-          <span className="font-semibold text-success">
-            +{formatCurrency(receipt.amount)}
-          </span>
-        </div>
-      ),
+        )
+      },
       sortable: true,
     },
     {
@@ -167,9 +176,14 @@ export default function ReceiptsPage() {
       header: 'Reason',
       cell: (receipt) => (
         <div className="space-y-0.5">
-          <span className="text-sm">{friendlyReason(receipt.reference_type, receipt.reason)}</span>
+          <span className={`text-sm ${receipt.voided_at ? 'line-through text-muted-foreground' : ''}`}>
+            {friendlyReason(receipt.reference_type, receipt.reason)}
+          </span>
           {receipt.member_name && (
             <span className="text-xs text-muted-foreground block">From: {receipt.member_name}</span>
+          )}
+          {receipt.voided_at && receipt.voided_reason && (
+            <span className="text-xs text-red-700 block">Cancelled: {receipt.voided_reason}</span>
           )}
         </div>
       ),
@@ -191,17 +205,32 @@ export default function ReceiptsPage() {
     {
       key: 'actions',
       header: 'Actions',
-      cell: (receipt) => (
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handlePrintReceipt(receipt)}
-          >
-            <Printer className="h-4 w-4" />
-          </Button>
-        </div>
-      ),
+      cell: (receipt) => {
+        const cancellable = !receipt.voided_at && !receipt.reversal_of_id
+        return (
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handlePrintReceipt(receipt)}
+              title="Print"
+            >
+              <Printer className="h-4 w-4" />
+            </Button>
+            {cancellable && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-red-600 hover:bg-red-50"
+                onClick={() => setCancelTarget(receipt)}
+                title="Cancel this receipt (admin PIN required)"
+              >
+                <Ban className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        )
+      },
     },
   ]
 
@@ -299,6 +328,30 @@ export default function ReceiptsPage() {
         type={printPreview.type}
         data={printPreview.data as any}
         shgName={shgName}
+      />
+
+      <AdminPinDialog
+        open={!!cancelTarget}
+        onOpenChange={(open) => { if (!open) setCancelTarget(null) }}
+        title={`Cancel receipt #${cancelTarget?.id ?? ''}`}
+        description={`This will reverse the receipt (Rs ${cancelTarget?.amount ?? 0}) and roll back any derived state (loan, chit, contribution). The original row stays in the ledger marked VOIDED.`}
+        destructive
+        requireReason
+        reasonLabel="Reason for cancellation"
+        reasonPlaceholder="e.g. amount typed wrong"
+        confirmLabel="Cancel receipt"
+        onConfirm={async (adminPin, reason) => {
+          await invoke('cancel_shg_transaction', {
+            txnId: cancelTarget!.id,
+            reason: reason ?? '',
+            adminPin,
+          })
+          toast.success('Receipt cancelled and reversed')
+          setCancelTarget(null)
+          // Reload the list to reflect voided + reversal rows.
+          const res = await getReceiptsList()
+          if (res.success && res.data) setReceipts(res.data as ReceiptWithMember[])
+        }}
       />
     </div>
   )

@@ -14,6 +14,9 @@ export interface Receipt {
   reference_type?: string
   reference_id?: number
   created_at: string
+  voided_at?: number | null
+  voided_reason?: string | null
+  reversal_of_id?: number | null
 }
 
 export interface ReceiptWithMember extends Receipt {

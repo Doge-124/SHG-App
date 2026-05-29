@@ -24,6 +24,9 @@ export function AdminPinDialog({
   description,
   confirmLabel = 'Confirm',
   destructive = false,
+  requireReason = false,
+  reasonLabel = 'Reason',
+  reasonPlaceholder = 'Why are you doing this?',
   onConfirm,
 }: {
   open: boolean
@@ -32,30 +35,34 @@ export function AdminPinDialog({
   description?: string
   confirmLabel?: string
   destructive?: boolean
-  onConfirm: (adminPin: string) => Promise<void>
+  requireReason?: boolean
+  reasonLabel?: string
+  reasonPlaceholder?: string
+  onConfirm: (adminPin: string, reason?: string) => Promise<void>
 }) {
   const [pin, setPin] = useState('')
+  const [reason, setReason] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (open) { setPin(''); setError(null); setSubmitting(false) }
+    if (open) { setPin(''); setReason(''); setError(null); setSubmitting(false) }
   }, [open])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!pin) { setError('Admin PIN is required.'); return }
+    if (requireReason && !reason.trim()) { setError('Reason is required.'); return }
     setSubmitting(true)
     setError(null)
     try {
-      // Verify first so we can show a clear error before running the action.
       const ok = await invoke<boolean>('verify_master_password', { password: pin })
       if (!ok) {
         setError('Incorrect admin PIN.')
         setSubmitting(false)
         return
       }
-      await onConfirm(pin)
+      await onConfirm(pin, requireReason ? reason.trim() : undefined)
       onOpenChange(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -74,13 +81,29 @@ export function AdminPinDialog({
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4 pt-2">
-          <div>
+          {requireReason && (
+            <div className="space-y-1">
+              <label className="text-sm font-medium">{reasonLabel}</label>
+              <Input
+                type="text"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder={reasonPlaceholder}
+                autoFocus
+                disabled={submitting}
+                autoComplete="off"
+                maxLength={200}
+              />
+            </div>
+          )}
+          <div className="space-y-1">
+            {requireReason && <label className="text-sm font-medium">Admin PIN</label>}
             <Input
               type="password"
               value={pin}
               onChange={(e) => setPin(e.target.value)}
               placeholder="Admin PIN"
-              autoFocus
+              autoFocus={!requireReason}
               disabled={submitting}
               autoComplete="off"
             />

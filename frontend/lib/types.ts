@@ -126,6 +126,9 @@ export interface Voucher {
   referenceType?: string
   createdAt: string
   memberName?: string
+  voidedAt?: number | null
+  voidedReason?: string | null
+  reversalOfId?: number | null
 }
 
 export interface VoucherFormData {

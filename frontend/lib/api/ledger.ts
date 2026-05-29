@@ -198,6 +198,9 @@ export async function getVouchers(): Promise<ApiResponse<Voucher[]>> {
       referenceType: txn.reference_type,
       createdAt: txn.created_at,
       memberName: txn.member_name,
+      voidedAt: txn.voided_at ?? null,
+      voidedReason: txn.voided_reason ?? null,
+      reversalOfId: txn.reversal_of_id ?? null,
     }))
 
     return { success: true, data: vouchers }

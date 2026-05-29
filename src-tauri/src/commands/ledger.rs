@@ -158,6 +158,9 @@ pub fn get_vouchers(
             t.reference_type,
             t.reference_id,
             t.created_at,
+            t.voided_at,
+            t.voided_reason,
+            t.reversal_of_id,
             CASE
                 WHEN t.reference_type = 'CHIT_PAYOUT' AND t.reference_id IS NOT NULL THEN
                     (SELECT m.name FROM members m
@@ -198,7 +201,10 @@ pub fn get_vouchers(
                 "reference_type": row.get::<_, Option<String>>(5)?,
                 "reference_id": row.get::<_, Option<i64>>(6)?,
                 "created_at": row.get::<_, String>(7)?,
-                "member_name": row.get::<_, Option<String>>(8)?,
+                "voided_at": row.get::<_, Option<i64>>(8)?,
+                "voided_reason": row.get::<_, Option<String>>(9)?,
+                "reversal_of_id": row.get::<_, Option<i64>>(10)?,
+                "member_name": row.get::<_, Option<String>>(11)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -233,6 +239,9 @@ pub fn get_receipts(
             t.reference_type,
             t.reference_id,
             t.created_at,
+            t.voided_at,
+            t.voided_reason,
+            t.reversal_of_id,
             CASE
                 WHEN t.reference_type = 'CHIT_COMMISSION' AND t.reference_id IS NOT NULL THEN
                     (SELECT m.name FROM members m
@@ -281,13 +290,16 @@ pub fn get_receipts(
                 "reference_type": row.get::<_, Option<String>>(5)?,
                 "reference_id": row.get::<_, Option<i64>>(6)?,
                 "created_at": row.get::<_, String>(7)?,
-                "member_name": row.get::<_, Option<String>>(8)?,
-                "member_code": row.get::<_, Option<String>>(9)?,
+                "voided_at": row.get::<_, Option<i64>>(8)?,
+                "voided_reason": row.get::<_, Option<String>>(9)?,
+                "reversal_of_id": row.get::<_, Option<i64>>(10)?,
+                "member_name": row.get::<_, Option<String>>(11)?,
+                "member_code": row.get::<_, Option<String>>(12)?,
             });
-            
+
             // Add memberName for compatibility with existing frontend
             let mut receipt_with_member = receipt;
-            if let Ok(Some(member_name)) = row.get::<_, Option<String>>(8) {
+            if let Ok(Some(member_name)) = row.get::<_, Option<String>>(11) {
                 receipt_with_member["memberName"] = serde_json::Value::String(member_name);
             }
             
