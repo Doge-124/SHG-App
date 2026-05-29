@@ -20,6 +20,7 @@ import {
   PieChart,
   TrendingUp,
   CalendarCheck,
+  PiggyBank,
 } from 'lucide-react'
 import {
   Sidebar,
@@ -50,7 +51,9 @@ function isOverdue(issuedAt: string, loanType: string): boolean {
 
 const mainNavItems = [
   { title: 'Dashboard', href: '/',          icon: LayoutDashboard },
-  { title: 'Members',       href: '/members',       icon: Users           },
+  { title: 'SHG Members',   href: '/members/shg',   icon: PiggyBank       },
+  { title: 'Chit Members',  href: '/members/chit',  icon: Users           },
+  { title: 'Loan Members',  href: '/members/loan',  icon: Banknote        },
   { title: 'Contributions', href: '/contributions', icon: CalendarCheck   },
   { title: 'Loans',         href: '/loans',         icon: Wallet          },
   { title: 'Receipts',  href: '/receipts',  icon: Receipt         },

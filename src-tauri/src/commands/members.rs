@@ -50,6 +50,36 @@ pub fn add_member(
     Ok(())
 }
 
+/// Add a member without specifying a code — backend picks the next serial.
+/// Returns the generated code so the frontend can show/use it immediately.
+#[tauri::command]
+pub fn add_member_auto(
+    state: State<Mutex<AppState>>,
+    name: String,
+    phone: Option<String>,
+    address: Option<String>,
+    joined_at: String,
+    member_type: String,
+) -> Result<String, String> {
+    validation::validate_member_name(&name).map_err(|e: AppError| e.to_string())?;
+
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let (member_id, code) = crate::db::members::add_member_auto_code(
+        conn,
+        &name,
+        phone.as_deref(),
+        address.as_deref(),
+        &joined_at,
+        &member_type,
+    ).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "MEMBER_ADDED", "member", Some(member_id),
+        &format!("{name} (#{code}) — type: {member_type}"));
+    Ok(code)
+}
+
 #[tauri::command]
 pub fn get_member(code: String, state: State<Mutex<AppState>>) -> Result<db::Member, String> {
     validation::validate_member_code(&code).map_err(|e: AppError| e.to_string())?;

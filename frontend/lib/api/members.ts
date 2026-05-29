@@ -64,11 +64,10 @@ export async function getMember(id: string): Promise<ApiResponse<Member>> {
 
 export async function addMember(data: MemberFormData): Promise<ApiResponse<Member>> {
   try {
-    const code = `SHG${Date.now()}`
     const joinedAt = new Date().toISOString()
 
-    await invoke('add_member', {
-      code,
+    // Backend assigns the next serial number (1, 2, 3 …) and returns it.
+    const code = await invoke<string>('add_member_auto', {
       name: data.name,
       phone: data.phone,
       address: data.address,
@@ -76,7 +75,6 @@ export async function addMember(data: MemberFormData): Promise<ApiResponse<Membe
       memberType: data.memberType,
     })
 
-    // Fetch the real record from the DB so the returned object has the correct ID.
     const created = await invoke('get_member', { code }) as any
     return {
       success: true,

@@ -63,6 +63,7 @@ fn main() {
             commands::auth::change_admin_pin,
             commands::audit::get_audit_log,
             commands::members::add_member,
+            commands::members::add_member_auto,
             commands::members::get_member,
             commands::members::update_member,
             commands::members::list_members,

@@ -92,6 +92,57 @@ pub struct MemberProfile {
 }
 
 /// Create a new member and initialize their balance to zero.
+/// Add a member with an auto-assigned serial number (1, 2, 3 …). Picks the
+/// next integer above the highest existing numeric member_code, so legacy
+/// alphanumeric codes (`SHG1700000000000`) are ignored when deciding the next
+/// serial. Returns (member_id, generated_code).
+pub fn add_member_auto_code(
+    conn: &mut Connection,
+    name: &str,
+    phone: Option<&str>,
+    address: Option<&str>,
+    joined_at: &str,
+    member_type: &str,
+) -> Result<(i64, String), AppError> {
+    let _mt = member_type.parse::<MemberType>()
+        .map_err(|e| AppError::validation(&e))?;
+
+    let tx = conn.transaction()?;
+
+    // Highest existing pure-numeric code, NULL → 0. Retry the insert on the
+    // unique-constraint race (extremely unlikely in a single-user desktop, but
+    // cheap to defend against).
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(CAST(member_code AS INTEGER)), 0)
+         FROM members
+         WHERE member_code GLOB '[0-9]*' AND CAST(member_code AS INTEGER) > 0",
+        [],
+        |r| r.get(0),
+    ).unwrap_or(0);
+
+    let code = (next + 1).to_string();
+
+    tx.execute(
+        "INSERT INTO members (member_code, name, phone, address, joined_at, member_type)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (&code, name, phone, address, joined_at, member_type),
+    )?;
+
+    let member_id: i64 = tx.query_row(
+        "SELECT id FROM members WHERE member_code = ?1",
+        [&code],
+        |r| r.get(0),
+    )?;
+
+    tx.execute(
+        "INSERT INTO member_balances (member_id, balance) VALUES (?1, 0)",
+        [member_id],
+    )?;
+
+    tx.commit()?;
+    Ok((member_id, code))
+}
+
 /// Returns the new member's id.
 pub fn add_member(
     conn: &mut Connection,
