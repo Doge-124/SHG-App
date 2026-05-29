@@ -179,7 +179,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
             {amount > 0 && (
               <div className="rounded-lg bg-muted p-3 space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Loan Amount:</span>
+                  <span className="text-muted-foreground">Loan Amount (Principal Owed):</span>
                   <span className="font-medium">{formatCurrency(amount)}</span>
                 </div>
                 <div className="flex justify-between">
@@ -187,14 +187,18 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                   <span className="font-medium">{formatCurrency(dailyInterestAmount)}/day</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Upfront Interest ({upfrontDays} days):</span>
+                  <span className="text-muted-foreground">Upfront Interest ({upfrontDays} days, collected now):</span>
                   <span className="font-medium text-orange-600">− {formatCurrency(upfrontInterest)}</span>
                 </div>
                 <Separator />
                 <div className="flex justify-between font-semibold">
-                  <span>Borrower Receives:</span>
+                  <span>Cash Handed Over:</span>
                   <span className="text-green-700">{formatCurrency(borrowerReceives)}</span>
                 </div>
+                <p className="text-xs text-muted-foreground pt-1">
+                  Borrower still owes the full {formatCurrency(amount)} as principal.
+                  The upfront interest is collected as income, not a principal reduction.
+                </p>
                 {loanType === 'weekly' && (
                   <p className="text-xs text-muted-foreground pt-1">
                     Fine starts after 120 days: outstanding × 0.07% × days overdue

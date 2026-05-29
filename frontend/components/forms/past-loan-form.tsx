@@ -54,7 +54,9 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   const upfrontDays = loanType === 'weekly' ? 100 : 30
   const upfrontInterest = Math.round(amount * interestRate / 100 * upfrontDays * 100) / 100
   const totalRepaid = repayments.reduce((s, r) => s + r.amount, 0)
-  const outstanding = Math.max(0, (amount - upfrontInterest) - totalRepaid)
+  // Outstanding = principal - principal repaid. Upfront interest is income,
+  // not a principal reduction (matches backend create_loan / record_past_loan).
+  const outstanding = Math.max(0, amount - totalRepaid)
   const isFullyRepaid = outstanding <= 0.01
 
   useEffect(() => {
@@ -261,19 +263,25 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                 </div>
 
                 {amount > 0 && (
-                  <div className="rounded-lg bg-muted p-3 grid grid-cols-3 gap-2 text-sm">
-                    <div>
-                      <p className="text-muted-foreground">Principal</p>
-                      <p className="font-semibold">{formatCurrency(amount)}</p>
+                  <div className="rounded-lg bg-muted p-3 space-y-2 text-sm">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <p className="text-muted-foreground">Principal Owed</p>
+                        <p className="font-semibold">{formatCurrency(amount)}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">Upfront Interest ({upfrontDays}d)</p>
+                        <p className="font-semibold text-orange-600">{formatCurrency(upfrontInterest)}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">Cash Handed Over</p>
+                        <p className="font-semibold text-green-700">{formatCurrency(amount - upfrontInterest)}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-muted-foreground">Upfront Interest (30 days)</p>
-                      <p className="font-semibold text-orange-600">{formatCurrency(upfrontInterest)}</p>
-                    </div>
-                    <div>
-                      <p className="text-muted-foreground">Borrower Received</p>
-                      <p className="font-semibold text-green-700">{formatCurrency(amount - upfrontInterest)}</p>
-                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Borrower owes the full {formatCurrency(amount)} as principal.
+                      Upfront interest is collected as income, not a principal reduction.
+                    </p>
                   </div>
                 )}
               </CardContent>

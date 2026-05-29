@@ -56,11 +56,13 @@ pub struct Loan {
 
 /// Create a new loan.
 ///
-/// The SHG deducts the first 30 days of interest upfront:
+/// The SHG collects the first 30 days of interest at disbursement, but this
+/// is income only — it does NOT reduce the principal the borrower owes:
 ///   upfront_interest = principal × daily_rate% × 30  (monthly)
 ///                    = principal × daily_rate% × 100 (weekly — full term upfront)
-///   borrower receives: principal − upfront_interest
-///   voucher: full principal (money out), receipt: upfront_interest (money in, auto-collected).
+///   outstanding principal = full `amount`
+///   cash handed to borrower = `amount − upfront_interest` (they pay the interest immediately)
+///   voucher: full principal (money out), receipt: upfront_interest (income).
 ///
 /// Monthly loans are open-ended. Weekly loans have a 100-day term + 20-day grace (120 days total)
 /// after which a daily fine accrues (calculated at repayment time, not stored here).
@@ -83,7 +85,10 @@ pub fn create_loan(
 
     let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
-    let outstanding = (amount - upfront_interest).max(0.0);
+    // Upfront interest is collected as income, NOT deducted from principal.
+    // The borrower owes the full principal back, on top of the interest they
+    // paid at disbursement.
+    let outstanding = amount;
 
     // Detect whether legacy columns still exist (principal, due_date).
     let has_legacy = {
@@ -131,16 +136,20 @@ pub fn create_loan(
         (member_id, amount, loan_id, created_at),
     )?;
 
-    // Member balance: +principal (before upfront deduction)
+    // Member balance: +full principal — borrower owes the entire amount.
     tx.execute(
         "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
          ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
         (member_id, amount),
     )?;
 
-    // Order matters: receipt the upfront interest FIRST so the checked voucher
-    // sees the inflated balance and the net-outflow check is atomic with the
-    // disbursement (no TOCTOU between pre-check and write).
+    // Upfront interest is income, not a principal reduction. Record it as a
+    // SHG receipt and a loan_payments row (principal=0, interest=full upfront).
+    // We do NOT touch member_balances or member_transactions for it, because
+    // the borrower's principal debt is unchanged by paying interest.
+    //
+    // Order matters: receipt FIRST so the checked voucher below sees the
+    // inflated balance and the net-outflow check is atomic.
     if upfront_interest > 0.0 {
         let upfront_note = "Upfront Interest";
         ledger::record_receipt(
@@ -159,18 +168,6 @@ pub fn create_loan(
                 payment_method, note, created_at)
              VALUES (?1, ?2, ?3, 0, ?3, ?4, ?5, ?6)",
             (loan_id, member_id, upfront_interest, payment_method, upfront_note, created_at),
-        )?;
-
-        // Member balance and transaction for the upfront collection
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-            (member_id, upfront_interest),
-        )?;
-        tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
-            (member_id, -upfront_interest, loan_id, created_at),
         )?;
     }
 
@@ -254,7 +251,9 @@ pub fn record_past_loan(
 
     let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
-    let outstanding_start = (amount - upfront_interest).max(0.0);
+    // Outstanding starts at the full principal — upfront interest is income,
+    // not a principal reduction. (Matches the live create_loan path.)
+    let outstanding_start = amount;
 
     let has_legacy = {
         let mut stmt = conn.prepare("PRAGMA table_info(loans)")?;
@@ -311,7 +310,9 @@ pub fn record_past_loan(
     // 4. Past data entry: no SHG voucher — disbursement is reference-only.
     // The SHG opening balance (set in Settings) already accounts for historical funds.
 
-    // 4b. Record upfront interest in loan_payments and member ledger (reference only).
+    // 4b. Record upfront interest as a loan_payments row only (reference for
+    // the interest collected at disbursement). It does NOT touch member
+    // balances — the borrower's principal owed isn't reduced by interest.
     if upfront_interest > 0.0 {
         tx.execute(
             "INSERT INTO loan_payments
@@ -319,18 +320,6 @@ pub fn record_past_loan(
                 payment_method, note, created_at)
              VALUES (?1, ?2, ?3, 0, ?3, ?4, 'Upfront Interest', ?5)",
             (loan_id, member_id, upfront_interest, payment_method, issued_at),
-        )?;
-
-        tx.execute(
-            "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
-             ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-            (member_id, upfront_interest),
-        )?;
-
-        tx.execute(
-            "INSERT INTO member_transactions (member_id, amount, txn_type, reference_loan_id, created_at)
-             VALUES (?1, ?2, 'PAYMENT', ?3, ?4)",
-            (member_id, -upfront_interest, loan_id, issued_at),
         )?;
     }
 
@@ -824,7 +813,9 @@ pub fn get_loan_repayment_schedule(
     let daily_rate  = loan.daily_interest_rate;
     let daily_int   = (principal * daily_rate / 100.0 * 100.0).round() / 100.0;
     let upfront_int = loan.upfront_interest_amount;
-    let outstanding_at_issue = principal - upfront_int;
+    // Upfront interest is income, not a principal reduction — outstanding
+    // at issue equals the full principal owed.
+    let outstanding_at_issue = principal;
 
     let upfront_days: i64 = if loan.loan_type == "weekly" { 100 } else { 30 };
 
