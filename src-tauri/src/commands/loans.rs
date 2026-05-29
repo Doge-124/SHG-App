@@ -217,7 +217,6 @@ pub fn record_member_payment(
     state: State<Mutex<AppState>>,
     loan_id: i64,
     amount: f64,
-    interest_amount: f64,
     payment_method: String,
     note: String,
     created_at: String,
@@ -232,7 +231,6 @@ pub fn record_member_payment(
         conn,
         loan_id,
         amount,
-        interest_amount,
         &payment_method,
         &note,
         &created_at,
@@ -241,6 +239,48 @@ pub fn record_member_payment(
     db::audit::log_audit(conn, "LOAN_REPAYMENT", "loan", Some(loan_id),
         &format!("₹{amount} repaid on loan {loan_id}"));
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoanPaymentPreview {
+    pub interest_due: f64,
+    pub interest_portion: f64,
+    pub principal_portion: f64,
+    pub new_outstanding: f64,
+    pub new_unpaid_interest: f64,
+}
+
+/// Preview how a payment of `amount` on `paid_at` would be split between
+/// interest and principal. Pure query — does not write.
+#[tauri::command]
+pub fn preview_loan_payment(
+    state: State<Mutex<AppState>>,
+    loan_id: i64,
+    amount: f64,
+    paid_at: String,
+) -> Result<LoanPaymentPreview, String> {
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let paid_date = if paid_at.len() >= 10 {
+        chrono::NaiveDate::parse_from_str(&paid_at[..10], "%Y-%m-%d")
+            .map_err(|_| "Invalid paid_at date".to_string())?
+    } else {
+        return Err("Invalid paid_at date".to_string());
+    };
+
+    let (interest_due, interest_portion, principal_portion, new_outstanding, new_unpaid_interest) =
+        db::loans::preview_loan_payment(conn, loan_id, amount, paid_date)
+            .map_err(|e: AppError| e.to_string())?;
+
+    Ok(LoanPaymentPreview {
+        interest_due,
+        interest_portion,
+        principal_portion,
+        new_outstanding,
+        new_unpaid_interest,
+    })
 }
 
 #[tauri::command]

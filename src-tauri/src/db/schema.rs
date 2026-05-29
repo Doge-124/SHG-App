@@ -43,7 +43,10 @@ CREATE TABLE IF NOT EXISTS shg_transactions (
     payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK')),
     reference_type TEXT,
     reference_id INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    voided_at INTEGER,
+    voided_reason TEXT,
+    reversal_of_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS shg_balances (
@@ -357,6 +360,23 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         // (chits are reference-only on the member ledger), so no backfill needed.
         // The column exists for future use and consistency.
     }
+
+    // 14) Voiding for shg_transactions. Cancellation marks the original
+    // row voided and inserts a paired reversing entry (txn_type flipped,
+    // reversal_of_id pointing back). Both rows remain in the ledger for
+    // audit; balance queries sum normally and the pair nets to zero.
+    add_column_if_missing(&tx, "shg_transactions", "voided_at",      "INTEGER")?;
+    add_column_if_missing(&tx, "shg_transactions", "voided_reason",  "TEXT")?;
+    add_column_if_missing(&tx, "shg_transactions", "reversal_of_id", "INTEGER")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_shg_tx_reversal ON shg_transactions(reversal_of_id);"
+    )?;
+
+    // 13) Loan unpaid-interest balance — tracks interest that has accrued
+    // but not been paid yet (e.g. when the borrower made a partial payment
+    // that didn't cover all due interest). The next payment will eat into
+    // this balance first before any principal reduction.
+    add_column_if_missing(&tx, "loans", "unpaid_interest_balance", "REAL NOT NULL DEFAULT 0")?;
 
     // 12) is_past_entry markers — let admin-gated deletes know which rows
     // came from past-data entry (safe to remove) vs live activity (would

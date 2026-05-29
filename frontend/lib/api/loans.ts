@@ -127,14 +127,12 @@ export async function issueLoan(data: LoanFormData): Promise<ApiResponse<Loan>> 
 export async function recordRepayment(
   loanId: string,
   amount: number,
-  interestAmount: number,
   paymentMethod: 'cash' | 'bank'
 ): Promise<ApiResponse<void>> {
   try {
     await invoke('record_member_payment', {
       loanId: parseInt(loanId),
       amount,
-      interestAmount,
       paymentMethod: paymentMethod.toUpperCase(),
       note: 'Loan Repayment',
       createdAt: new Date().toISOString(),
@@ -142,7 +140,36 @@ export async function recordRepayment(
     return { success: true }
   } catch (error) {
     console.error('Failed to record repayment:', error)
-    return { success: false, error: 'Failed to record repayment' }
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to record repayment' }
+  }
+}
+
+export interface LoanPaymentPreview {
+  interestDue: number
+  interestPortion: number
+  principalPortion: number
+  newOutstanding: number
+  newUnpaidInterest: number
+}
+
+/**
+ * Preview how a payment will be split between interest and principal.
+ * Backend computes accrued interest from issued_at + last payment date.
+ */
+export async function previewRepayment(
+  loanId: string,
+  amount: number,
+  paidAt: string = new Date().toISOString(),
+): Promise<ApiResponse<LoanPaymentPreview>> {
+  try {
+    const preview = await invoke<LoanPaymentPreview>('preview_loan_payment', {
+      loanId: parseInt(loanId),
+      amount,
+      paidAt,
+    })
+    return { success: true, data: preview }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to preview payment' }
   }
 }
 

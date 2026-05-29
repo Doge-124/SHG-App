@@ -102,15 +102,14 @@ export default function LoansPage() {
     }
   }
 
-  const handleRepayment = async (data: { amount: number; paymentMethod: 'cash' | 'bank'; interestAmount: number }) => {
+  const handleRepayment = async (data: { amount: number; paymentMethod: 'cash' | 'bank' }) => {
     if (!repaymentLoan) return
     setIsSubmitting(true)
     try {
       const response = await recordRepayment(
         repaymentLoan.id,
         data.amount,
-        data.interestAmount,
-        data.paymentMethod
+        data.paymentMethod,
       )
       if (response.success) {
         if (notifs?.enableNotifications && notifs?.paymentConfirmations) {
@@ -119,7 +118,6 @@ export default function LoansPage() {
         track('loan.repaid', {
           amount_bucket: amountBucket(data.amount),
           payment_method: data.paymentMethod,
-          has_interest: data.interestAmount > 0,
         })
         setRepaymentLoan(null)
         refreshLoans()

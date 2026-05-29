@@ -54,10 +54,68 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   const upfrontDays = loanType === 'weekly' ? 100 : 30
   const upfrontInterest = Math.round(amount * interestRate / 100 * upfrontDays * 100) / 100
   const totalRepaid = repayments.reduce((s, r) => s + r.amount, 0)
-  // Outstanding = principal - principal repaid. Upfront interest is income,
-  // not a principal reduction (matches backend create_loan / record_past_loan).
-  const outstanding = Math.max(0, amount - totalRepaid)
-  const isFullyRepaid = outstanding <= 0.01
+
+  // Interest-first allocation per repayment (mirrors backend record_past_loan).
+  // Walks through repayments in date order, accruing interest between events
+  // and splitting each payment into interest first, then principal.
+  type Breakdown = {
+    id: string
+    daysSincePrev: number
+    interestDue: number
+    interestPaid: number
+    principalPaid: number
+    newOutstanding: number
+    newUnpaid: number
+    over: boolean   // payment would exceed outstanding + interest
+  }
+  const breakdowns: Record<string, Breakdown> = {}
+  let runOutstanding = amount
+  let runUnpaid = 0
+  let prevDate = issuedAt
+  const upfrontEnd = (() => {
+    const d = new Date(issuedAt)
+    d.setDate(d.getDate() + upfrontDays)
+    return d.toISOString().split('T')[0]
+  })()
+  const sortedReps = [...repayments].sort((a, b) => a.paidAt.localeCompare(b.paidAt))
+  for (const r of sortedReps) {
+    const effectiveStart = prevDate > upfrontEnd ? prevDate : upfrontEnd
+    const days = Math.max(0, Math.floor(
+      (new Date(r.paidAt).getTime() - new Date(effectiveStart).getTime()) / 86400000
+    ))
+    const newAccrued = runOutstanding * interestRate / 100 * days
+    const interestDue = Math.round((runUnpaid + newAccrued) * 100) / 100
+    let interestPaid = 0
+    let principalPaid = 0
+    let newUnpaid = 0
+    let over = false
+    if (r.amount <= interestDue + 0.005) {
+      interestPaid = r.amount
+      newUnpaid = Math.max(0, interestDue - r.amount)
+    } else {
+      interestPaid = interestDue
+      const principalAttempt = r.amount - interestDue
+      if (principalAttempt > runOutstanding + 0.005) over = true
+      principalPaid = Math.min(principalAttempt, runOutstanding)
+    }
+    breakdowns[r.id] = {
+      id: r.id,
+      daysSincePrev: days,
+      interestDue,
+      interestPaid: Math.round(interestPaid * 100) / 100,
+      principalPaid: Math.round(principalPaid * 100) / 100,
+      newOutstanding: Math.round((runOutstanding - principalPaid) * 100) / 100,
+      newUnpaid: Math.round(newUnpaid * 100) / 100,
+      over,
+    }
+    runOutstanding -= principalPaid
+    runUnpaid = newUnpaid
+    prevDate = r.paidAt
+  }
+  const outstanding = Math.round(runOutstanding * 100) / 100
+  const carriedInterest = Math.round(runUnpaid * 100) / 100
+  const hasOverpayment = Object.values(breakdowns).some(b => b.over)
+  const isFullyRepaid = outstanding <= 0.01 && carriedInterest <= 0.01
 
   useEffect(() => {
     if (!open) return
@@ -116,6 +174,10 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
     for (const r of repayments) {
       if (r.amount <= 0) { toast.error('All repayment amounts must be > 0'); return }
       if (r.paidAt < issuedAt) { toast.error('Repayment date cannot be before the loan issue date'); return }
+    }
+    if (hasOverpayment) {
+      toast.error('At least one repayment exceeds the remaining interest + principal. Reduce its amount or split into two entries.')
+      return
     }
 
     // Sort repayments by date ascending before submitting
@@ -304,53 +366,73 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                     No repayments recorded — loan will be marked as active.
                   </p>
                 )}
-                {repayments.map((r, idx) => (
-                  <div key={r.id} className="grid grid-cols-[auto_1fr_1fr_1fr_auto] gap-3 items-end">
-                    <span className="text-sm text-muted-foreground pb-2">#{idx + 1}</span>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Date</Label>
-                      <Input
-                        type="date"
-                        value={r.paidAt}
-                        min={issuedAt}
-                        max={new Date().toISOString().split('T')[0]}
-                        onChange={e => updateRepayment(r.id, 'paidAt', e.target.value)}
-                      />
+                {repayments.map((r, idx) => {
+                  const b = breakdowns[r.id]
+                  return (
+                  <div key={r.id} className="space-y-1.5">
+                    <div className="grid grid-cols-[auto_1fr_1fr_1fr_auto] gap-3 items-end">
+                      <span className="text-sm text-muted-foreground pb-2">#{idx + 1}</span>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Date</Label>
+                        <Input
+                          type="date"
+                          value={r.paidAt}
+                          min={issuedAt}
+                          max={new Date().toISOString().split('T')[0]}
+                          onChange={e => updateRepayment(r.id, 'paidAt', e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Amount (₹)</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={r.amount || ''}
+                          onChange={e => updateRepayment(r.id, 'amount', parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Method</Label>
+                        <Select
+                          value={r.paymentMethod}
+                          onValueChange={v => updateRepayment(r.id, 'paymentMethod', v)}
+                        >
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="CASH">Cash</SelectItem>
+                            <SelectItem value="BANK">Bank</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button variant="ghost" size="icon" onClick={() => removeRepayment(r.id)} type="button">
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
                     </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Amount (₹)</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={r.amount || ''}
-                        onChange={e => updateRepayment(r.id, 'amount', parseFloat(e.target.value) || 0)}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Method</Label>
-                      <Select
-                        value={r.paymentMethod}
-                        onValueChange={v => updateRepayment(r.id, 'paymentMethod', v)}
-                      >
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="CASH">Cash</SelectItem>
-                          <SelectItem value="BANK">Bank</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <Button variant="ghost" size="icon" onClick={() => removeRepayment(r.id)} type="button">
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+                    {b && r.amount > 0 && (
+                      <div className={`ml-8 text-xs rounded px-2 py-1.5 ${b.over ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-muted/40 text-muted-foreground'}`}>
+                        {b.over ? (
+                          <>⚠ Payment exceeds outstanding ({formatCurrency(b.newOutstanding + b.principalPaid)}) + interest due ({formatCurrency(b.interestDue)}). Reduce or split.</>
+                        ) : (
+                          <>
+                            +{b.daysSincePrev}d → interest due {formatCurrency(b.interestDue)} ·
+                            <span className="text-orange-600"> int {formatCurrency(b.interestPaid)}</span> ·
+                            <span className="text-green-700"> princ {formatCurrency(b.principalPaid)}</span> ·
+                            remaining {formatCurrency(b.newOutstanding)}
+                            {b.newUnpaid > 0.005 && <span className="text-amber-700"> · interest carry {formatCurrency(b.newUnpaid)}</span>}
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  )
+                })}
 
                 {/* Repayment summary */}
                 {amount > 0 && (
                   <>
                     <Separator />
-                    <div className="grid grid-cols-3 gap-2 text-sm">
+                    <div className="grid grid-cols-4 gap-2 text-sm">
                       <div>
                         <p className="text-muted-foreground">Principal</p>
                         <p className="font-semibold">{formatCurrency(amount)}</p>
@@ -361,8 +443,14 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                       </div>
                       <div>
                         <p className="text-muted-foreground">Outstanding</p>
-                        <p className={`font-semibold ${isFullyRepaid ? 'text-success' : 'text-warning-foreground'}`}>
+                        <p className={`font-semibold ${outstanding <= 0.01 ? 'text-success' : 'text-warning-foreground'}`}>
                           {formatCurrency(outstanding)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">Interest carry-over</p>
+                        <p className={`font-semibold ${carriedInterest > 0.005 ? 'text-amber-700' : ''}`}>
+                          {formatCurrency(carriedInterest)}
                         </p>
                       </div>
                     </div>
@@ -372,6 +460,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                         <Badge variant={isFullyRepaid ? 'default' : 'secondary'} className={isFullyRepaid ? 'bg-success/20 text-success' : ''}>
                           {isFullyRepaid ? 'paid' : 'active'}
                         </Badge>
+                        {carriedInterest > 0.005 && ` — Rs ${carriedInterest.toFixed(2)} interest still due.`}
                       </AlertDescription>
                     </Alert>
                   </>

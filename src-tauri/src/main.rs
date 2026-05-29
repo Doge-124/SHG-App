@@ -85,6 +85,7 @@ fn main() {
             commands::loans::get_loan_repayments,
             commands::loans::issue_member_loan,
             commands::loans::record_member_payment,
+            commands::loans::preview_loan_payment,
             commands::loans::get_loan_repayment_schedule,
             commands::chits::get_chit_group,
             commands::chits::get_chit_groups,
@@ -170,6 +171,7 @@ fn main() {
             commands::past_edit::edit_member_opening_data,
             commands::past_edit::delete_past_loan,
             commands::past_edit::delete_past_chit_cycle,
+            commands::past_edit::cancel_shg_transaction,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
