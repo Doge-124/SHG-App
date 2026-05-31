@@ -144,18 +144,30 @@ export function AppSidebar() {
                 const active = isActive(item.href)
                 const showBadge = item.href === '/loans' && overdueCount > 0 && !isActive('/loans')
 
+                // Two layers were eating early-mount clicks in Tauri's WebView2:
+                //  - Each SidebarMenuButton with a `tooltip` prop wraps its child in
+                //    a Radix Tooltip + TooltipProvider; the Slot/asChild composition
+                //    plus global pointer tracking would silently swallow the first
+                //    couple of clicks while Radix wired up its listeners.
+                //  - Next's <Link> click interception relies on the App Router being
+                //    hydrated; before then clicks on the anchor preventDefault but
+                //    router.push no-ops, so the navigation never fires.
+                //
+                // Fix: drop the tooltip wrapper (we lose the collapsed-state tooltip
+                // text — small cost) and add an explicit onClick that calls
+                // router.push. Keeping the <a href> means the native anchor still
+                // navigates even if React hasn't hydrated yet.
+                const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+                  // Let modifier-clicks / middle-clicks behave normally.
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+                  e.preventDefault()
+                  router.push(item.href)
+                }
+
                 return (
                   <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={active}
-                      tooltip={
-                        showBadge
-                          ? `Loans (${overdueCount} overdue)`
-                          : item.title
-                      }
-                    >
-                      <Link href={item.href} className="flex items-center w-full">
+                    <SidebarMenuButton asChild isActive={active}>
+                      <a href={item.href} onClick={handleClick} className="flex items-center w-full">
                         {/* Icon — with a dot indicator when collapsed */}
                         <span className="relative flex-shrink-0">
                           <item.icon className={cn('h-4 w-4', active && 'text-primary')} />
@@ -176,7 +188,7 @@ export function AppSidebar() {
                             </span>
                           )}
                         </span>
-                      </Link>
+                      </a>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 )
@@ -191,11 +203,18 @@ export function AppSidebar() {
             <SidebarMenu>
               {chitNavItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton asChild isActive={isActive(item.href)} tooltip={item.title}>
-                    <Link href={item.href}>
+                  <SidebarMenuButton asChild isActive={isActive(item.href)}>
+                    <a
+                      href={item.href}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+                        e.preventDefault()
+                        router.push(item.href)
+                      }}
+                    >
                       <item.icon className={cn('h-4 w-4', isActive(item.href) && 'text-primary')} />
                       <span>{item.title}</span>
-                    </Link>
+                    </a>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
@@ -209,11 +228,18 @@ export function AppSidebar() {
             <SidebarMenu>
               {systemNavItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton asChild isActive={isActive(item.href)} tooltip={item.title}>
-                    <Link href={item.href}>
+                  <SidebarMenuButton asChild isActive={isActive(item.href)}>
+                    <a
+                      href={item.href}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+                        e.preventDefault()
+                        router.push(item.href)
+                      }}
+                    >
                       <item.icon className={cn('h-4 w-4', isActive(item.href) && 'text-primary')} />
                       <span>{item.title}</span>
-                    </Link>
+                    </a>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
