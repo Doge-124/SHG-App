@@ -38,6 +38,7 @@ pub mod contributions;
 pub mod trial_balance;
 pub mod balance_sheet;
 pub mod income_expenditure;
+pub mod income_ledger;
 pub mod migrations;
 pub mod integrity;
 pub mod past_edit;
