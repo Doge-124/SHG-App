@@ -10,6 +10,25 @@ use serde::Serialize;
 use crate::error::AppError;
 use crate::db::{ledger, validation};
 
+/// Look up a member's passbook number for a chit, if one has been entered.
+fn passbook_number(conn: &Connection, chit_id: i64, member_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT passbook_number FROM chit_members WHERE chit_id = ?1 AND member_id = ?2",
+        (chit_id, member_id),
+        |r| r.get::<_, Option<String>>(0),
+    ).ok().flatten().filter(|s| !s.trim().is_empty())
+}
+
+/// Build a transaction reason that includes the passbook number when present,
+/// e.g. "Chit Installment (Passbook 17)". Used so chit receipts/vouchers carry
+/// the passbook ID the SHG uses for lots.
+fn reason_with_passbook(base: &str, passbook: &Option<String>) -> String {
+    match passbook {
+        Some(p) => format!("{base} (Passbook {p})"),
+        None => base.to_string(),
+    }
+}
+
 /// A cycle is completed when all required winners have been recorded in chit_cycle_winners.
 fn is_cycle_completed(conn: &Connection, cycle_id: i64) -> Result<bool, AppError> {
     let chit_id: i64 = conn.query_row(
@@ -383,11 +402,14 @@ pub fn process_cycle_winners(
              VALUES (?1,?2,?3,'FIXED',0,?4,?5,?6,?7)",
             (chit_id, cycle_id, member_id, commission_per_winner, payout, payment_method, &now),
         )?;
+        let pb = passbook_number(&tx, chit_id, member_id);
         if commission_per_winner > 0.0 {
-            ledger::record_receipt(&mut tx, commission_per_winner, "Chit Commission",
+            ledger::record_receipt(&mut tx, commission_per_winner,
+                &reason_with_passbook("Chit Commission", &pb),
                 payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
         }
-        ledger::record_voucher(&mut tx, payout, "Chit Payout",
+        ledger::record_voucher(&mut tx, payout,
+            &reason_with_passbook("Chit Payout", &pb),
             payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now)?;
     }
 
@@ -401,11 +423,14 @@ pub fn process_cycle_winners(
              VALUES (?1,?2,?3,'AUCTION',?4,?5,?6,?7,?8)",
             (chit_id, cycle_id, member_id, bid_discount, commission_per_winner, payout, payment_method, &now),
         )?;
+        let pb = passbook_number(&tx, chit_id, *member_id);
         if commission_per_winner > 0.0 {
-            ledger::record_receipt(&mut tx, commission_per_winner, "Chit Commission",
+            ledger::record_receipt(&mut tx, commission_per_winner,
+                &reason_with_passbook("Chit Commission", &pb),
                 payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
         }
-        ledger::record_voucher(&mut tx, payout, "Chit Payout",
+        ledger::record_voucher(&mut tx, payout,
+            &reason_with_passbook("Chit Payout", &pb),
             payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now)?;
     }
 
@@ -569,6 +594,7 @@ pub fn advance_to_next_cycle(
 ///
 /// `gross_amount` is the net amount collected (after per-member auction discount deducted).
 /// `auction_discount` is the per-member discount — stored in the receipt description for reference.
+#[allow(clippy::too_many_arguments)]
 pub fn record_member_payment_with_discount(
     conn: &mut Connection,
     chit_id: i64,
@@ -576,11 +602,28 @@ pub fn record_member_payment_with_discount(
     member_id: i64,
     gross_amount: f64,
     auction_discount: f64,
-    payment_method: &str,
+    payment_method: &str,           // CASH | BANK | MIXED
     paid_at: &str,
+    cash_amount: Option<f64>,       // required when MIXED
+    bank_amount: Option<f64>,       // required when MIXED
+    bank_txn_id: Option<&str>,      // optional bank reference
 ) -> Result<ChitPayment, AppError> {
     validation::validate_money_amount(gross_amount)?;
-    validation::validate_payment_method(payment_method)?;
+    let (cash_part, bank_part) = match payment_method {
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - gross_amount).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the installment amount"));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
 
     let chit_name: String = conn.query_row(
         "SELECT name FROM chit_groups WHERE id = ?1",
@@ -616,9 +659,9 @@ pub fn record_member_payment_with_discount(
 
     tx.execute(
         "INSERT INTO chit_payments
-         (chit_id, cycle_id, member_id, amount, payment_method, paid_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (chit_id, cycle_id, member_id, gross_amount, payment_method, paid_at),
+         (chit_id, cycle_id, member_id, amount, payment_method, paid_at, cash_amount, bank_amount)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (chit_id, cycle_id, member_id, gross_amount, payment_method, paid_at, cash_part, bank_part),
     )?;
 
     let payment_id = tx.last_insert_rowid();
@@ -629,15 +672,33 @@ pub fn record_member_payment_with_discount(
         |row| row.get(0),
     ).unwrap_or(cycle_id);
 
-    ledger::record_receipt(
-        &mut tx,
-        gross_amount,
-        "Chit Installment",
-        payment_method,
-        Some("CHIT_PAYMENT"),
-        Some(member_id),
-        paid_at,
-    )?;
+    let pb = passbook_number(&tx, chit_id, member_id);
+    let installment_reason = reason_with_passbook("Chit Installment", &pb);
+    if payment_method == "MIXED" {
+        ledger::record_receipt_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            &installment_reason,
+            Some("CHIT_PAYMENT"),
+            Some(member_id),
+            paid_at,
+            bank_txn_id,
+        )?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_receipt_ex(
+            &mut tx,
+            gross_amount,
+            &installment_reason,
+            payment_method,
+            Some("CHIT_PAYMENT"),
+            Some(member_id),
+            paid_at,
+            bank_txn,
+            None,
+        )?;
+    }
 
     tx.commit()?;
 
@@ -711,12 +772,14 @@ pub fn process_winner_payout(
         (winning_member_id, bid_discount, winner_amount, cycle_id, chit_id),
     )?;
 
+    let pb = passbook_number(&tx, chit_id, winning_member_id);
+
     // Commission receipt — SHG's take from the winner, separate from member installments.
     if commission > 0.0 {
         ledger::record_receipt(
             &mut tx,
             commission,
-            "Chit Commission",
+            &reason_with_passbook("Chit Commission", &pb),
             payment_method,
             Some("CHIT_COMMISSION"),
             Some(cycle_id),
@@ -727,7 +790,7 @@ pub fn process_winner_payout(
     ledger::record_voucher(
         &mut tx,
         winner_amount,
-        "Chit Payout",
+        &reason_with_passbook("Chit Payout", &pb),
         payment_method,
         Some("CHIT_PAYOUT"),
         Some(cycle_id),
@@ -815,10 +878,11 @@ pub fn record_chit_payment(
         )?;
     }
 
+    let pb = passbook_number(&tx, chit_id, member_id);
     ledger::record_receipt(
         &mut tx,
         amount,
-        "Chit payment",
+        &reason_with_passbook("Chit payment", &pb),
         payment_method,
         Some("CHIT_PAYMENT"),
         Some(member_id),

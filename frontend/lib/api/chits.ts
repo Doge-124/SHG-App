@@ -128,6 +128,7 @@ export async function getChitMembers(chitGroupId: string): Promise<ApiResponse<C
       memberName: member.member_name,
       joinedAt: member.joined_at,
       isWinner: member.is_winner,
+      passbookNumber: member.passbook_number ?? null,
     })).sort((a, b) => new Date(b.joinedAt).getTime() - new Date(a.joinedAt).getTime())
     
     if (frontendChitMembers.length > 0) {
@@ -137,6 +138,24 @@ export async function getChitMembers(chitGroupId: string): Promise<ApiResponse<C
   } catch (error) {
     console.error('Failed to get chit members:', error)
     return { success: false, error: 'Failed to load chit members' }
+  }
+}
+
+/** Set or clear a member's passbook number for a chit. Empty string clears it. */
+export async function setChitPassbookNumber(
+  chitGroupId: string,
+  memberId: string,
+  passbookNumber: string,
+): Promise<ApiResponse<void>> {
+  try {
+    await invoke('set_chit_passbook_number', {
+      chitId: parseInt(chitGroupId),
+      memberId: parseInt(memberId),
+      passbookNumber,
+    })
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to set passbook number' }
   }
 }
 
@@ -299,12 +318,19 @@ export async function createChitCycle(
   }
 }
 
+export interface ChitPaymentOptions {
+  paymentMethod: string                 // CASH | BANK | MIXED
+  cashAmount?: number | null
+  bankAmount?: number | null
+  bankTxnId?: string | null
+}
+
 export async function recordChitPayment(
   chitGroupId: string,
   cycleId: string,
   memberId: string,
   amount: number,
-  paymentMethod: 'cash' | 'bank',
+  opts: ChitPaymentOptions,
 ): Promise<ApiResponse<ChitPayment>> {
   try {
     const paymentData = await invoke('record_chit_payment', {
@@ -312,8 +338,11 @@ export async function recordChitPayment(
       cycleId: parseInt(cycleId),
       memberId: parseInt(memberId),
       amount,
-      paymentMethod: paymentMethod.toUpperCase(), // Convert to uppercase for backend
+      paymentMethod: opts.paymentMethod,
       paidAt: new Date().toISOString(),
+      cashAmount: opts.cashAmount ?? null,
+      bankAmount: opts.bankAmount ?? null,
+      bankTxnId: opts.bankTxnId ?? null,
     }) as any
     
     const chitPayment: ChitPayment = {

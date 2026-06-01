@@ -135,6 +135,7 @@ pub struct ChitMemberResponse {
     pub member_name: String,
     pub joined_at: String,
     pub is_winner: bool,
+    pub passbook_number: Option<String>,
 }
 
 #[tauri::command]
@@ -147,7 +148,8 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
 
     let mut stmt = conn.prepare(
         "SELECT cm.id, cm.chit_id, cm.member_id, cm.joined_at, m.name,
-                CASE WHEN ccw.member_id IS NOT NULL THEN 1 ELSE 0 END as is_winner
+                CASE WHEN ccw.member_id IS NOT NULL THEN 1 ELSE 0 END as is_winner,
+                cm.passbook_number
          FROM chit_members cm
          JOIN members m ON cm.member_id = m.id
          LEFT JOIN (SELECT DISTINCT chit_id, member_id FROM chit_cycle_winners) ccw
@@ -164,6 +166,7 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
             member_name: row.get(4)?,
             joined_at: row.get(3)?,
             is_winner: row.get::<_, i64>(5)? != 0,
+            passbook_number: row.get::<_, Option<String>>(6)?,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -173,6 +176,34 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
     }
 
     Ok(result)
+}
+
+/// Set (or clear) a member's passbook number for a chit. Empty string clears it.
+#[tauri::command]
+pub fn set_chit_passbook_number(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    member_id: i64,
+    passbook_number: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let trimmed = passbook_number.trim();
+    let value: Option<&str> = if trimmed.is_empty() { None } else { Some(trimmed) };
+
+    let n = conn.execute(
+        "UPDATE chit_members SET passbook_number = ?1 WHERE chit_id = ?2 AND member_id = ?3",
+        (value, chit_id, member_id),
+    ).map_err(|e| e.to_string())?;
+
+    if n == 0 {
+        return Err("This member is not part of the chit.".to_string());
+    }
+
+    db::audit::log_audit(conn, "CHIT_PASSBOOK_SET", "chit_member", Some(member_id),
+        &format!("chit {chit_id}, passbook = {}", value.unwrap_or("(cleared)")));
+    Ok(())
 }
 
 #[tauri::command]
@@ -279,6 +310,7 @@ pub fn add_member_to_chit(
         member_name: member.name,
         joined_at,
         is_winner: false,
+        passbook_number: None,
     })
 }
 
@@ -498,7 +530,13 @@ pub struct RecordPaymentWithDiscountInput {
     pub member_id: i64,
     pub gross_amount: f64,
     pub auction_discount: f64,
-    pub payment_method: String,
+    pub payment_method: String,          // CASH | BANK | MIXED
+    #[serde(default)]
+    pub cash_amount: Option<f64>,        // required when MIXED
+    #[serde(default)]
+    pub bank_amount: Option<f64>,        // required when MIXED
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,     // optional bank reference
 }
 
 #[derive(serde::Serialize)]
@@ -531,6 +569,9 @@ pub fn record_member_payment_with_discount(
         input.auction_discount,
         &input.payment_method,
         &paid_at,
+        input.cash_amount,
+        input.bank_amount,
+        input.bank_txn_id.as_deref(),
     )
     .map_err(|e: AppError| e.to_string())?;
 
@@ -654,7 +695,8 @@ pub fn get_member_chit_groups(
                        FROM chit_cycle_winners ccw
                        WHERE ccw.chit_id = cg.id AND ccw.member_id = ?1 LIMIT 1),
                       0
-                    ) as gross_won_amount
+                    ) as gross_won_amount,
+                    cm.passbook_number
              FROM chit_groups cg
              JOIN chit_members cm ON cg.id = cm.chit_id
              WHERE cm.member_id = ?1
@@ -692,6 +734,7 @@ pub fn get_member_chit_groups(
                 "paidCycleCount": paid_cycle_count,
                 "grossWonAmount": row.get::<_, f64>(19)?,
                 "memberClosed": member_closed,
+                "passbookNumber": row.get::<_, Option<String>>(20)?,
             }))
         })
         .map_err(|e| e.to_string())?;

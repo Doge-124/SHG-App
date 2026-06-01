@@ -15,11 +15,16 @@ import {
   Gavel,
   Zap,
   Trash2,
+  Printer,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -30,12 +35,18 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Checkbox } from '@/components/ui/checkbox'
 import { PageHeader } from '@/components/page-header'
 import { DataTable, type Column } from '@/components/data-table'
-import { getChitGroup, getChitMembers, getChitCycles, getChitPayments, addMemberToChit, recordChitPayment, getMemberPaymentStatus, getChitCycleWinners } from '@/lib/api/chits'
+import { getChitGroup, getChitMembers, getChitCycles, getChitPayments, addMemberToChit, recordChitPayment, getMemberPaymentStatus, getChitCycleWinners, setChitPassbookNumber } from '@/lib/api/chits'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import { getMembers } from '@/lib/api/members'
 import { ChitPastDataForm } from '@/components/forms/chit-past-data-form'
 import { ChitBulkPastEntryForm } from '@/components/forms/chit-bulk-past-entry-form'
 import { ChitManualCycleForm } from '@/components/forms/chit-manual-cycle-form'
 import { formatCurrency, formatDate } from '@/lib/format'
+import { printChitCycles, type ChitCycleReportRow } from '@/lib/reports'
+import { useSettings } from '@/lib/settings-context'
 import type { ChitGroup, ChitMember, ChitCycle, ChitPayment, Member, MemberPaymentStatus, ChitCycleWinner } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -45,6 +56,7 @@ export default function ChitDetailPage() {
   const searchParams = useSearchParams()
   const id = params?.id || searchParams?.get('id') || ''
   const router = useRouter()
+  const { settings } = useSettings()
   const [group, setGroup] = useState<ChitGroup | null>(null)
   const [members, setMembers] = useState<ChitMember[]>([])
   const [cycles, setCycles] = useState<ChitCycle[]>([])
@@ -58,8 +70,8 @@ export default function ChitDetailPage() {
   const [paymentData, setPaymentData] = useState({
     memberId: '',
     amount: '',
-    paymentMethod: 'cash' as 'cash' | 'bank'
   })
+  const [paymentSplit, setPaymentSplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [showPastDataForm, setShowPastDataForm] = useState(false)
   const [showBulkEntry, setShowBulkEntry] = useState(false)
   const [showManualCycleForm, setShowManualCycleForm] = useState(false)
@@ -155,7 +167,8 @@ export default function ChitDetailPage() {
         )
         setAvailableMembers(available)
         setShowPaymentDialog(true)
-        setPaymentData({ memberId: '', amount: '', paymentMethod: 'cash' })
+        setPaymentData({ memberId: '', amount: '' })
+        setPaymentSplit(emptyPaymentSplit)
       }
     } catch (error) {
       console.error('Failed to load members:', error)
@@ -164,16 +177,28 @@ export default function ChitDetailPage() {
 
   const handleConfirmPayment = async () => {
     if (!paymentData.memberId || !paymentData.amount) return
+    const amt = parseFloat(paymentData.amount)
+    if (!isPaymentSplitValid(paymentSplit, amt)) {
+      toast.error('Fix the cash/bank split — it must add up to the amount')
+      return
+    }
     try {
       const cycleId = "1"
+      const args = paymentInvokeArgs(paymentSplit)
       const response = await recordChitPayment(
-        id, cycleId, paymentData.memberId,
-        parseFloat(paymentData.amount), paymentData.paymentMethod
+        id, cycleId, paymentData.memberId, amt,
+        {
+          paymentMethod: args.paymentMethod,
+          cashAmount: args.cashAmount,
+          bankAmount: args.bankAmount,
+          bankTxnId: args.bankTxnId,
+        },
       )
       if (response.success && response.data) {
         setPayments(prev => [...prev, response.data!])
         setShowPaymentDialog(false)
-        setPaymentData({ memberId: '', amount: '', paymentMethod: 'cash' })
+        setPaymentData({ memberId: '', amount: '' })
+        setPaymentSplit(emptyPaymentSplit)
       }
     } catch (error) {
       console.error('Failed to record payment:', error)
@@ -223,6 +248,18 @@ export default function ChitDetailPage() {
         </div>
       ),
     },
+    {
+      key: 'passbookNumber',
+      header: 'Passbook No.',
+      cell: (member) => (
+        <PassbookCell
+          chitGroupId={id}
+          memberId={member.memberId}
+          value={member.passbookNumber ?? ''}
+          onSaved={reload}
+        />
+      ),
+    },
     { key: 'joinedAt', header: 'Joined', cell: (member) => formatDate(member.joinedAt) },
     {
       key: 'isWinner',
@@ -237,14 +274,62 @@ export default function ChitDetailPage() {
     },
   ]
 
-  const CycleList = () => (
+  const CycleList = () => {
+    // Roll-up totals across every cycle.
+    const totalCollected = payments.reduce((s, p) => s + p.amount, 0)
+    const totalPaidOut = Object.values(cycleWinners).flat().reduce((s, w) => s + w.payoutAmount, 0)
+
+    const handlePrintCycles = () => {
+      const rows: ChitCycleReportRow[] = cycles.map(cycle => {
+        const winners = cycleWinners[cycle.id] ?? []
+        const cyclePayments = payments.filter(p => p.chitCycleId === cycle.id)
+        return {
+          cycleNumber: cycle.cycleNumber,
+          date: cycle.dueDate,
+          collected: cyclePayments.reduce((s, p) => s + p.amount, 0),
+          paidOut: winners.reduce((s, w) => s + w.payoutAmount, 0),
+          paymentCount: cyclePayments.length,
+          winnerCount: winners.length,
+          winnerNames: winners.map(w => w.memberName).join(', '),
+        }
+      })
+      printChitCycles(rows, { shgName: settings?.general?.groupName, chitName: group?.name ?? 'Chit' })
+    }
+
+    return (
     <div className="space-y-3">
-      {cycles.length === 0 && (
+      {cycles.length === 0 ? (
         <p className="text-center text-muted-foreground py-8 text-sm">No cycles recorded yet</p>
+      ) : (
+        <div className="rounded-lg border p-4 flex flex-wrap items-center justify-between gap-3 bg-muted/30">
+          <div className="grid grid-cols-3 gap-6 text-sm">
+            <div>
+              <p className="text-xs text-muted-foreground">Total collected</p>
+              <p className="font-semibold text-success">{formatCurrency(totalCollected)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Total paid out</p>
+              <p className="font-semibold text-blue-700">{formatCurrency(totalPaidOut)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Net (SHG)</p>
+              <p className={cn('font-semibold', (totalCollected - totalPaidOut) >= 0 ? 'text-foreground' : 'text-destructive')}>
+                {formatCurrency(totalCollected - totalPaidOut)}
+              </p>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={handlePrintCycles}>
+            <Printer className="h-4 w-4 mr-2" />Print / PDF
+          </Button>
+        </div>
       )}
       {cycles.map(cycle => {
         const winners = cycleWinners[cycle.id] ?? []
         const isCompleted = cycle.status === 'completed' || winners.length > 0
+        // Per-cycle money flow: total collected from members vs total paid to winners.
+        const cyclePayments = payments.filter(p => p.chitCycleId === cycle.id)
+        const collected = cyclePayments.reduce((s, p) => s + p.amount, 0)
+        const paidOut = winners.reduce((s, w) => s + w.payoutAmount, 0)
         return (
           <div key={cycle.id} className={cn(
             'rounded-lg border p-4 space-y-3',
@@ -297,11 +382,32 @@ export default function ChitDetailPage() {
             ) : (
               <p className="text-sm text-muted-foreground italic">No winners recorded yet</p>
             )}
+
+            {/* Per-cycle money flow */}
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t text-sm">
+              <div>
+                <p className="text-xs text-muted-foreground">Collected from members</p>
+                <p className="font-semibold text-success">{formatCurrency(collected)}</p>
+                <p className="text-[10px] text-muted-foreground">{cyclePayments.length} payment(s)</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Paid out to winners</p>
+                <p className="font-semibold text-blue-700">{formatCurrency(paidOut)}</p>
+                <p className="text-[10px] text-muted-foreground">{winners.length} winner(s)</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Net (SHG)</p>
+                <p className={cn('font-semibold', (collected - paidOut) >= 0 ? 'text-foreground' : 'text-destructive')}>
+                  {formatCurrency(collected - paidOut)}
+                </p>
+              </div>
+            </div>
           </div>
         )
       })}
     </div>
-  )
+    )
+  }
 
   const paymentColumns: Column<ChitPayment>[] = [
     { key: 'memberName', header: 'Member', cell: (p) => p.memberName },
@@ -526,13 +632,12 @@ export default function ChitDetailPage() {
                   <label className="text-sm font-medium">Amount</label>
                   <input type="number" className="w-full p-2 border rounded-md" placeholder="Enter amount" value={paymentData.amount} onChange={e => setPaymentData(p => ({ ...p, amount: e.target.value }))} />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Payment Method</label>
-                  <select className="w-full p-2 border rounded-md" value={paymentData.paymentMethod} onChange={e => setPaymentData(p => ({ ...p, paymentMethod: e.target.value as 'cash' | 'bank' }))}>
-                    <option value="cash">Cash</option>
-                    <option value="bank">Bank</option>
-                  </select>
-                </div>
+                <PaymentMethodFields
+                  total={parseFloat(paymentData.amount) || 0}
+                  value={paymentSplit}
+                  onChange={setPaymentSplit}
+                  idPrefix="chitpay2"
+                />
               </>
             )}
           </div>
@@ -597,6 +702,71 @@ export default function ChitDetailPage() {
           reload()
         }}
       />
+    </div>
+  )
+}
+
+/** Inline-editable passbook-number cell for the chit members table. */
+function PassbookCell({
+  chitGroupId, memberId, value, onSaved,
+}: {
+  chitGroupId: string
+  memberId: string
+  value: string
+  onSaved: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => { setDraft(value) }, [value])
+
+  const save = async () => {
+    setSaving(true)
+    const r = await setChitPassbookNumber(chitGroupId, memberId, draft)
+    setSaving(false)
+    if (r.success) {
+      setEditing(false)
+      toast.success('Passbook number saved')
+      onSaved()
+    } else {
+      toast.error(r.error || 'Failed to save')
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        className="group inline-flex items-center gap-1.5 text-sm hover:text-primary"
+        onClick={() => setEditing(true)}
+        title="Edit passbook number"
+      >
+        <span className={cn('font-mono', !value && 'text-muted-foreground italic')}>
+          {value || 'Not set'}
+        </span>
+        <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-60" />
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        className="h-7 w-24 text-sm"
+        placeholder="e.g. 17"
+        autoFocus
+        maxLength={32}
+        onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setDraft(value); setEditing(false) } }}
+      />
+      <Button size="icon" variant="ghost" className="h-7 w-7" disabled={saving} onClick={save}>
+        <Check className="h-3.5 w-3.5 text-green-600" />
+      </Button>
+      <Button size="icon" variant="ghost" className="h-7 w-7" disabled={saving}
+        onClick={() => { setDraft(value); setEditing(false) }}>
+        <X className="h-3.5 w-3.5 text-muted-foreground" />
+      </Button>
     </div>
   )
 }
