@@ -21,6 +21,7 @@ import {
   TrendingUp,
   CalendarCheck,
   PiggyBank,
+  Coins,
 } from 'lucide-react'
 import {
   Sidebar,
@@ -62,6 +63,7 @@ const mainNavItems = [
   { title: 'Cash Book',      href: '/cashbook',       icon: Banknote     },
   { title: 'Bank Book',      href: '/bankbook',       icon: LandmarkIcon },
   { title: 'Day Book',       href: '/daybook',        icon: BookOpen     },
+  { title: 'Income Ledger',       href: '/income-ledger',       icon: Coins       },
   { title: 'Trial Balance',       href: '/trial-balance',       icon: Scale       },
   { title: 'Income & Expenditure', href: '/income-expenditure', icon: TrendingUp  },
   { title: 'Balance Sheet',       href: '/balance-sheet',       icon: PieChart    },

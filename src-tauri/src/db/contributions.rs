@@ -5,7 +5,7 @@
 
 use rusqlite::Connection;
 use crate::error::AppError;
-use crate::db::{self, validation};
+use crate::db::{self, validation, ledger};
 use chrono::Utc;
 
 /// Input for recording a weekly contribution
@@ -13,8 +13,14 @@ use chrono::Utc;
 pub struct WeeklyContributionInput {
     pub member_id: i64,
     pub amount: f64,
-    pub payment_method: String,
+    pub payment_method: String,          // CASH | BANK | MIXED
     pub note: Option<String>,
+    #[serde(default)]
+    pub cash_amount: Option<f64>,        // required when MIXED
+    #[serde(default)]
+    pub bank_amount: Option<f64>,        // required when MIXED
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,     // optional bank reference
 }
 
 /// Record a weekly contribution atomically
@@ -27,10 +33,24 @@ pub fn record_weekly_contribution(
         return Err(AppError::validation("amount must be > 0"));
     }
 
-    validation::validate_payment_method(&input.payment_method)?;
+    // Allow CASH / BANK / MIXED. For MIXED the split must reconcile to amount.
+    let (cash_part, bank_part): (Option<f64>, Option<f64>) = match input.payment_method.as_str() {
+        "MIXED" => {
+            let c = input.cash_amount.unwrap_or(0.0);
+            let b = input.bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - input.amount).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the contribution amount"));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
 
     let now = Utc::now().to_rfc3339();
-    let payment_method = input.payment_method.clone();
 
     // Load and validate the member state outside the write transaction
     let (member_code, member_name, is_active, _opening_set_at): (String, String, i64, Option<String>) = conn.query_row(
@@ -53,33 +73,40 @@ pub fn record_weekly_contribution(
         ));
     }
 
-    let tx = conn.transaction()?;
+    let mut tx = conn.transaction()?;
 
-    // 1) SHG receipt transaction
+    // 1) SHG receipt transaction (handles CASH / BANK / MIXED + bank txn id).
     let mut reason = format!("Weekly contribution from {} ({})", member_name, member_code);
     if let Some(note) = &input.note {
         reason.push_str(&format!(" - {}", note));
     }
 
-    tx.execute(
-        "INSERT INTO shg_transactions
-         (txn_type, amount, reason, payment_method, reference_type, reference_id, created_at)
-         VALUES ('RECEIPT', ?1, ?2, ?3, 'WEEKLY_CONTRIBUTION', ?4, ?5)",
-        (
-            input.amount,
-            reason,
-            payment_method.clone(),
-            input.member_id,
+    if input.payment_method == "MIXED" {
+        ledger::record_receipt_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            &reason,
+            Some("WEEKLY_CONTRIBUTION"),
+            Some(input.member_id),
             &now,
-        ),
-    )?;
+            input.bank_txn_id.as_deref(),
+        )?;
+    } else {
+        let bank_txn = if input.payment_method == "BANK" { input.bank_txn_id.as_deref() } else { None };
+        ledger::record_receipt_ex(
+            &mut tx,
+            input.amount,
+            &reason,
+            &input.payment_method,
+            Some("WEEKLY_CONTRIBUTION"),
+            Some(input.member_id),
+            &now,
+            bank_txn,
+            None,
+        )?;
+    }
     let shg_txn_id = tx.last_insert_rowid();
-
-    // 2) Update SHG balances
-    tx.execute(
-        "UPDATE shg_balances SET balance = balance + ?1 WHERE method = ?2",
-        (input.amount, payment_method.clone()),
-    )?;
 
     // 3) Member transaction with CONTRIBUTION type
     let mut member_reason = "Weekly contribution".to_string();

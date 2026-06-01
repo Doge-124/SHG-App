@@ -30,10 +30,18 @@ import type { Receipt, ReceiptFormData } from '@/lib/types'
 import type { ReceiptWithMember, WeeklyContributionInput } from '@/lib/types/receipts'
 
 function friendlyReason(referenceType: string | undefined, rawReason: string): string {
+  // MEMBER_PAYMENT covers loan repayments, upfront interest, and monthly
+  // interest-only payments — they share a reference_type but the raw reason
+  // distinguishes them, so check that first.
+  if (referenceType === 'MEMBER_PAYMENT') {
+    const r = (rawReason || '').toLowerCase()
+    if (r.includes('upfront')) return 'Upfront interest'
+    if (r.includes('interest')) return 'Interest payment'
+    return 'Loan repayment'
+  }
   switch (referenceType) {
     case 'WEEKLY_CONTRIBUTION':
     case 'MEMBER_CONTRIBUTION': return 'Savings contribution'
-    case 'MEMBER_PAYMENT':      return 'Loan repayment'
     case 'CHIT_PAYMENT':        return 'Chit installment'
     case 'CHIT_COMMISSION':     return 'Chit commission'
     case 'MEMBER_RECEIPT':      return 'Member receipt'
@@ -181,6 +189,9 @@ export default function ReceiptsPage() {
           </span>
           {receipt.member_name && (
             <span className="text-xs text-muted-foreground block">From: {receipt.member_name}</span>
+          )}
+          {receipt.bank_txn_id && (
+            <span className="text-xs text-muted-foreground block">Txn ID: {receipt.bank_txn_id}</span>
           )}
           {receipt.voided_at && receipt.voided_reason && (
             <span className="text-xs text-red-700 block">Cancelled: {receipt.voided_reason}</span>

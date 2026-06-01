@@ -5,10 +5,71 @@
 
 use std::sync::Mutex;
 use tauri::State;
+use serde::Serialize;
 
 use crate::db::daybook::{DayBookSummary, get_day_book_summary, get_cash_book_summary, get_bank_book_summary};
 use crate::error::AppError;
 use crate::state::AppState;
+
+/// One bank transaction-ID record for the Bank Book reconciliation report.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankTxnIdEntry {
+    pub id: i64,
+    pub date: String,
+    pub txn_type: String,       // RECEIPT | VOUCHER
+    pub amount: f64,
+    pub reason: String,
+    pub member_name: Option<String>,
+    pub bank_txn_id: String,
+}
+
+/// List every BANK-method transaction in the period that has a transaction ID
+/// recorded. Used for the "Print Transaction IDs" report the secretary takes
+/// to the bank. Voided rows and reversal rows are excluded.
+#[tauri::command]
+pub fn get_bank_transaction_ids(
+    state: State<Mutex<AppState>>,
+    start_date: String,
+    end_date: String,
+) -> Result<Vec<BankTxnIdEntry>, String> {
+    chrono::NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid start date".to_string())?;
+    chrono::NaiveDate::parse_from_str(&end_date, "%Y-%m-%d")
+        .map_err(|_| "Invalid end date".to_string())?;
+
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let end_dt = format!("{}T23:59:59", end_date);
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.created_at, t.txn_type, t.amount, t.reason,
+                (SELECT name FROM members WHERE id = t.reference_id) AS member_name,
+                t.bank_txn_id
+         FROM shg_transactions t
+         WHERE t.payment_method = 'BANK'
+           AND t.bank_txn_id IS NOT NULL AND t.bank_txn_id != ''
+           AND t.voided_at IS NULL AND t.reversal_of_id IS NULL
+           AND t.created_at >= ?1 AND t.created_at <= ?2
+         ORDER BY t.created_at ASC",
+    ).map_err(|e| e.to_string())?;
+
+    let rows = stmt.query_map((start_date.as_str(), end_dt.as_str()), |r| {
+        Ok(BankTxnIdEntry {
+            id: r.get(0)?,
+            date: r.get(1)?,
+            txn_type: r.get(2)?,
+            amount: r.get(3)?,
+            reason: r.get(4)?,
+            member_name: r.get(5)?,
+            bank_txn_id: r.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for row in rows { out.push(row.map_err(|e| e.to_string())?); }
+    Ok(out)
+}
 
 /// Get the Day Book summary for a date range
 ///
@@ -122,7 +183,20 @@ pub fn get_day_book_for_date(
     get_day_book(state, date.clone(), date)
 }
 
-/// Export day book data to CSV format
+/// Escape a single CSV field per RFC 4180: wrap in double quotes and double
+/// any embedded quotes whenever the value contains a comma, quote, or newline.
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Export day book data to CSV format.
+///
+/// Uses CRLF line endings and a UTF-8 BOM so Excel opens it cleanly with
+/// each record on its own row. Every field is RFC-4180 escaped.
 #[tauri::command]
 pub fn export_day_book_csv(
     state: State<Mutex<AppState>>,
@@ -130,39 +204,44 @@ pub fn export_day_book_csv(
     end_date: String,
 ) -> Result<String, String> {
     let summary = get_day_book(state, start_date, end_date)?;
-    
-    let mut csv = String::new();
-    
-    // Header
-    csv.push_str("Date,Time,Type,Category,Amount,Payment Method,Member,Description,Reference ID\n");
-    
-    // Data rows
+
+    // UTF-8 BOM — makes Excel detect the encoding instead of mangling it.
+    let mut csv = String::from("\u{FEFF}");
+
+    // Header (9 columns)
+    csv.push_str("Date,Time,Type,Category,Amount,Payment Method,Member,Description,Reference ID\r\n");
+
     for entry in &summary.transactions {
-        let datetime = chrono::DateTime::parse_from_rfc3339(&entry.date)
-            .map(|dt| dt.format("%Y-%m-%d,%H:%M:%S").to_string())
-            .unwrap_or_else(|_| format!("{}", entry.date));
-        
+        // Split date + time into two fields (matching the two header columns).
+        let (date_part, time_part) = chrono::DateTime::parse_from_rfc3339(&entry.date)
+            .map(|dt| (dt.format("%Y-%m-%d").to_string(), dt.format("%H:%M:%S").to_string()))
+            .unwrap_or_else(|_| (entry.date.clone(), String::new()));
+
         let member = entry.member_name.as_deref().unwrap_or("");
-        
+
+        // Note the explicit \r\n terminator — the previous version omitted it,
+        // collapsing every record onto a single line in Excel.
         csv.push_str(&format!(
-            "{},{},{},{:.2},{},{},{},{}",
-            datetime,
-            entry.txn_type,
-            entry.category,
+            "{},{},{},{},{:.2},{},{},{},{}\r\n",
+            csv_field(&date_part),
+            csv_field(&time_part),
+            csv_field(&entry.txn_type),
+            csv_field(&entry.category),
             entry.amount,
-            entry.payment_method,
-            member,
-            entry.description.replace(',', ";"),
-            entry.reference_id
+            csv_field(&entry.payment_method),
+            csv_field(member),
+            csv_field(&entry.description),
+            entry.reference_id,
         ));
     }
-    
+
     // Summary section
-    csv.push_str("\n\nSummary\n");
-    csv.push_str(&format!("Opening Balance,{:.2}\n", summary.opening_balance));
-    csv.push_str(&format!("Total Receipts,{:.2}\n", summary.total_receipts));
-    csv.push_str(&format!("Total Vouchers,{:.2}\n", summary.total_vouchers));
-    csv.push_str(&format!("Closing Balance,{:.2}\n", summary.closing_balance));
-    
+    csv.push_str("\r\n");
+    csv.push_str("Summary\r\n");
+    csv.push_str(&format!("Opening Balance,{:.2}\r\n", summary.opening_balance));
+    csv.push_str(&format!("Total Receipts,{:.2}\r\n", summary.total_receipts));
+    csv.push_str(&format!("Total Vouchers,{:.2}\r\n", summary.total_vouchers));
+    csv.push_str(&format!("Closing Balance,{:.2}\r\n", summary.closing_balance));
+
     Ok(csv)
 }

@@ -13,7 +13,27 @@ pub struct ShgBalances {
     pub bank: f64,
 }
 
+/// Validate CASH | BANK | MIXED. For MIXED, confirm the split reconciles.
+fn check_payment(method: &str, amount: f64, cash: Option<f64>, bank: Option<f64>) -> Result<(), String> {
+    match method {
+        "CASH" | "BANK" => Ok(()),
+        "MIXED" => {
+            let c = cash.unwrap_or(0.0);
+            let b = bank.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err("A mixed payment needs a positive amount in both cash and bank".to_string());
+            }
+            if (c + b - amount).abs() > 0.01 {
+                return Err(format!("Cash ({c:.2}) + bank ({b:.2}) must equal the total ({amount:.2})"));
+            }
+            Ok(())
+        }
+        _ => Err("payment_method must be CASH, BANK, or MIXED".to_string()),
+    }
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn record_receipt(
     state: State<Mutex<AppState>>,
     amount: f64,
@@ -22,11 +42,13 @@ pub fn record_receipt(
     reference_type: Option<String>,
     reference_id: Option<i64>,
     created_at: String,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<String>,
 ) -> Result<(), String> {
     validation::validate_money_amount(amount)
         .map_err(|e: AppError| e.to_string())?;
-    validation::validate_payment_method(&payment_method)
-        .map_err(|e: AppError| e.to_string())?;
+    check_payment(&payment_method, amount, cash_amount, bank_amount)?;
 
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -38,16 +60,31 @@ pub fn record_receipt(
         .transaction()
         .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
-    db::record_receipt(
-        &mut tx,
-        amount,
-        &reason,
-        &payment_method,
-        reference_type.as_deref(),
-        reference_id,
-        &created_at,
-    )
-    .map_err(|e: AppError| e.to_string())?;
+    if payment_method == "MIXED" {
+        db::ledger::record_receipt_mixed(
+            &mut tx,
+            cash_amount.unwrap_or(0.0),
+            bank_amount.unwrap_or(0.0),
+            &reason,
+            reference_type.as_deref(),
+            reference_id,
+            &created_at,
+            bank_txn_id.as_deref(),
+        ).map_err(|e: AppError| e.to_string())?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id.as_deref() } else { None };
+        db::ledger::record_receipt_ex(
+            &mut tx,
+            amount,
+            &reason,
+            &payment_method,
+            reference_type.as_deref(),
+            reference_id,
+            &created_at,
+            bank_txn,
+            None,
+        ).map_err(|e: AppError| e.to_string())?;
+    }
 
     // Only savings-type receipts affect member balance.
     // MEMBER_RECEIPT (fines, generic) → SHG balance only; the member's savings are unchanged.
@@ -87,6 +124,7 @@ pub fn record_voucher(
     reference_type: Option<String>,
     reference_id: Option<i64>,
     created_at: String,
+    bank_txn_id: Option<String>,
 ) -> Result<(), String> {
     validation::validate_money_amount(amount)
         .map_err(|e: AppError| e.to_string())?;
@@ -103,7 +141,8 @@ pub fn record_voucher(
         .transaction()
         .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
-    db::record_voucher(
+    let bank_txn = if payment_method == "BANK" { bank_txn_id.as_deref() } else { None };
+    db::ledger::record_voucher_ex(
         &mut tx,
         amount,
         &reason,
@@ -111,6 +150,7 @@ pub fn record_voucher(
         reference_type.as_deref(),
         reference_id,
         &created_at,
+        bank_txn,
     )
     .map_err(|e: AppError| e.to_string())?;
 
@@ -169,7 +209,9 @@ pub fn get_vouchers(
                 WHEN t.reference_id IS NOT NULL THEN
                     (SELECT name FROM members WHERE id = t.reference_id)
                 ELSE NULL
-            END as member_name
+            END as member_name,
+            t.bank_txn_id,
+            t.group_id
         FROM shg_transactions t
         WHERE t.txn_type = 'VOUCHER'
     ".to_string();
@@ -205,6 +247,8 @@ pub fn get_vouchers(
                 "voided_reason": row.get::<_, Option<String>>(9)?,
                 "reversal_of_id": row.get::<_, Option<i64>>(10)?,
                 "member_name": row.get::<_, Option<String>>(11)?,
+                "bank_txn_id": row.get::<_, Option<String>>(12)?,
+                "group_id": row.get::<_, Option<String>>(13)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -258,7 +302,9 @@ pub fn get_receipts(
                 WHEN t.reference_id IS NOT NULL THEN
                     (SELECT member_code FROM members WHERE id = t.reference_id)
                 ELSE NULL
-            END as member_code
+            END as member_code,
+            t.bank_txn_id,
+            t.group_id
         FROM shg_transactions t
         WHERE t.txn_type = 'RECEIPT'
     ".to_string();
@@ -295,6 +341,8 @@ pub fn get_receipts(
                 "reversal_of_id": row.get::<_, Option<i64>>(10)?,
                 "member_name": row.get::<_, Option<String>>(11)?,
                 "member_code": row.get::<_, Option<String>>(12)?,
+                "bank_txn_id": row.get::<_, Option<String>>(13)?,
+                "group_id": row.get::<_, Option<String>>(14)?,
             });
 
             // Add memberName for compatibility with existing frontend

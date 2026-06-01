@@ -39,20 +39,27 @@ export async function recordReceipt(data: ReceiptFormData): Promise<ApiResponse<
     }
     
     
+    const isMixed = data.paymentMethod === 'mixed'
     await invoke('record_receipt', {
       amount: data.amount,
       reason: reason,
       paymentMethod: data.paymentMethod.toUpperCase(),
       referenceType: referenceType,
       referenceId: data.memberId ? parseInt(data.memberId) : null,
-      createdAt: createdAt
+      createdAt: createdAt,
+      cashAmount: isMixed ? (data.cashAmount ?? null) : null,
+      bankAmount: isMixed ? (data.bankAmount ?? null) : null,
+      bankTxnId: data.bankTxnId ?? null,
     })
     
     const receipt: Receipt = {
       id: Date.now().toString(),
       amount: data.amount,
       reason: reason,
-      paymentMethod: data.paymentMethod,
+      // The receipts list re-fetches from the DB after creation; this local
+      // object is only a transient return value, so collapse 'mixed' to 'cash'
+      // for the narrow display type.
+      paymentMethod: data.paymentMethod === 'mixed' ? 'cash' : data.paymentMethod,
       referenceType: referenceType,
       referenceId: data.memberId,
       referenceNumber: generateReferenceNumber('receipt'),
@@ -82,7 +89,8 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
       paymentMethod: data.paymentMethod.toUpperCase(),
       referenceType: 'MEMBER_VOUCHER',
       referenceId: data.memberId ? parseInt(data.memberId) : null,
-      createdAt: createdAt
+      createdAt: createdAt,
+      bankTxnId: data.bankTxnId ?? null,
     })
     
     const voucher: Voucher = {

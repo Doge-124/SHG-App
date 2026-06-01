@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS shg_transactions (
     created_at TEXT NOT NULL,
     voided_at INTEGER,
     voided_reason TEXT,
-    reversal_of_id INTEGER
+    reversal_of_id INTEGER,
+    bank_txn_id TEXT,
+    group_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS shg_balances (
@@ -305,6 +307,24 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     add_column_if_missing(&tx, "loans", "daily_interest_rate", "REAL NOT NULL DEFAULT 0")?;
     add_column_if_missing(&tx, "loans", "upfront_interest_amount", "REAL NOT NULL DEFAULT 0")?;
 
+    // 9b) interest_paid_through — the date (YYYY-MM-DD) up to which interest is
+    // settled. Daily accrual only counts days AFTER this date. The SHG's
+    // upfront interest covers the first `upfront_days`, so for a fresh loan
+    // this starts at issued_at + upfront_days (matching interest_start_date).
+    // Borrowers can voluntarily prepay a month, which pushes this forward and
+    // stops interest accruing until then. Backfill existing loans to that same
+    // baseline (30d monthly / 100d weekly after issue) so behaviour is
+    // unchanged for in-flight loans.
+    let added_paid_through = add_column_if_missing(&tx, "loans", "interest_paid_through", "TEXT")?;
+    if added_paid_through {
+        tx.execute_batch(r#"
+            UPDATE loans
+            SET interest_paid_through = date(substr(issued_at,1,10), '+' ||
+                CASE WHEN lower(loan_type) = 'weekly' THEN 100 ELSE 30 END || ' days')
+            WHERE interest_paid_through IS NULL;
+        "#)?;
+    }
+
     // 10) Split loan_payments.amount into principal_amount + interest_amount so
     // financial reports can compute interest income correctly. Legacy rows
     // backfilled as principal=amount, interest=0 (matches the prior buggy
@@ -390,6 +410,25 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_shg_tx_reversal ON shg_transactions(reversal_of_id);"
     )?;
 
+    // 16) Bank transaction IDs + mixed-payment grouping.
+    //  - bank_txn_id: optional bank reference (UTR/cheque no.) captured for any
+    //    BANK-method row, used later for bank reconciliation + the Bank Book
+    //    "print transaction IDs" report.
+    //  - group_id: a shared UUID linking the CASH + BANK halves of one mixed
+    //    payment so the UI can present them as a single logical receipt and
+    //    cancellation can reverse both halves together.
+    add_column_if_missing(&tx, "shg_transactions", "bank_txn_id", "TEXT")?;
+    add_column_if_missing(&tx, "shg_transactions", "group_id",    "TEXT")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_shg_tx_group ON shg_transactions(group_id);"
+    )?;
+    // Mixed-payment split recorded on the derived rows (display only — the
+    // authoritative cash/bank split lives on the two shg_transactions rows).
+    add_column_if_missing(&tx, "loan_payments", "cash_amount", "REAL")?;
+    add_column_if_missing(&tx, "loan_payments", "bank_amount", "REAL")?;
+    add_column_if_missing(&tx, "chit_payments", "cash_amount", "REAL")?;
+    add_column_if_missing(&tx, "chit_payments", "bank_amount", "REAL")?;
+
     // 13) Loan unpaid-interest balance — tracks interest that has accrued
     // but not been paid yet (e.g. when the borrower made a partial payment
     // that didn't cover all due interest). The next payment will eat into
@@ -433,6 +472,11 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     }
 
     // 7) Ensure indexes exist for performance.
+    // 17) Per-(member, chit) passbook number. This is the physical chit
+    // passbook ID used for drawing lots / selecting winners, distinct from
+    // the member_code. One per membership row, manually entered.
+    add_column_if_missing(&tx, "chit_members", "passbook_number", "TEXT")?;
+
     tx.execute_batch(
         r#"
         CREATE INDEX IF NOT EXISTS idx_member_code ON members(member_code);

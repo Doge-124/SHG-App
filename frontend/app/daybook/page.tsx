@@ -36,11 +36,14 @@ import {
   formatDateTime,
 } from '@/lib/api/daybook'
 import { formatCurrency } from '@/lib/format'
+import { printDayBook } from '@/lib/reports'
+import { useSettings } from '@/lib/settings-context'
 import type { DayBookSummary, DayBookEntry } from '@/lib/types/daybook'
 import { 
-  CalendarIcon, 
-  FileSpreadsheet, 
-  ArrowUpRight, 
+  CalendarIcon,
+  FileSpreadsheet,
+  FileText,
+  ArrowUpRight,
   ArrowDownRight,
   Filter,
   BookOpen,
@@ -48,6 +51,7 @@ import {
 } from 'lucide-react'
 
 export default function DayBookPage() {
+  const { settings } = useSettings()
   // State
   const [startDate, setStartDate] = useState<string>(() => {
     const today = new Date()
@@ -136,6 +140,31 @@ export default function DayBookPage() {
     } finally {
       setIsExporting(false)
     }
+  }
+
+  const handlePrintPDF = () => {
+    if (!summary) { toast.error('Load the day book first'); return }
+    printDayBook(
+      filteredEntries.map(e => ({
+        date: e.date,
+        txnType: e.txn_type,
+        category: e.category,
+        amount: e.amount,
+        paymentMethod: e.payment_method,
+        memberName: e.member_name,
+        description: e.description,
+      })),
+      {
+        shgName: settings?.general?.groupName,
+        title: 'Day Book',
+        fromDate: startDate,
+        toDate: endDate,
+        openingBalance: summary.opening_balance,
+        totalReceipts: summary.total_receipts,
+        totalVouchers: summary.total_vouchers,
+        closingBalance: summary.closing_balance,
+      },
+    )
   }
   
   // Get today's date for max date validation

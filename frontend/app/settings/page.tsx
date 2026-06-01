@@ -70,6 +70,7 @@ export default function SettingsPage() {
   const [isRestoreLoading, setIsRestoreLoading] = useState(false)
   const [clearDataDialogOpen, setClearDataDialogOpen] = useState(false)
   const [clearDataPassword, setClearDataPassword] = useState('')
+  const [clearDataConfirmed, setClearDataConfirmed] = useState(false)
   const [isVerifyingPassword, setIsVerifyingPassword] = useState(false)
   const [changeAdminPinDialogOpen, setChangeAdminPinDialogOpen] = useState(false)
   const [currentAdminPin, setCurrentAdminPin] = useState('')
@@ -373,44 +374,55 @@ export default function SettingsPage() {
 
   const handleVerifyAndClearData = async () => {
     if (!clearDataPassword.trim()) {
-      toast.error('Please enter your master password')
+      toast.error('Please enter your admin PIN')
       return
     }
-    
+    if (!clearDataConfirmed) {
+      toast.error('Please tick the box to confirm you understand this is permanent')
+      return
+    }
+
     setIsVerifyingPassword(true)
     try {
+      // Verify the admin PIN (the one set during initial app setup).
       const verifyResponse = await verifyMasterPassword(clearDataPassword)
-      if (verifyResponse.success && verifyResponse.data) {
-        // Password correct, proceed with clear
-        if (confirm('Are you sure you want to clear all data? This action cannot be undone and will delete all members, transactions, loans, and other data. Settings will be preserved.')) {
-          const response = await clearAllData()
-          if (response.success) {
-            toast.success('All data cleared successfully')
-            setClearDataDialogOpen(false)
-            setClearDataPassword('')
-
-            // Reset appearance to defaults immediately so the UI reflects the
-            // cleared state before the page reloads.
-            appearance.setTheme('light')
-            appearance.setLanguage('english')
-
-            // Refresh global settings context from the now-reset DB
-            await refreshSettings()
-
-            // Redirect to home page after a short delay
-            setTimeout(() => {
-              window.location.href = '/'
-            }, 1500)
-          } else {
-            toast.error(response.error || 'Failed to clear data')
-          }
-        }
-      } else {
-        toast.error('Incorrect password')
+      if (!verifyResponse.success) {
+        toast.error(verifyResponse.error || 'Could not verify admin PIN')
+        return
       }
+      if (!verifyResponse.data) {
+        toast.error('Incorrect admin PIN')
+        return
+      }
+
+      // PIN verified + box ticked → no native confirm() (unreliable in the
+      // Tauri webview). Proceed directly.
+      const response = await clearAllData()
+      if (!response.success) {
+        toast.error(response.error || 'Failed to clear data')
+        return
+      }
+
+      toast.success('All data cleared successfully')
+      setClearDataDialogOpen(false)
+      setClearDataPassword('')
+      setClearDataConfirmed(false)
+
+      // Reset appearance to defaults immediately so the UI reflects the
+      // cleared state before the page reloads.
+      appearance.setTheme('light')
+      appearance.setLanguage('english')
+
+      // Refresh global settings context from the now-reset DB
+      await refreshSettings()
+
+      // Redirect to home page after a short delay
+      setTimeout(() => {
+        window.location.href = '/'
+      }, 1500)
     } catch (error) {
-      console.error('Failed to verify password:', error)
-      toast.error('An error occurred while verifying password')
+      console.error('Failed to clear data:', error)
+      toast.error('An error occurred while clearing data')
     } finally {
       setIsVerifyingPassword(false)
     }
@@ -419,6 +431,7 @@ export default function SettingsPage() {
   const handleCancelClearData = () => {
     setClearDataDialogOpen(false)
     setClearDataPassword('')
+    setClearDataConfirmed(false)
   }
 
   const handleOpenRestoreDialog = async () => {
@@ -1628,22 +1641,26 @@ export default function SettingsPage() {
       </Dialog>
 
       {/* Clear Data Password Dialog */}
-      <Dialog open={clearDataDialogOpen} onOpenChange={setClearDataDialogOpen}>
+      <Dialog open={clearDataDialogOpen} onOpenChange={(open) => {
+        setClearDataDialogOpen(open)
+        if (!open) { setClearDataPassword(''); setClearDataConfirmed(false) }
+      }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-destructive">Clear All Data</DialogTitle>
             <DialogDescription>
-              This action is destructive and will delete all members, transactions, loans, and other data. 
-              Please enter your master password to confirm.
+              This permanently deletes all members, transactions, loans, and chit data.
+              Settings are preserved. This cannot be undone. Enter the admin PIN you set
+              when the app was first set up to confirm.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="clearDataPassword">Master Password</Label>
+              <Label htmlFor="clearDataPassword">Admin PIN</Label>
               <Input
                 id="clearDataPassword"
                 type="password"
-                placeholder="Enter your master password"
+                placeholder="Enter your admin PIN"
                 value={clearDataPassword}
                 onChange={(e) => setClearDataPassword(e.target.value)}
                 onKeyDown={(e) => {
@@ -1653,6 +1670,15 @@ export default function SettingsPage() {
                 }}
               />
             </div>
+            <label className="flex items-start gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={clearDataConfirmed}
+                onChange={(e) => setClearDataConfirmed(e.target.checked)}
+              />
+              <span>I understand this permanently deletes all data and cannot be undone.</span>
+            </label>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={handleCancelClearData}>
@@ -1661,7 +1687,7 @@ export default function SettingsPage() {
             <Button
               variant="destructive"
               onClick={handleVerifyAndClearData}
-              disabled={isVerifyingPassword}
+              disabled={isVerifyingPassword || !clearDataPassword.trim() || !clearDataConfirmed}
             >
               {isVerifyingPassword ? (
                 <>

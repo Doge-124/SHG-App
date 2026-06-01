@@ -35,6 +35,28 @@ pub struct DayBookSummary {
     pub transactions: Vec<DayBookEntry>,
 }
 
+/// SQL expression resolving the party name for an `shg_transactions` row `t`.
+///
+/// Every row gets a name:
+///   - CHIT_PAYOUT / CHIT_COMMISSION → the winning member of that cycle
+///   - any other row with a member reference_id → that member's name
+///   - OPENING and anything else with no member → "SHG" (the group itself)
+///
+/// This guarantees the Day/Cash/Bank books never show a blank party.
+const MEMBER_NAME_EXPR: &str = "
+    CASE
+        WHEN t.reference_type IN ('CHIT_PAYOUT','CHIT_COMMISSION') AND t.reference_id IS NOT NULL THEN
+            COALESCE(
+                (SELECT m.name FROM members m
+                 JOIN chit_cycles cc ON cc.winning_member_id = m.id
+                 WHERE cc.id = t.reference_id),
+                'SHG')
+        WHEN t.reference_id IS NOT NULL THEN
+            COALESCE((SELECT name FROM members WHERE id = t.reference_id), 'SHG')
+        ELSE 'SHG'
+    END
+";
+
 /// Category mapping for transactions based on reference_type and reason
 fn categorize_transaction(reference_type: Option<&str>, reason: &str) -> String {
     match reference_type {
@@ -130,7 +152,8 @@ pub fn get_day_book_entries(
     end_date: &str,
 ) -> Result<Vec<DayBookEntry>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT 
+        &format!(
+        "SELECT
             t.id,
             t.created_at,
             t.txn_type,
@@ -139,17 +162,14 @@ pub fn get_day_book_entries(
             t.payment_method,
             t.reference_type,
             t.reference_id,
-            m.id as member_id,
-            m.name as member_name
+            t.reference_id as member_id,
+            {name_expr} as member_name
          FROM shg_transactions t
-         LEFT JOIN members m ON (
-             (t.reference_type = 'WEEKLY_CONTRIBUTION' OR t.reference_type = 'MEMBER_RECEIPT')
-             AND t.reference_id = m.id
-         )
-         WHERE t.created_at >= ?1 
+         WHERE t.created_at >= ?1
            AND t.created_at <= ?2
            AND t.txn_type IN ('RECEIPT', 'VOUCHER')
-         ORDER BY t.created_at ASC, t.id ASC"
+         ORDER BY t.created_at ASC, t.id ASC",
+        name_expr = MEMBER_NAME_EXPR)
     )?;
 
     let rows = stmt.query_map([start_date, end_date], |row: &Row| {
@@ -216,22 +236,18 @@ pub fn get_cash_book_summary(
     end_date: &str,
 ) -> Result<DayBookSummary, AppError> {
     let mut stmt = conn.prepare(
+        &format!(
         "SELECT
             t.id, t.created_at, t.txn_type, t.amount, t.reason,
             t.payment_method, t.reference_type, t.reference_id,
-            m.id as member_id, m.name as member_name
+            t.reference_id as member_id, {name_expr} as member_name
          FROM shg_transactions t
-         LEFT JOIN members m ON (
-             t.reference_type IN (
-                 'WEEKLY_CONTRIBUTION','MEMBER_RECEIPT','MEMBER_CONTRIBUTION',
-                 'MEMBER_PAYMENT','CHIT_PAYMENT','CHIT_COMMISSION'
-             ) AND t.reference_id = m.id
-         )
          WHERE t.created_at >= ?1
            AND t.created_at <= ?2
            AND t.txn_type IN ('RECEIPT', 'VOUCHER')
            AND t.payment_method = 'CASH'
          ORDER BY t.created_at ASC, t.id ASC",
+        name_expr = MEMBER_NAME_EXPR),
     )?;
 
     let rows = stmt.query_map([start_date, end_date], |row| {
@@ -301,22 +317,18 @@ pub fn get_bank_book_summary(
     end_date: &str,
 ) -> Result<DayBookSummary, AppError> {
     let mut stmt = conn.prepare(
+        &format!(
         "SELECT
             t.id, t.created_at, t.txn_type, t.amount, t.reason,
             t.payment_method, t.reference_type, t.reference_id,
-            m.id as member_id, m.name as member_name
+            t.reference_id as member_id, {name_expr} as member_name
          FROM shg_transactions t
-         LEFT JOIN members m ON (
-             t.reference_type IN (
-                 'WEEKLY_CONTRIBUTION','MEMBER_RECEIPT','MEMBER_CONTRIBUTION',
-                 'MEMBER_PAYMENT','CHIT_PAYMENT','CHIT_COMMISSION'
-             ) AND t.reference_id = m.id
-         )
          WHERE t.created_at >= ?1
            AND t.created_at <= ?2
            AND t.txn_type IN ('RECEIPT', 'VOUCHER')
            AND t.payment_method = 'BANK'
          ORDER BY t.created_at ASC, t.id ASC",
+        name_expr = MEMBER_NAME_EXPR),
     )?;
 
     let rows = stmt.query_map([start_date, end_date], |row| {

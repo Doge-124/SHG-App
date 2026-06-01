@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use crate::error::AppError;
 use crate::db::audit;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ShgTxn {
     id: i64,
     txn_type: String,
@@ -26,21 +26,59 @@ struct ShgTxn {
     created_at: String,
     voided_at: Option<i64>,
     reversal_of_id: Option<i64>,
+    group_id: Option<String>,
 }
 
 fn load_txn(conn: &Connection, txn_id: i64) -> Result<ShgTxn, AppError> {
     conn.query_row(
         "SELECT id, txn_type, amount, reason, payment_method, reference_type,
-                reference_id, created_at, voided_at, reversal_of_id
+                reference_id, created_at, voided_at, reversal_of_id, group_id
          FROM shg_transactions WHERE id = ?1",
         [txn_id],
         |r| Ok(ShgTxn {
             id: r.get(0)?, txn_type: r.get(1)?, amount: r.get(2)?,
             reason: r.get(3)?, payment_method: r.get(4)?, reference_type: r.get(5)?,
             reference_id: r.get(6)?, created_at: r.get(7)?,
-            voided_at: r.get(8)?, reversal_of_id: r.get(9)?,
+            voided_at: r.get(8)?, reversal_of_id: r.get(9)?, group_id: r.get(10)?,
         }),
     ).map_err(|_| AppError::business("Transaction not found"))
+}
+
+/// Total amount across a mixed-payment group (or just this row's amount when
+/// the transaction isn't part of a group). The derived row (loan_payment /
+/// chit_payment / member savings) carries the TOTAL, so cancellation must
+/// match against this, not the individual cash/bank half.
+fn group_total(conn: &Connection, txn: &ShgTxn) -> f64 {
+    match &txn.group_id {
+        Some(g) => conn.query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+             WHERE group_id = ?1 AND reversal_of_id IS NULL",
+            [g], |r| r.get(0),
+        ).unwrap_or(txn.amount),
+        None => txn.amount,
+    }
+}
+
+/// Void + reverse the clicked row AND every other live row in its mixed-payment
+/// group. Each row is reversed with its own real cash/bank amount, so balances
+/// stay correct. No-op beyond the single row when there's no group.
+fn void_group(tx: &rusqlite::Transaction, anchor: &ShgTxn, reason: &str) -> Result<(), AppError> {
+    void_and_reverse(tx, anchor, reason)?;
+    if let Some(g) = &anchor.group_id {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM shg_transactions
+             WHERE group_id = ?1 AND id != ?2
+               AND voided_at IS NULL AND reversal_of_id IS NULL",
+        )?;
+        let ids: Vec<i64> = stmt.query_map((g, anchor.id), |r| r.get(0))?
+            .filter_map(|r| r.ok()).collect();
+        drop(stmt);
+        for id in ids {
+            let sibling = load_txn(tx, id)?;
+            void_and_reverse(tx, &sibling, reason)?;
+        }
+    }
+    Ok(())
 }
 
 /// Public entry point. Caller is expected to verify admin PIN beforehand.
@@ -72,13 +110,16 @@ pub fn cancel_shg_transaction(
 
     // Dispatch — each branch is responsible for cleaning up any derived
     // state, then must call `void_and_reverse` to complete the bookkeeping.
+    // Total across the mixed-payment group (== txn.amount for single-method).
+    let total = group_total(conn, &txn);
+
     match txn.reference_type.as_deref() {
-        Some("MEMBER_LOAN")          => cancel_loan_disbursement(conn, &txn, reason),
-        Some("MEMBER_PAYMENT")       => cancel_loan_repayment(conn, &txn, reason),
-        Some("CHIT_PAYMENT")         => cancel_chit_installment(conn, &txn, reason),
+        Some("MEMBER_LOAN")          => cancel_loan_disbursement(conn, &txn, total, reason),
+        Some("MEMBER_PAYMENT")       => cancel_loan_repayment(conn, &txn, total, reason),
+        Some("CHIT_PAYMENT")         => cancel_chit_installment(conn, &txn, total, reason),
         Some("CHIT_PAYOUT")          => cancel_chit_payout_with_commission(conn, &txn, reason),
         Some("WEEKLY_CONTRIBUTION") | Some("MEMBER_CONTRIBUTION")
-                                     => cancel_member_contribution(conn, &txn, reason),
+                                     => cancel_member_contribution(conn, &txn, total, reason),
         _                            => cancel_manual(conn, &txn, reason),
     }
 }
@@ -143,7 +184,7 @@ fn cancel_manual(
     reason: &str,
 ) -> Result<(), AppError> {
     let tx = conn.transaction()?;
-    void_and_reverse(&tx, txn, reason)?;
+    void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
         Some(txn.id), &format!("manual {}, Rs.{}: {}", txn.txn_type, txn.amount, reason))?;
     tx.commit()?;
@@ -153,6 +194,7 @@ fn cancel_manual(
 fn cancel_loan_disbursement(
     conn: &mut Connection,
     txn: &ShgTxn,
+    total: f64,
     reason: &str,
 ) -> Result<(), AppError> {
     let member_id = txn.reference_id.ok_or_else(||
@@ -166,7 +208,7 @@ fn cancel_loan_disbursement(
          WHERE member_id = ?1 AND ABS(amount - ?2) < 0.005
            AND substr(issued_at, 1, 10) = ?3
          ORDER BY id DESC LIMIT 1",
-        (member_id, txn.amount, date_prefix),
+        (member_id, total, date_prefix),
         |r| r.get(0),
     ).ok();
 
@@ -211,10 +253,10 @@ fn cancel_loan_disbursement(
         void_and_reverse(&tx, &upfront, &format!("Auto-reversed with disbursement #{}", txn.id))?;
     }
 
-    void_and_reverse(&tx, txn, reason)?;
+    void_group(&tx, txn, reason)?;
 
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("MEMBER_LOAN disbursement reversed (loan #{}, Rs.{}): {}", loan_id, txn.amount, reason))?;
+        Some(txn.id), &format!("MEMBER_LOAN disbursement reversed (loan #{}, Rs.{}): {}", loan_id, total, reason))?;
     tx.commit()?;
     Ok(())
 }
@@ -222,6 +264,7 @@ fn cancel_loan_disbursement(
 fn cancel_loan_repayment(
     conn: &mut Connection,
     txn: &ShgTxn,
+    total: f64,
     reason: &str,
 ) -> Result<(), AppError> {
     let member_id = txn.reference_id.ok_or_else(||
@@ -234,7 +277,7 @@ fn cancel_loan_repayment(
          WHERE member_id = ?1 AND ABS(amount - ?2) < 0.005
            AND created_at = ?3 AND note != 'Upfront Interest'
          ORDER BY id DESC LIMIT 1",
-        (member_id, txn.amount, &txn.created_at),
+        (member_id, total, &txn.created_at),
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).ok();
 
@@ -295,6 +338,7 @@ fn cancel_loan_repayment(
 fn cancel_chit_installment(
     conn: &mut Connection,
     txn: &ShgTxn,
+    total: f64,
     reason: &str,
 ) -> Result<(), AppError> {
     let member_id = txn.reference_id.ok_or_else(||
@@ -306,7 +350,7 @@ fn cancel_chit_installment(
          WHERE member_id = ?1 AND ABS(amount - ?2) < 0.005
            AND paid_at = ?3
          ORDER BY id DESC LIMIT 1",
-        (member_id, txn.amount, &txn.created_at),
+        (member_id, total, &txn.created_at),
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).ok();
 
@@ -326,9 +370,9 @@ fn cancel_chit_installment(
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM chit_payments WHERE id = ?1", [payment_id])?;
-    void_and_reverse(&tx, txn, reason)?;
+    void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("CHIT_PAYMENT reversed (cycle #{}, Rs.{}): {}", cycle_id, txn.amount, reason))?;
+        Some(txn.id), &format!("CHIT_PAYMENT reversed (cycle #{}, Rs.{}): {}", cycle_id, total, reason))?;
     tx.commit()?;
     Ok(())
 }
@@ -376,6 +420,7 @@ fn cancel_chit_payout_with_commission(
 fn cancel_member_contribution(
     conn: &mut Connection,
     txn: &ShgTxn,
+    total: f64,
     reason: &str,
 ) -> Result<(), AppError> {
     let member_id = txn.reference_id.ok_or_else(||
@@ -387,14 +432,14 @@ fn cancel_member_contribution(
     tx.execute(
         "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
          ON CONFLICT(member_id) DO UPDATE SET balance = balance - ?2",
-        (member_id, txn.amount),
+        (member_id, total),
     )?;
 
     let deleted: usize = tx.execute(
         "DELETE FROM member_transactions
          WHERE member_id = ?1 AND txn_type = 'CONTRIBUTION'
            AND ABS(amount - ?2) < 0.005 AND created_at = ?3",
-        (member_id, txn.amount, &txn.created_at),
+        (member_id, total, &txn.created_at),
     )?;
 
     if deleted > 0 {
@@ -407,9 +452,9 @@ fn cancel_member_contribution(
         )?;
     }
 
-    void_and_reverse(&tx, txn, reason)?;
+    void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("CONTRIBUTION reversed (member #{}, Rs.{}): {}", member_id, txn.amount, reason))?;
+        Some(txn.id), &format!("CONTRIBUTION reversed (member #{}, Rs.{}): {}", member_id, total, reason))?;
     tx.commit()?;
     Ok(())
 }
