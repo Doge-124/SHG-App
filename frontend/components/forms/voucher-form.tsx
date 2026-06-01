@@ -110,6 +110,8 @@ export function VoucherForm({
     },
   })
 
+  const paymentMethod = form.watch('paymentMethod')
+
   const handleSubmit = async (data: VoucherFormData) => {
     await onSubmit(data)
     form.reset()
@@ -236,8 +238,8 @@ export function VoucherForm({
                 <FormItem>
                   <FormLabel>Payment Method</FormLabel>
                   <Select
-                    onValueChange={field.onChange}
-                    defaultValue={field.value}
+                    onValueChange={(v) => field.onChange(v)}
+                    value={field.value}
                   >
                     <FormControl>
                       <SelectTrigger>
@@ -253,6 +255,22 @@ export function VoucherForm({
                 </FormItem>
               )}
             />
+
+            {paymentMethod === 'bank' && (
+              <FormField
+                control={form.control}
+                name="bankTxnId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Bank Transaction ID (optional)</FormLabel>
+                    <FormControl>
+                      <Input placeholder="UTR / cheque / reference no." maxLength={64} {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             <div className="flex justify-end gap-3 pt-4">
               <Button

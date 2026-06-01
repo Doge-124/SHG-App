@@ -110,9 +110,12 @@ export interface ReceiptFormData {
   amount: number
   reasonType: string
   customReason?: string
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: 'cash' | 'bank' | 'mixed'
   referenceType?: string
   referenceId?: string
+  cashAmount?: number | null
+  bankAmount?: number | null
+  bankTxnId?: string | null
 }
 
 // Voucher Types (Money spent by SHG)
@@ -138,6 +141,7 @@ export interface VoucherFormData {
   customReason?: string
   paymentMethod: 'cash' | 'bank'
   reference?: string
+  bankTxnId?: string
 }
 
 // Chit Fund Types
@@ -177,6 +181,7 @@ export interface ChitMember {
   joinedAt: string
   isWinner: boolean
   winCycle?: number
+  passbookNumber?: string | null
 }
 
 export interface ChitCycleWinner {

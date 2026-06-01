@@ -1,8 +1,11 @@
 export interface WeeklyContributionInput {
   member_id: number
   amount: number
-  payment_method: 'CASH' | 'BANK'
+  payment_method: 'CASH' | 'BANK' | 'MIXED'
   note?: string
+  cash_amount?: number | null
+  bank_amount?: number | null
+  bank_txn_id?: string | null
 }
 
 export interface Receipt {
@@ -17,6 +20,7 @@ export interface Receipt {
   voided_at?: number | null
   voided_reason?: string | null
   reversal_of_id?: number | null
+  bank_txn_id?: string | null
 }
 
 export interface ReceiptWithMember extends Receipt {

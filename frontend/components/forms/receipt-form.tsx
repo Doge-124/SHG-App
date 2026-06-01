@@ -31,6 +31,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { getMembers } from '@/lib/api/members'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
+import { toast } from 'sonner'
 import type { Member, ReceiptFormData } from '@/lib/types'
 
 const receiptSchema = z.object({
@@ -38,7 +43,6 @@ const receiptSchema = z.object({
   amount: z.coerce.number().min(1, 'Amount must be at least Rs. 1'),
   reasonType: z.string().min(2, 'Reason is required'),
   customReason: z.string().optional(),
-  paymentMethod: z.enum(['cash', 'bank']),
   referenceType: z.string().optional(),
   referenceId: z.string().optional(),
 })
@@ -67,6 +71,7 @@ export function ReceiptForm({
   const [members, setMembers] = useState<Member[]>([])
   const [loadingMembers, setLoadingMembers] = useState(false)
   const [selectedReason, setSelectedReason] = useState('')
+  const [split, setSplit] = useState<PaymentSplit>(emptyPaymentSplit)
 
   useEffect(() => {
     const loadMembers = async () => {
@@ -88,22 +93,35 @@ export function ReceiptForm({
     }
   }, [open])
 
-  const form = useForm<ReceiptFormData>({
+  const form = useForm<Omit<ReceiptFormData, 'paymentMethod'>>({
     resolver: zodResolver(receiptSchema),
     defaultValues: {
       memberId: '',
       amount: 0,
       reasonType: '',
       customReason: '',
-      paymentMethod: 'cash',
       referenceType: '',
       referenceId: '',
     },
   })
 
-  const handleSubmit = async (data: ReceiptFormData) => {
-    await onSubmit(data)
+  const amount = form.watch('amount')
+
+  const handleSubmit = async (data: Omit<ReceiptFormData, 'paymentMethod'>) => {
+    if (!isPaymentSplitValid(split, Number(data.amount))) {
+      toast.error('Fix the cash/bank split — it must add up to the amount')
+      return
+    }
+    const args = paymentInvokeArgs(split)
+    await onSubmit({
+      ...data,
+      paymentMethod: args.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed',
+      cashAmount: args.cashAmount,
+      bankAmount: args.bankAmount,
+      bankTxnId: args.bankTxnId,
+    })
     form.reset()
+    setSplit(emptyPaymentSplit)
   }
 
   return (
@@ -220,29 +238,11 @@ export function ReceiptForm({
               />
             )}
 
-            <FormField
-              control={form.control}
-              name="paymentMethod"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Payment Method</FormLabel>
-                  <Select
-                    onValueChange={field.onChange}
-                    defaultValue={field.value}
-                  >
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="bank">Bank Transfer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
+            <PaymentMethodFields
+              total={Number(amount) || 0}
+              value={split}
+              onChange={setSplit}
+              idPrefix="receipt"
             />
 
             <div className="flex justify-end gap-3 pt-4">

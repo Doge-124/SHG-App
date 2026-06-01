@@ -20,10 +20,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Spinner } from '@/components/ui/spinner'
 import { recordWeeklyContribution } from '@/lib/api/receipts'
 import { getMembers } from '@/lib/api/members'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import type { Member } from '@/lib/types'
 
 interface WeeklyContributionFormProps {
@@ -36,7 +39,7 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
   const [members, setMembers] = useState<Member[]>([])
   const [selectedMemberId, setSelectedMemberId] = useState<string>('')
   const [amount, setAmount] = useState('')
-  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'BANK'>('CASH')
+  const [split, setSplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [note, setNote] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingMembers, setIsLoadingMembers] = useState(false)
@@ -76,18 +79,22 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
       return
     }
 
-    if (!paymentMethod) {
-      toast.error('Please select a payment method')
+    if (!isPaymentSplitValid(split, amountNum)) {
+      toast.error('Fix the cash/bank split — it must add up to the amount')
       return
     }
 
     setIsLoading(true)
     try {
+      const args = paymentInvokeArgs(split)
       const response = await recordWeeklyContribution({
         member_id: parseInt(selectedMemberId),
         amount: amountNum,
-        payment_method: paymentMethod,
-        note: note || undefined
+        payment_method: args.paymentMethod as 'CASH' | 'BANK' | 'MIXED',
+        note: note || undefined,
+        cash_amount: args.cashAmount,
+        bank_amount: args.bankAmount,
+        bank_txn_id: args.bankTxnId,
       })
 
       if (response.success) {
@@ -107,7 +114,7 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
   function handleClose() {
     setSelectedMemberId('')
     setAmount('')
-    setPaymentMethod('CASH')
+    setSplit(emptyPaymentSplit)
     setNote('')
     onClose()
   }
@@ -162,22 +169,12 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
           </div>
 
           {/* Payment Method */}
-          <div className="space-y-2">
-            <Label>Payment Method *</Label>
-            <RadioGroup
-              value={paymentMethod}
-              onValueChange={(value) => setPaymentMethod(value as 'CASH' | 'BANK')}
-            >
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="CASH" id="cash" />
-                <Label htmlFor="cash">Cash</Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="BANK" id="bank" />
-                <Label htmlFor="bank">Bank</Label>
-              </div>
-            </RadioGroup>
-          </div>
+          <PaymentMethodFields
+            total={parseFloat(amount) || 0}
+            value={split}
+            onChange={setSplit}
+            idPrefix="contrib"
+          />
 
           {/* Note */}
           <div className="space-y-2">
