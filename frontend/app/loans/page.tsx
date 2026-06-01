@@ -39,7 +39,7 @@ function amountBucket(n: number): string {
   if (n <= 20000) return 'medium'
   return 'large'
 }
-import { formatCurrency, formatDate } from '@/lib/format'
+import { formatCurrency, formatDate, loanRef } from '@/lib/format'
 import type { Loan, LoanFormData } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { Wallet, AlertCircle, CheckCircle } from 'lucide-react'
@@ -102,14 +102,27 @@ export default function LoansPage() {
     }
   }
 
-  const handleRepayment = async (data: { amount: number; paymentMethod: 'cash' | 'bank' }) => {
+  const handleRepayment = async (data: {
+    amount: number
+    paymentMethod: string
+    cashAmount: number | null
+    bankAmount: number | null
+    bankTxnId: string | null
+    note: string
+  }) => {
     if (!repaymentLoan) return
     setIsSubmitting(true)
     try {
       const response = await recordRepayment(
         repaymentLoan.id,
         data.amount,
-        data.paymentMethod,
+        {
+          paymentMethod: data.paymentMethod,
+          cashAmount: data.cashAmount,
+          bankAmount: data.bankAmount,
+          bankTxnId: data.bankTxnId,
+          note: data.note,
+        },
       )
       if (response.success) {
         if (notifs?.enableNotifications && notifs?.paymentConfirmations) {
@@ -117,7 +130,7 @@ export default function LoansPage() {
         }
         track('loan.repaid', {
           amount_bucket: amountBucket(data.amount),
-          payment_method: data.paymentMethod,
+          payment_method: data.paymentMethod.toLowerCase(),
         })
         setRepaymentLoan(null)
         refreshLoans()
@@ -132,6 +145,14 @@ export default function LoansPage() {
   }
 
   const columns: Column<Loan>[] = [
+    {
+      key: 'id',
+      header: 'Ref. No.',
+      cell: (loan) => (
+        <span className="font-mono text-sm font-medium">{loanRef(loan.id)}</span>
+      ),
+      sortable: true,
+    },
     {
       key: 'memberName',
       header: 'Member',
@@ -373,6 +394,7 @@ export default function LoansPage() {
         onSubmit={handleRepayment}
         loan={repaymentLoan}
         isLoading={isSubmitting}
+        onPrepaid={() => { setRepaymentLoan(null); refreshLoans() }}
       />
 
       <PastLoanForm

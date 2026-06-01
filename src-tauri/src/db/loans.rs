@@ -100,18 +100,23 @@ pub fn create_loan(
 
     let mut tx = conn.transaction()?;
 
+    // The SHG upfront interest covers the first upfront_days, so interest is
+    // settled through issued_at + upfront_days from the start.
+    let paid_through_init = parse_iso_date(created_at)
+        .map(|d| (d + chrono::Duration::days(upfront_days as i64)).to_string());
+
     let loan_id: i64 = if has_legacy {
         tx.query_row(
             "INSERT INTO loans
              (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
               total_repayable, interest_amount, upfront_interest_amount,
               payment_method, loan_type, note, status, issued_at, created_at,
-              principal, due_date)
-             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14)
+              interest_paid_through, principal, due_date)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14,?15)
              RETURNING id",
             (member_id, amount, outstanding, daily_interest_rate, amount,
              upfront_interest, upfront_interest, payment_method, loan_type, note,
-             created_at, created_at, amount, created_at),
+             created_at, created_at, &paid_through_init, amount, created_at),
             |row| row.get(0),
         )?
     } else {
@@ -119,12 +124,13 @@ pub fn create_loan(
             "INSERT INTO loans
              (member_id, amount, outstanding_amount, interest_rate, daily_interest_rate,
               total_repayable, interest_amount, upfront_interest_amount,
-              payment_method, loan_type, note, status, issued_at, created_at)
-             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12)
+              payment_method, loan_type, note, status, issued_at, created_at,
+              interest_paid_through)
+             VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13)
              RETURNING id",
             (member_id, amount, outstanding, daily_interest_rate, amount,
              upfront_interest, upfront_interest, payment_method, loan_type, note,
-             created_at, created_at),
+             created_at, created_at, &paid_through_init),
             |row| row.get(0),
         )?
     };
@@ -303,12 +309,11 @@ pub fn record_past_loan(
     }
 
     // 5. Process each repayment in chronological order using interest-first
-    // allocation. Interest accrues based on days between the previous event
-    // (issued_at for the first repayment, or the previous repayment date)
-    // and this repayment's date — but only after the upfront period ends.
+    // allocation. The paid-through marker starts at issued_at + upfront_days
+    // and advances to each repayment's date as interest is settled.
     let issued_date = parse_iso_date(issued_at)
         .ok_or_else(|| AppError::validation("Invalid loan issued_at"))?;
-    let interest_start = interest_start_date(issued_date, loan_type);
+    let mut paid_through = interest_start_date(issued_date, loan_type);
 
     // Sort defensively so the iterative accrual is order-independent.
     let mut sorted_reps: Vec<(f64, &str, &str)> = repayments.iter().copied().collect();
@@ -316,7 +321,6 @@ pub fn record_past_loan(
 
     let mut outstanding = outstanding_start;
     let mut unpaid_interest: f64 = 0.0;
-    let mut prev_date = issued_date;
 
     for (rep_amount, rep_method, rep_date) in sorted_reps {
         validation::validate_money_amount(rep_amount)?;
@@ -327,7 +331,7 @@ pub fn record_past_loan(
 
         let interest_due = interest_due_for(
             outstanding, unpaid_interest, daily_interest_rate,
-            prev_date, interest_start, paid_date,
+            paid_through, paid_date,
         );
 
         let (interest_paid, principal_paid, new_unpaid) =
@@ -335,7 +339,7 @@ pub fn record_past_loan(
 
         outstanding -= principal_paid;
         unpaid_interest = new_unpaid;
-        prev_date = paid_date;
+        paid_through = paid_date.max(paid_through);
 
         // loan_payments row with the computed split.
         tx.execute(
@@ -353,9 +357,10 @@ pub fn record_past_loan(
     let final_status = if outstanding <= 0.01 && unpaid_interest <= 0.01 { "paid" } else { "active" };
     tx.execute(
         "UPDATE loans
-         SET outstanding_amount = ?1, unpaid_interest_balance = ?2, status = ?3
-         WHERE id = ?4",
-        (outstanding, unpaid_interest, final_status, loan_id),
+         SET outstanding_amount = ?1, unpaid_interest_balance = ?2, status = ?3,
+             interest_paid_through = ?4
+         WHERE id = ?5",
+        (outstanding, unpaid_interest, final_status, paid_through.to_string(), loan_id),
     )?;
 
     tx.commit()?;
@@ -381,36 +386,39 @@ fn interest_start_date(issued_at: chrono::NaiveDate, loan_type: &str) -> chrono:
     issued_at + chrono::Duration::days(upfront_days_for(loan_type))
 }
 
-/// Date of the loan's most recent non-upfront payment, or None if there are
-/// no repayments yet. Used as the "previous event date" for interest accrual.
-fn last_payment_date(tx: &rusqlite::Transaction, loan_id: i64) -> Option<chrono::NaiveDate> {
-    let s: Option<String> = tx.query_row(
-        "SELECT MAX(created_at) FROM loan_payments
-         WHERE loan_id = ?1 AND note != 'Upfront Interest'",
-        [loan_id],
-        |r| r.get(0),
-    ).ok().flatten();
-    s.as_deref().and_then(parse_iso_date)
-}
 
 /// Compute total interest due as of `as_of` for a loan that currently has the
 /// given outstanding principal and unpaid-interest carry-over balance.
-/// `prev_date` is the reference point for accrual (last payment date or
-/// issued_at, whichever the caller knows). `as_of` < prev_date returns just
-/// the carry-over balance (no new accrual, no negative accrual).
+///
+/// Accrual only counts days strictly after `paid_through` (the date interest is
+/// settled through — covers the SHG upfront period and any voluntary prepaid
+/// months). `as_of <= paid_through` returns just the carry-over balance.
 fn interest_due_for(
     outstanding: f64,
     unpaid_balance: f64,
     daily_rate: f64,
-    prev_date: chrono::NaiveDate,
-    interest_start: chrono::NaiveDate,
+    paid_through: chrono::NaiveDate,
     as_of: chrono::NaiveDate,
 ) -> f64 {
-    let effective_start = prev_date.max(interest_start);
-    let days = (as_of - effective_start).num_days().max(0) as f64;
+    let days = (as_of - paid_through).num_days().max(0) as f64;
     let new_accrual = outstanding * daily_rate / 100.0 * days;
     let total = unpaid_balance + new_accrual;
     (total * 100.0).round() / 100.0
+}
+
+/// The accrual floor for a loan: the later of its stored `interest_paid_through`
+/// and the upfront-covered start date (issued_at + upfront_days). Older loans
+/// without the column fall back to the upfront start.
+fn paid_through_floor(
+    interest_paid_through: Option<&str>,
+    issued_at: chrono::NaiveDate,
+    loan_type: &str,
+) -> chrono::NaiveDate {
+    let upfront_start = interest_start_date(issued_at, loan_type);
+    match interest_paid_through.and_then(parse_iso_date) {
+        Some(d) => d.max(upfront_start),
+        None => upfront_start,
+    }
 }
 
 /// Pure split function: allocate `amount` to interest first, then principal.
@@ -446,28 +454,21 @@ pub fn current_interest_due(
     loan_id: i64,
     as_of: chrono::NaiveDate,
 ) -> Result<f64, AppError> {
-    let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type): (f64, f64, f64, String, String) =
+    let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, paid_through):
+        (f64, f64, f64, String, String, Option<String>) =
         conn.query_row(
             "SELECT outstanding_amount, COALESCE(unpaid_interest_balance, 0),
-                    COALESCE(daily_interest_rate, 0), issued_at, loan_type
+                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, interest_paid_through
              FROM loans WHERE id = ?1",
             [loan_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         ).map_err(|_| AppError::business("Loan not found"))?;
 
     let issued_at = parse_iso_date(&issued_at_str)
         .ok_or_else(|| AppError::business("Invalid loan issued_at"))?;
-    let interest_start = interest_start_date(issued_at, &loan_type);
+    let floor = paid_through_floor(paid_through.as_deref(), issued_at, &loan_type);
 
-    // Use the last payment date as prev_date if any, else issued_at.
-    let prev_date: Option<chrono::NaiveDate> = conn.query_row(
-        "SELECT MAX(created_at) FROM loan_payments
-         WHERE loan_id = ?1 AND note != 'Upfront Interest'",
-        [loan_id], |r| r.get::<_, Option<String>>(0),
-    ).ok().flatten().as_deref().and_then(parse_iso_date);
-    let prev_date = prev_date.unwrap_or(issued_at);
-
-    Ok(interest_due_for(outstanding, unpaid_balance, daily_rate, prev_date, interest_start, as_of))
+    Ok(interest_due_for(outstanding, unpaid_balance, daily_rate, floor, as_of))
 }
 
 /// Preview the split of a payment without committing. Returns
@@ -480,13 +481,14 @@ pub fn preview_loan_payment(
 ) -> Result<(f64, f64, f64, f64, f64), AppError> {
     validation::validate_money_amount(amount)?;
 
-    let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status): (f64, f64, f64, String, String, String) =
+    let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status, paid_through):
+        (f64, f64, f64, String, String, String, Option<String>) =
         conn.query_row(
             "SELECT outstanding_amount, COALESCE(unpaid_interest_balance, 0),
-                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status
+                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status, interest_paid_through
              FROM loans WHERE id = ?1",
             [loan_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         ).map_err(|_| AppError::business("Loan not found"))?;
 
     if status == "paid" {
@@ -495,16 +497,9 @@ pub fn preview_loan_payment(
 
     let issued_at = parse_iso_date(&issued_at_str)
         .ok_or_else(|| AppError::business("Invalid loan issued_at"))?;
-    let interest_start = interest_start_date(issued_at, &loan_type);
+    let floor = paid_through_floor(paid_through.as_deref(), issued_at, &loan_type);
 
-    let prev_date: Option<chrono::NaiveDate> = conn.query_row(
-        "SELECT MAX(created_at) FROM loan_payments
-         WHERE loan_id = ?1 AND note != 'Upfront Interest'",
-        [loan_id], |r| r.get::<_, Option<String>>(0),
-    ).ok().flatten().as_deref().and_then(parse_iso_date);
-    let prev_date = prev_date.unwrap_or(issued_at);
-
-    let interest_due = interest_due_for(outstanding, unpaid_balance, daily_rate, prev_date, interest_start, as_of);
+    let interest_due = interest_due_for(outstanding, unpaid_balance, daily_rate, floor, as_of);
     let (interest_paid, principal_paid, new_unpaid) =
         split_payment_interest_first(amount, interest_due, outstanding)?;
 
@@ -519,29 +514,48 @@ pub fn preview_loan_payment(
 /// beyond interest + outstanding is rejected. The borrower may pay any
 /// positive amount, including less than the interest due (the shortfall
 /// carries over via `loans.unpaid_interest_balance`).
+#[allow(clippy::too_many_arguments)]
 pub fn record_loan_payment(
     conn: &mut Connection,
     loan_id: i64,
     amount: f64,
-    payment_method: &str,
+    payment_method: &str,           // CASH | BANK | MIXED
     note: &str,
     created_at: &str,
+    cash_amount: Option<f64>,       // required when MIXED
+    bank_amount: Option<f64>,       // required when MIXED
+    bank_txn_id: Option<&str>,      // optional bank reference
 ) -> Result<(), AppError> {
     validation::validate_money_amount(amount)?;
-    validation::validate_payment_method(payment_method)?;
+    // Allow CASH, BANK, or MIXED. For MIXED the split must reconcile to amount.
+    let (cash_part, bank_part) = match payment_method {
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - amount).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the payment amount"));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
 
     let paid_date = parse_iso_date(created_at)
         .ok_or_else(|| AppError::validation("Invalid created_at date"))?;
 
     let mut tx = conn.transaction()?;
 
-    let (member_id, outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status):
-        (i64, f64, f64, f64, String, String, String) = tx.query_row(
+    let (member_id, outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status, paid_through):
+        (i64, f64, f64, f64, String, String, String, Option<String>) = tx.query_row(
             "SELECT member_id, outstanding_amount, COALESCE(unpaid_interest_balance, 0),
-                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status
+                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status, interest_paid_through
              FROM loans WHERE id = ?1",
             [loan_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
         )?;
 
     if status == "paid" {
@@ -550,21 +564,26 @@ pub fn record_loan_payment(
 
     let issued_at = parse_iso_date(&issued_at_str)
         .ok_or_else(|| AppError::business("Invalid loan issued_at"))?;
-    let interest_start = interest_start_date(issued_at, &loan_type);
-    let prev_date = last_payment_date(&tx, loan_id).unwrap_or(issued_at);
+    let floor = paid_through_floor(paid_through.as_deref(), issued_at, &loan_type);
 
-    let interest_due = interest_due_for(outstanding, unpaid_balance, daily_rate, prev_date, interest_start, paid_date);
+    let interest_due = interest_due_for(outstanding, unpaid_balance, daily_rate, floor, paid_date);
     let (interest_paid, principal_paid, new_unpaid) =
         split_payment_interest_first(amount, interest_due, outstanding)?;
 
     let new_outstanding = outstanding - principal_paid;
     let new_status = if new_outstanding <= 0.01 && new_unpaid <= 0.01 { "paid" } else { "active" };
 
+    // A normal payment settles interest up to the payment date. Advance the
+    // paid-through marker to max(payment date, current floor) so it never moves
+    // backward and any voluntarily-prepaid future interest is preserved.
+    let new_paid_through = paid_date.max(floor);
+
     tx.execute(
         "UPDATE loans
-         SET outstanding_amount = ?1, unpaid_interest_balance = ?2, status = ?3
-         WHERE id = ?4",
-        (new_outstanding, new_unpaid, new_status, loan_id),
+         SET outstanding_amount = ?1, unpaid_interest_balance = ?2, status = ?3,
+             interest_paid_through = ?4
+         WHERE id = ?5",
+        (new_outstanding, new_unpaid, new_status, new_paid_through.to_string(), loan_id),
     )?;
 
     let receipt_note = note.to_string();
@@ -576,24 +595,208 @@ pub fn record_loan_payment(
     tx.execute(
         "INSERT INTO loan_payments
            (loan_id, member_id, amount, principal_amount, interest_amount,
-            payment_method, note, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            payment_method, note, created_at, cash_amount, bank_amount)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         (loan_id, member_id, amount, principal_paid, interest_paid,
-         payment_method, &receipt_note, created_at),
+         payment_method, &receipt_note, created_at, cash_part, bank_part),
     )?;
 
-    ledger::record_receipt(
-        &mut tx,
-        amount,
-        &receipt_note,
-        payment_method,
-        Some("MEMBER_PAYMENT"),
-        Some(member_id),
-        created_at,
-    )?;
+    if payment_method == "MIXED" {
+        ledger::record_receipt_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            &receipt_note,
+            Some("MEMBER_PAYMENT"),
+            Some(member_id),
+            created_at,
+            bank_txn_id,
+        )?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_receipt_ex(
+            &mut tx,
+            amount,
+            &receipt_note,
+            payment_method,
+            Some("MEMBER_PAYMENT"),
+            Some(member_id),
+            created_at,
+            bank_txn,
+            None,
+        )?;
+    }
 
     tx.commit()?;
     Ok(())
+}
+
+/// Result of a voluntary interest prepayment.
+pub struct PrepayResult {
+    pub arrears_cleared: f64,        // interest accrued up to today that this settled
+    pub month_interest: f64,         // 30 days of interest prepaid
+    pub total_paid: f64,             // arrears_cleared + month_interest
+    pub new_paid_through: String,    // date interest is now covered through
+}
+
+/// Voluntarily prepay one month (flat 30 days) of interest. Settles any
+/// interest accrued up to `paid_date`, then advances the paid-through marker
+/// 30 days beyond the later of today or the current paid-through. No principal
+/// is touched. Records a single MEMBER_PAYMENT receipt + a loan_payments row
+/// (all interest), with note "Interest Payment".
+#[allow(clippy::too_many_arguments)]
+pub fn prepay_loan_interest(
+    conn: &mut Connection,
+    loan_id: i64,
+    payment_method: &str,
+    created_at: &str,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<&str>,
+) -> Result<PrepayResult, AppError> {
+    let paid_date = parse_iso_date(created_at)
+        .ok_or_else(|| AppError::validation("Invalid created_at date"))?;
+
+    let mut tx = conn.transaction()?;
+
+    let (member_id, outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status, paid_through):
+        (i64, f64, f64, f64, String, String, String, Option<String>) = tx.query_row(
+            "SELECT member_id, outstanding_amount, COALESCE(unpaid_interest_balance, 0),
+                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status, interest_paid_through
+             FROM loans WHERE id = ?1",
+            [loan_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        ).map_err(|_| AppError::business("Loan not found"))?;
+
+    if status == "paid" {
+        return Err(AppError::business("This loan has already been fully repaid"));
+    }
+    if daily_rate <= 0.0 {
+        return Err(AppError::business("This loan has no interest rate — nothing to prepay."));
+    }
+
+    let issued_at = parse_iso_date(&issued_at_str)
+        .ok_or_else(|| AppError::business("Invalid loan issued_at"))?;
+    let floor = paid_through_floor(paid_through.as_deref(), issued_at, &loan_type);
+
+    // Arrears = interest accrued up to today (carry-over + accrual since floor).
+    let arrears = interest_due_for(outstanding, unpaid_balance, daily_rate, floor, paid_date);
+
+    // One flat month of interest on the outstanding principal.
+    let month_interest = (outstanding * daily_rate / 100.0 * 30.0 * 100.0).round() / 100.0;
+
+    let total = ((arrears + month_interest) * 100.0).round() / 100.0;
+    validation::validate_money_amount(total)?;
+
+    // Validate the cash/bank split if MIXED.
+    let (cash_part, bank_part) = match payment_method {
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - total).abs() > 0.01 {
+                return Err(AppError::validation(&format!(
+                    "Cash + bank must equal the prepayment total of {total:.2}"
+                )));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
+
+    // New paid-through: 30 days past the later of today and the current floor.
+    // (If they're already prepaid into the future, this stacks another month on.)
+    let base = paid_date.max(floor);
+    let new_paid_through = base + chrono::Duration::days(30);
+
+    // Arrears are now settled and the future month is prepaid → no carry-over.
+    tx.execute(
+        "UPDATE loans
+         SET unpaid_interest_balance = 0, interest_paid_through = ?1
+         WHERE id = ?2",
+        (new_paid_through.to_string(), loan_id),
+    )?;
+
+    let note = "Interest Payment";
+    tx.execute(
+        "INSERT INTO loan_payments
+           (loan_id, member_id, amount, principal_amount, interest_amount,
+            payment_method, note, created_at, cash_amount, bank_amount)
+         VALUES (?1, ?2, ?3, 0, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (loan_id, member_id, total, payment_method, note, created_at, cash_part, bank_part),
+    )?;
+
+    if payment_method == "MIXED" {
+        ledger::record_receipt_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            note,
+            Some("MEMBER_PAYMENT"),
+            Some(member_id),
+            created_at,
+            bank_txn_id,
+        )?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_receipt_ex(
+            &mut tx,
+            total,
+            note,
+            payment_method,
+            Some("MEMBER_PAYMENT"),
+            Some(member_id),
+            created_at,
+            bank_txn,
+            None,
+        )?;
+    }
+
+    tx.commit()?;
+
+    Ok(PrepayResult {
+        arrears_cleared: arrears,
+        month_interest,
+        total_paid: total,
+        new_paid_through: new_paid_through.to_string(),
+    })
+}
+
+/// Preview a one-month interest prepayment. Returns
+/// (arrears, month_interest, total, new_paid_through). Read-only.
+pub fn preview_prepay_interest(
+    conn: &Connection,
+    loan_id: i64,
+    as_of: chrono::NaiveDate,
+) -> Result<(f64, f64, f64, String), AppError> {
+    let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status, paid_through):
+        (f64, f64, f64, String, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT outstanding_amount, COALESCE(unpaid_interest_balance, 0),
+                    COALESCE(daily_interest_rate, 0), issued_at, loan_type, status, interest_paid_through
+             FROM loans WHERE id = ?1",
+            [loan_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).map_err(|_| AppError::business("Loan not found"))?;
+
+    if status == "paid" {
+        return Err(AppError::business("This loan has already been fully repaid"));
+    }
+
+    let issued_at = parse_iso_date(&issued_at_str)
+        .ok_or_else(|| AppError::business("Invalid loan issued_at"))?;
+    let floor = paid_through_floor(paid_through.as_deref(), issued_at, &loan_type);
+
+    let arrears = interest_due_for(outstanding, unpaid_balance, daily_rate, floor, as_of);
+    let month_interest = (outstanding * daily_rate / 100.0 * 30.0 * 100.0).round() / 100.0;
+    let total = ((arrears + month_interest) * 100.0).round() / 100.0;
+    let base = as_of.max(floor);
+    let new_through = (base + chrono::Duration::days(30)).to_string();
+
+    Ok((arrears, month_interest, total, new_through))
 }
 
 /// Fetch a single loan by its ID, joining member name.

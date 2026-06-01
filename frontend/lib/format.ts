@@ -7,6 +7,13 @@ export function formatCurrency(amount: number): string {
   }).format(amount)
 }
 
+// Human-friendly loan reference derived from the loan's row id (LN-0007).
+export function loanRef(id: string | number): string {
+  const n = typeof id === 'number' ? id : parseInt(id, 10)
+  if (!Number.isFinite(n)) return `LN-${id}`
+  return `LN-${String(n).padStart(4, '0')}`
+}
+
 export function formatDate(dateString: string): string {
   return new Date(dateString).toLocaleDateString('en-IN', {
     day: '2-digit',

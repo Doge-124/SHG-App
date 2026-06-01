@@ -213,6 +213,7 @@ pub fn issue_member_loan(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn record_member_payment(
     state: State<Mutex<AppState>>,
     loan_id: i64,
@@ -220,6 +221,9 @@ pub fn record_member_payment(
     payment_method: String,
     note: String,
     created_at: String,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<String>,
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -234,6 +238,9 @@ pub fn record_member_payment(
         &payment_method,
         &note,
         &created_at,
+        cash_amount,
+        bank_amount,
+        bank_txn_id.as_deref(),
     ).map_err(|e: AppError| e.to_string())?;
 
     db::audit::log_audit(conn, "LOAN_REPAYMENT", "loan", Some(loan_id),
@@ -280,6 +287,85 @@ pub fn preview_loan_payment(
         principal_portion,
         new_outstanding,
         new_unpaid_interest,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepayResult {
+    pub arrears_cleared: f64,
+    pub month_interest: f64,
+    pub total_paid: f64,
+    pub new_paid_through: String,
+}
+
+/// Voluntarily prepay one flat month (30 days) of interest. Clears any
+/// outstanding interest accrued to date, then advances the loan's
+/// interest-paid-through date 30 days forward so no further interest accrues
+/// until then. Records a single "Interest Payment" receipt.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn prepay_loan_interest(
+    state: State<Mutex<AppState>>,
+    loan_id: i64,
+    payment_method: String,
+    created_at: String,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<String>,
+) -> Result<PrepayResult, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let r = db::loans::prepay_loan_interest(
+        conn,
+        loan_id,
+        &payment_method,
+        &created_at,
+        cash_amount,
+        bank_amount,
+        bank_txn_id.as_deref(),
+    ).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "LOAN_INTEREST_PREPAID", "loan", Some(loan_id),
+        &format!("₹{} prepaid (arrears ₹{}, month ₹{}), covered through {}",
+            r.total_paid, r.arrears_cleared, r.month_interest, r.new_paid_through));
+
+    Ok(PrepayResult {
+        arrears_cleared: r.arrears_cleared,
+        month_interest: r.month_interest,
+        total_paid: r.total_paid,
+        new_paid_through: r.new_paid_through,
+    })
+}
+
+/// Preview a one-month interest prepayment without writing. Returns the same
+/// shape as the actual prepay so the UI can show the amount + covered-through.
+#[tauri::command]
+pub fn preview_prepay_interest(
+    state: State<Mutex<AppState>>,
+    loan_id: i64,
+    paid_at: String,
+) -> Result<PrepayResult, String> {
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let paid_date = if paid_at.len() >= 10 {
+        chrono::NaiveDate::parse_from_str(&paid_at[..10], "%Y-%m-%d")
+            .map_err(|_| "Invalid paid_at date".to_string())?
+    } else {
+        return Err("Invalid paid_at date".to_string());
+    };
+
+    let (arrears, month_interest, total, new_through) =
+        db::loans::preview_prepay_interest(conn, loan_id, paid_date)
+            .map_err(|e: AppError| e.to_string())?;
+
+    Ok(PrepayResult {
+        arrears_cleared: arrears,
+        month_interest,
+        total_paid: total,
+        new_paid_through: new_through,
     })
 }
 

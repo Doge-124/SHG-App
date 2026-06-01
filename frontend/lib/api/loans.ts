@@ -124,18 +124,29 @@ export async function issueLoan(data: LoanFormData): Promise<ApiResponse<Loan>> 
   }
 }
 
+export interface RepaymentOptions {
+  paymentMethod: string                 // CASH | BANK | MIXED
+  cashAmount?: number | null
+  bankAmount?: number | null
+  bankTxnId?: string | null
+  note?: string                         // e.g. 'Loan Repayment' | 'Interest Payment'
+}
+
 export async function recordRepayment(
   loanId: string,
   amount: number,
-  paymentMethod: 'cash' | 'bank'
+  opts: RepaymentOptions,
 ): Promise<ApiResponse<void>> {
   try {
     await invoke('record_member_payment', {
       loanId: parseInt(loanId),
       amount,
-      paymentMethod: paymentMethod.toUpperCase(),
-      note: 'Loan Repayment',
+      paymentMethod: opts.paymentMethod,
+      note: opts.note ?? 'Loan Repayment',
       createdAt: new Date().toISOString(),
+      cashAmount: opts.cashAmount ?? null,
+      bankAmount: opts.bankAmount ?? null,
+      bankTxnId: opts.bankTxnId ?? null,
     })
     return { success: true }
   } catch (error) {
@@ -150,6 +161,49 @@ export interface LoanPaymentPreview {
   principalPortion: number
   newOutstanding: number
   newUnpaidInterest: number
+}
+
+export interface PrepayResult {
+  arrearsCleared: number
+  monthInterest: number
+  totalPaid: number
+  newPaidThrough: string   // YYYY-MM-DD
+}
+
+/** Preview a one-month interest prepayment (clears arrears + 30 days ahead). */
+export async function previewPrepayInterest(
+  loanId: string,
+  paidAt: string = new Date().toISOString(),
+): Promise<ApiResponse<PrepayResult>> {
+  try {
+    const data = await invoke<PrepayResult>('preview_prepay_interest', {
+      loanId: parseInt(loanId),
+      paidAt,
+    })
+    return { success: true, data }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to preview prepayment' }
+  }
+}
+
+/** Record a one-month interest prepayment. */
+export async function prepayLoanInterest(
+  loanId: string,
+  opts: { paymentMethod: string; cashAmount?: number | null; bankAmount?: number | null; bankTxnId?: string | null },
+): Promise<ApiResponse<PrepayResult>> {
+  try {
+    const data = await invoke<PrepayResult>('prepay_loan_interest', {
+      loanId: parseInt(loanId),
+      paymentMethod: opts.paymentMethod,
+      createdAt: new Date().toISOString(),
+      cashAmount: opts.cashAmount ?? null,
+      bankAmount: opts.bankAmount ?? null,
+      bankTxnId: opts.bankTxnId ?? null,
+    })
+    return { success: true, data }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to prepay interest' }
+  }
 }
 
 /**

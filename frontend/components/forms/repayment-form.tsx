@@ -9,68 +9,67 @@ import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Spinner } from '@/components/ui/spinner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, Coins } from 'lucide-react'
 import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-  FormDescription,
+  Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription,
 } from '@/components/ui/form'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
+import { toast } from 'sonner'
+import { formatCurrency, formatDate } from '@/lib/format'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { formatCurrency } from '@/lib/format'
-import { previewRepayment, type LoanPaymentPreview } from '@/lib/api/loans'
+  previewRepayment, previewPrepayInterest, prepayLoanInterest,
+  type LoanPaymentPreview, type PrepayResult,
+} from '@/lib/api/loans'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import type { Loan } from '@/lib/types'
 
-interface RepaymentFormData {
+export interface RepaymentSubmit {
   amount: number
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: string
+  cashAmount: number | null
+  bankAmount: number | null
+  bankTxnId: string | null
+  note: string
 }
 
 interface RepaymentFormProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSubmit: (data: RepaymentFormData) => Promise<void>
+  onSubmit: (data: RepaymentSubmit) => Promise<void>
   loan: Loan | null
   isLoading?: boolean
+  /** Called after a successful prepayment so the parent can refresh. */
+  onPrepaid?: () => void
 }
 
 const repaymentSchema = z.object({
-  // Any positive amount is allowed. Backend rejects overpayment beyond
-  // interest_due + outstanding; partial payments (less than interest due)
-  // are accepted and the shortfall carries over to the next payment.
   amount: z.coerce.number().positive('Amount must be greater than 0'),
-  paymentMethod: z.enum(['cash', 'bank']),
 })
 
-export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = false }: RepaymentFormProps) {
+type Mode = 'repay' | 'prepay'
+
+export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = false, onPrepaid }: RepaymentFormProps) {
+  const [mode, setMode] = useState<Mode>('repay')
   const [preview, setPreview] = useState<LoanPaymentPreview | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [loadingPreview, setLoadingPreview] = useState(false)
+  const [split, setSplit] = useState<PaymentSplit>(emptyPaymentSplit)
+  // Prepay state
+  const [prepay, setPrepay] = useState<PrepayResult | null>(null)
+  const [prepayBusy, setPrepayBusy] = useState(false)
 
-  const form = useForm<RepaymentFormData>({
+  const form = useForm<{ amount: number }>({
     resolver: zodResolver(repaymentSchema),
-    defaultValues: { amount: 0, paymentMethod: 'cash' },
+    defaultValues: { amount: 0 },
   })
 
   const amount = form.watch('amount')
 
-  // Re-fetch preview whenever the amount or loan changes (with a small debounce).
   useEffect(() => {
     if (!open || !loan) { setPreview(null); setPreviewError(null); return }
     const parsed = Number(amount)
@@ -85,34 +84,87 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
     return () => { clearTimeout(t); setLoadingPreview(false) }
   }, [open, loan?.id, amount])
 
-  // When the dialog opens, suggest "interest only" as a starting amount —
-  // gives the loan officer the smallest payment that keeps interest current.
+  // Seed amount = interest + outstanding on open; reset split + mode.
   useEffect(() => {
     if (!open || !loan) return
+    setSplit(emptyPaymentSplit)
+    setMode('repay')
+    setPrepay(null)
     ;(async () => {
-      // Fetch the current interest due by previewing a tiny payment.
-      // We use 0.01 so the preview returns interest_due without rejecting.
       const r = await previewRepayment(loan.id, 0.01)
       const seed = r.success && r.data
         ? Math.round((r.data.interestDue + loan.outstandingAmount) * 100) / 100
         : loan.outstandingAmount
-      form.reset({ amount: seed, paymentMethod: 'cash' })
+      form.reset({ amount: seed })
     })()
   }, [open, loan?.id])
 
-  const handleSubmit = async (data: RepaymentFormData) => {
-    await onSubmit(data)
+  // When switching to prepay mode, fetch the previewed prepayment.
+  useEffect(() => {
+    if (mode !== 'prepay' || !loan) return
+    setSplit(emptyPaymentSplit)
+    ;(async () => {
+      const r = await previewPrepayInterest(loan.id)
+      if (r.success && r.data) { setPrepay(r.data); setPreviewError(null) }
+      else { setPrepay(null); setPreviewError(r.error ?? 'Could not compute prepayment') }
+    })()
+  }, [mode, loan?.id])
+
+  const handleSubmit = async (data: { amount: number }) => {
+    if (!loan) return
+    if (!isPaymentSplitValid(split, data.amount)) {
+      setPreviewError('Fix the cash/bank split — it must add up to the payment amount.')
+      return
+    }
+    const args = paymentInvokeArgs(split)
+    await onSubmit({
+      amount: data.amount,
+      ...args,
+      note: 'Loan Repayment',
+    })
     form.reset()
+    setSplit(emptyPaymentSplit)
+  }
+
+  const handlePrepaySubmit = async () => {
+    if (!loan || !prepay) return
+    if (!isPaymentSplitValid(split, prepay.totalPaid)) {
+      setPreviewError('Fix the cash/bank split — it must add up to the prepayment total.')
+      return
+    }
+    setPrepayBusy(true)
+    try {
+      const args = paymentInvokeArgs(split)
+      const r = await prepayLoanInterest(loan.id, {
+        paymentMethod: args.paymentMethod,
+        cashAmount: args.cashAmount,
+        bankAmount: args.bankAmount,
+        bankTxnId: args.bankTxnId,
+      })
+      if (r.success && r.data) {
+        toast.success(`Interest prepaid — covered through ${formatDate(r.data.newPaidThrough)}`)
+        onPrepaid?.()
+        onOpenChange(false)
+      } else {
+        setPreviewError(r.error ?? 'Failed to prepay interest')
+      }
+    } finally {
+      setPrepayBusy(false)
+    }
   }
 
   if (!loan) return null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Record Loan Repayment</DialogTitle>
-          <DialogDescription>Record a repayment for {loan.memberName}&apos;s loan.</DialogDescription>
+          <DialogTitle>{mode === 'prepay' ? 'Prepay Interest' : 'Record Loan Repayment'}</DialogTitle>
+          <DialogDescription>
+            {mode === 'prepay'
+              ? `Pay one month of interest in advance for ${loan.memberName}'s loan.`
+              : `Record a repayment for ${loan.memberName}'s loan.`}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="rounded-lg bg-muted p-4 space-y-2 text-sm">
@@ -133,6 +185,78 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
           </div>
         </div>
 
+        {/* Mode toggle (monthly loans only offer prepay) */}
+        {loan.loanType === 'monthly' && (
+          <div className="flex gap-2">
+            <Button type="button" size="sm" variant={mode === 'repay' ? 'default' : 'outline'}
+              className="flex-1" onClick={() => { setMode('repay'); setPreviewError(null) }}>
+              Repayment
+            </Button>
+            <Button type="button" size="sm" variant={mode === 'prepay' ? 'default' : 'outline'}
+              className="flex-1" onClick={() => { setMode('prepay'); setPreviewError(null) }}>
+              <Coins className="h-3.5 w-3.5 mr-1" />Prepay 1 month interest
+            </Button>
+          </div>
+        )}
+
+        {previewError && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription className="text-sm">{previewError}</AlertDescription>
+          </Alert>
+        )}
+
+        {mode === 'prepay' ? (
+          <div className="space-y-4">
+            {!prepay ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Spinner className="h-3 w-3" /> Calculating…
+              </div>
+            ) : (
+              <div className="rounded-lg border p-3 space-y-1.5 text-sm">
+                {prepay.arrearsCleared > 0.005 && (
+                  <div className="flex justify-between text-orange-600">
+                    <span>Interest accrued so far</span>
+                    <span className="font-semibold">{formatCurrency(prepay.arrearsCleared)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">+ 30 days interest (advance)</span>
+                  <span className="font-medium">{formatCurrency(prepay.monthInterest)}</span>
+                </div>
+                <Separator />
+                <div className="flex justify-between font-semibold">
+                  <span>Total to pay now</span>
+                  <span>{formatCurrency(prepay.totalPaid)}</span>
+                </div>
+                <div className="flex justify-between text-green-700">
+                  <span>Interest covered through</span>
+                  <span className="font-medium">{formatDate(prepay.newPaidThrough)}</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground pt-1">
+                  No further interest accrues until that date. Principal is unchanged.
+                </p>
+              </div>
+            )}
+
+            <PaymentMethodFields
+              total={prepay?.totalPaid ?? 0}
+              value={split}
+              onChange={setSplit}
+              idPrefix="prepay"
+            />
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={prepayBusy}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={handlePrepaySubmit} disabled={prepayBusy || !prepay}>
+                {prepayBusy && <Spinner className="mr-2 h-4 w-4" />}
+                Pay {prepay ? formatCurrency(prepay.totalPaid) : ''}
+              </Button>
+            </div>
+          </div>
+        ) : (
         <Form {...form}>
           <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
             <FormField
@@ -151,13 +275,6 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
                 </FormItem>
               )}
             />
-
-            {previewError && (
-              <Alert variant="destructive">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription className="text-sm">{previewError}</AlertDescription>
-              </Alert>
-            )}
 
             {loadingPreview && !preview && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -194,24 +311,11 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
               </div>
             )}
 
-            <FormField
-              control={form.control}
-              name="paymentMethod"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Payment Method</FormLabel>
-                  <Select onValueChange={field.onChange} defaultValue={field.value}>
-                    <FormControl>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="bank">Bank Transfer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
+            <PaymentMethodFields
+              total={Number(amount) || 0}
+              value={split}
+              onChange={setSplit}
+              idPrefix="repay"
             />
 
             <div className="flex justify-end gap-3 pt-2">
@@ -225,6 +329,7 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
             </div>
           </form>
         </Form>
+        )}
       </DialogContent>
     </Dialog>
   )

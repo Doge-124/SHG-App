@@ -25,7 +25,7 @@ import { getMemberProfile, setMemberOpeningData, updateMemberType } from '@/lib/
 import { useSettings } from '@/lib/settings-context'
 import { getMemberLoans } from '@/lib/api/loans'
 import { invoke } from '@tauri-apps/api/core'
-import { formatCurrency, formatPhone, formatDate } from '@/lib/format'
+import { formatCurrency, formatPhone, formatDate, loanRef } from '@/lib/format'
 import { useToast } from '@/hooks/use-toast'
 import type { MemberProfile, Loan, OpeningDataInput } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -583,6 +583,7 @@ function LoanList({ loans }: { loans: Loan[] }) {
               <div key={loan.id} className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
                 <div>
                   <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-muted-foreground">{loanRef(loan.id)}</span>
                     <p className="font-medium">{formatCurrency(loan.amount)}</p>
                     <Badge
                       variant={loan.status === 'active' ? 'default' : 'secondary'}
@@ -696,7 +697,14 @@ function ChitList({ chitGroups }: { chitGroups: any[] }) {
                 <div key={group.id} className="p-4 rounded-lg bg-muted/50 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="font-medium">{group.name}</p>
+                      <p className="font-medium">
+                        {group.name}
+                        {group.passbookNumber && (
+                          <span className="ml-2 font-mono text-xs text-muted-foreground">
+                            Passbook {group.passbookNumber}
+                          </span>
+                        )}
+                      </p>
                       <p className="text-sm text-muted-foreground mt-0.5">
                         Monthly: {formatCurrency(group.monthlyContribution)} · Cycle {group.currentCycle}/{group.months}
                       </p>
