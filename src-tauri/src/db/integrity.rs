@@ -134,6 +134,37 @@ pub fn check_integrity(conn: &Connection) -> Result<IntegrityReport, AppError> {
         severity: if orphans == 0 { "ok".into() } else { "warn".into() },
     });
 
+    // 4c. Loan outstanding invariant: cached outstanding_amount must equal
+    // amount − Σ(principal repaid). Drift here is exactly the "trial balance
+    // shows the wrong outstanding" class of bug; "Rebuild Balances" repairs it.
+    let loan_mismatches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT l.id
+                FROM loans l
+                LEFT JOIN loan_payments lp ON lp.loan_id = l.id
+                GROUP BY l.id
+                HAVING ABS(l.outstanding_amount -
+                    MAX(0, l.amount - COALESCE(SUM(lp.principal_amount), 0))) > 0.01
+            )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let loans_ok = loan_mismatches == 0;
+    checks.push(IntegrityCheck {
+        name: "Loan outstanding invariant".into(),
+        passed: loans_ok,
+        details: if loans_ok {
+            None
+        } else {
+            Some(format!(
+                "{loan_mismatches} loan(s) have a cached outstanding that disagrees with their repayment history — run Rebuild Balances"
+            ))
+        },
+        severity: if loans_ok { "ok".into() } else { "error".into() },
+    });
+
     // 5. DB size (informational)
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap_or(0);
@@ -197,6 +228,7 @@ fn check_shg_balance(conn: &Connection, method: &str, checks: &mut Vec<Integrity
 #[serde(rename_all = "camelCase")]
 pub struct RebuildReport {
     pub member_rows_updated: usize,
+    pub loan_rows_updated: usize,
     pub shg_cash_before: f64,
     pub shg_cash_after: f64,
     pub shg_bank_before: f64,
@@ -245,6 +277,39 @@ pub fn rebuild_balances(conn: &mut Connection) -> Result<RebuildReport, AppError
         }
     }
 
+    // Recompute each loan's outstanding principal from its payment history.
+    // The authoritative value is amount − Σ(principal_amount). Upfront-interest
+    // rows have principal_amount = 0 so they don't affect it. Status is realigned
+    // (paid when nothing is owed), but a manual 'defaulted' mark is preserved.
+    let loan_rows_updated: usize = {
+        let mismatches: usize = tx.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT l.id
+                FROM loans l
+                LEFT JOIN loan_payments lp ON lp.loan_id = l.id
+                GROUP BY l.id
+                HAVING ABS(l.outstanding_amount -
+                    MAX(0, l.amount - COALESCE(SUM(lp.principal_amount), 0))) > 0.01
+            )",
+            [], |r| r.get::<_, i64>(0),
+        ).unwrap_or(0) as usize;
+
+        tx.execute(
+            "UPDATE loans SET outstanding_amount = MAX(0, amount - COALESCE(
+                (SELECT SUM(principal_amount) FROM loan_payments WHERE loan_id = loans.id), 0))",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE loans SET status = CASE
+                WHEN status = 'defaulted' THEN 'defaulted'
+                WHEN outstanding_amount <= 0.01 AND COALESCE(unpaid_interest_balance, 0) <= 0.01 THEN 'paid'
+                ELSE 'active'
+             END",
+            [],
+        )?;
+        mismatches
+    };
+
     // Recompute SHG cash + bank from shg_transactions.
     for method in &["CASH", "BANK"] {
         let computed: f64 = tx.query_row(
@@ -274,6 +339,7 @@ pub fn rebuild_balances(conn: &mut Connection) -> Result<RebuildReport, AppError
 
     Ok(RebuildReport {
         member_rows_updated,
+        loan_rows_updated,
         shg_cash_before, shg_cash_after,
         shg_bank_before, shg_bank_after,
         generated_at: chrono::Utc::now().to_rfc3339(),

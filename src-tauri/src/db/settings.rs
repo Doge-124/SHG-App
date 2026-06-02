@@ -31,7 +31,9 @@ pub fn init_settings_table(conn: &mut Connection) -> Result<(), AppError> {
             past_data_locked INTEGER NOT NULL DEFAULT 0,
             shg_opening_cash REAL NOT NULL DEFAULT 0,
             shg_opening_bank REAL NOT NULL DEFAULT 0,
-            shg_opening_locked INTEGER NOT NULL DEFAULT 0
+            shg_opening_locked INTEGER NOT NULL DEFAULT 0,
+            installment_anchor_number INTEGER NOT NULL DEFAULT 0,
+            installment_anchor_date TEXT
         )",
         [],
     )?;
@@ -361,6 +363,71 @@ pub fn save_appearance_settings(conn: &mut Connection, settings: &AppearanceSett
         params![settings_json],
     )?;
 
+    Ok(())
+}
+
+// ── Weekly installment tracker ─────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallmentStatus {
+    /// Expected installment number as of today (anchor + whole weeks elapsed).
+    pub current_number: i64,
+    /// The number last set by the user.
+    pub anchor_number: i64,
+    /// ISO date the anchor number was set (None if never configured).
+    pub anchor_date: Option<String>,
+    /// Whole weeks added on top of the anchor since it was set.
+    pub weeks_elapsed: i64,
+}
+
+/// Compute the current expected installment number. It starts at the anchor
+/// number set by the user and grows by one for every whole week since. Returns
+/// the full status so the UI can show both the live number and the anchor.
+pub fn get_installment_status(conn: &Connection) -> Result<InstallmentStatus, AppError> {
+    let (anchor_number, anchor_date): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT COALESCE(installment_anchor_number, 0), installment_anchor_date
+             FROM settings WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0, None));
+
+    let weeks_elapsed = match &anchor_date {
+        Some(d) if anchor_number > 0 => {
+            let anchor = chrono::NaiveDate::parse_from_str(&d[..10.min(d.len())], "%Y-%m-%d");
+            match anchor {
+                Ok(start) => {
+                    let today = chrono::Utc::now().date_naive();
+                    let days = (today - start).num_days();
+                    if days > 0 { days / 7 } else { 0 }
+                }
+                Err(_) => 0,
+            }
+        }
+        _ => 0,
+    };
+
+    let current_number = if anchor_number > 0 { anchor_number + weeks_elapsed } else { 0 };
+
+    Ok(InstallmentStatus { current_number, anchor_number, anchor_date, weeks_elapsed })
+}
+
+/// Set the current installment number. Anchors it to today so it resumes
+/// incrementing weekly from this value.
+pub fn set_installment_number(conn: &mut Connection, number: i64) -> Result<(), AppError> {
+    if number < 0 {
+        return Err(AppError::validation("Installment number cannot be negative"));
+    }
+    let today = chrono::Utc::now().date_naive().to_string(); // YYYY-MM-DD
+    conn.execute(
+        "UPDATE settings
+         SET installment_anchor_number = ?1, installment_anchor_date = ?2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = 1",
+        (number, today),
+    )?;
     Ok(())
 }
 

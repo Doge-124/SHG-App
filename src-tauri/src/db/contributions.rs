@@ -143,6 +143,99 @@ pub fn record_weekly_contribution(
     Ok(shg_txn_id)
 }
 
+/// Pay out (withdraw) a member's accrued savings. This is the inverse of a
+/// contribution: it issues a VOUCHER for the money leaving the SHG and reduces
+/// the member's savings balance by the same amount.
+///
+/// Guards:
+///   - amount must be positive and not exceed the member's current savings;
+///   - the SHG must actually hold enough CASH/BANK to make the payment
+///     (enforced by `record_voucher_ex`).
+///
+/// The withdrawal is stored as a negative CONTRIBUTION row in
+/// `member_transactions` so it lowers the running balance and shows up in the
+/// member's savings passbook. Returns the voucher's shg_transactions id.
+pub fn payout_member_savings(
+    conn: &mut Connection,
+    member_id: i64,
+    amount: f64,
+    payment_method: &str,           // CASH | BANK
+    bank_txn_id: Option<&str>,
+    created_at: &str,
+) -> Result<i64, AppError> {
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err(AppError::validation("amount must be > 0"));
+    }
+    match payment_method {
+        "CASH" | "BANK" => {}
+        _ => return Err(AppError::validation("payment_method must be CASH or BANK")),
+    }
+
+    let (member_code, member_name, is_active): (String, String, i64) = conn
+        .query_row(
+            "SELECT member_code, name, is_active FROM members WHERE id = ?1",
+            [member_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| AppError::business("Member not found"))?;
+
+    if is_active != 1 {
+        return Err(AppError::business("Member is not active"));
+    }
+
+    let balance: f64 = conn
+        .query_row(
+            "SELECT COALESCE(balance, 0.0) FROM member_balances WHERE member_id = ?1",
+            [member_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    if balance <= 0.005 {
+        return Err(AppError::business(format!(
+            "{member_name} has no savings to pay out."
+        )));
+    }
+    if amount > balance + 0.005 {
+        return Err(AppError::business(format!(
+            "Cannot pay out ₹{amount:.2}: {member_name} only has ₹{balance:.2} in savings."
+        )));
+    }
+
+    let mut tx = conn.transaction()?;
+
+    // 1) Money leaves the SHG — a voucher (balance-checked).
+    let reason = format!("Savings payout to {member_name} ({member_code})");
+    ledger::record_voucher_ex(
+        &mut tx,
+        amount,
+        &reason,
+        payment_method,
+        Some("SAVINGS_WITHDRAWAL"),
+        Some(member_id),
+        created_at,
+        bank_txn_id,
+    )?;
+    let voucher_id = tx.last_insert_rowid();
+
+    // 2) Reduce the member's savings (negative CONTRIBUTION keeps the passbook
+    //    running balance correct).
+    tx.execute(
+        "INSERT INTO member_transactions (member_id, amount, txn_type, reason, created_at)
+         VALUES (?1, ?2, 'CONTRIBUTION', ?3, ?4)",
+        (member_id, -amount, "Savings payout", created_at),
+    )?;
+
+    // 3) Update the cached balance.
+    tx.execute(
+        "UPDATE member_balances SET balance = balance - ?1 WHERE member_id = ?2",
+        (amount, member_id),
+    )?;
+
+    tx.commit()?;
+    Ok(voucher_id)
+}
+
 // ─── Weekly status query ──────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
@@ -160,6 +253,10 @@ pub struct MemberContributionStatus {
     pub payment_count: i64,
     /// Cumulative savings balance for this member.
     pub total_savings: f64,
+    /// Total installments this member has paid (seeded past + ongoing).
+    pub installments_paid: i64,
+    /// How many installments behind the current expected number (0 = up to date).
+    pub behind_by: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -171,6 +268,10 @@ pub struct WeeklyContributionSummary {
     pub paid_count: i64,
     pub pending_count: i64,
     pub total_collected: f64,
+    /// Expected installment number as of today (auto-increments weekly).
+    pub current_installment_number: i64,
+    /// Number of members behind the current installment number.
+    pub behind_count: i64,
     pub members: Vec<MemberContributionStatus>,
 }
 
@@ -190,7 +291,8 @@ pub fn get_weekly_contribution_status(
              c.payment_method,
              c.last_paid_at,
              COALESCE(c.payment_count, 0)   AS payment_count,
-             COALESCE(mb.balance, 0.0)       AS total_savings
+             COALESCE(mb.balance, 0.0)       AS total_savings,
+             COALESCE(m.past_installments, 0) + COALESCE(m.current_installments, 0) AS installments_paid
          FROM members m
          LEFT JOIN (
              SELECT
@@ -211,8 +313,18 @@ pub fn get_weekly_contribution_status(
          ORDER BY c.last_paid_at DESC NULLS LAST, m.name ASC",
     )?;
 
+    // Expected installment number as of today (auto-increments weekly).
+    let current_installment_number =
+        db::settings::get_installment_status(conn)?.current_number;
+
     let rows = stmt.query_map([from_date, &to_dt], |r| {
         let amount_paid: f64 = r.get(3)?;
+        let installments_paid: i64 = r.get(8)?;
+        let behind_by = if current_installment_number > installments_paid {
+            current_installment_number - installments_paid
+        } else {
+            0
+        };
         Ok(MemberContributionStatus {
             member_id:      r.get(0)?,
             member_name:    r.get(1)?,
@@ -223,6 +335,8 @@ pub fn get_weekly_contribution_status(
             paid_at:        r.get(5)?,
             payment_count:  r.get(6)?,
             total_savings:  r.get(7)?,
+            installments_paid,
+            behind_by,
         })
     })?;
 
@@ -232,6 +346,7 @@ pub fn get_weekly_contribution_status(
     let total_members  = members.len() as i64;
     let paid_count     = members.iter().filter(|m| m.has_paid).count() as i64;
     let total_collected = members.iter().map(|m| m.amount_paid).sum();
+    let behind_count   = members.iter().filter(|m| m.behind_by > 0).count() as i64;
 
     Ok(WeeklyContributionSummary {
         from_date: from_date.to_string(),
@@ -240,6 +355,8 @@ pub fn get_weekly_contribution_status(
         paid_count,
         pending_count: total_members - paid_count,
         total_collected,
+        current_installment_number,
+        behind_count,
         members,
     })
 }

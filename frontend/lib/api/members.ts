@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { withAutoPrint } from '@/lib/auto-print'
 import type { Member, MemberType, MemberFormData, OpeningDataInput, MemberProfile, ApiResponse } from '@/lib/types'
 
 export async function getMembers(): Promise<ApiResponse<Member[]>> {
@@ -94,7 +95,7 @@ export async function addMember(data: MemberFormData): Promise<ApiResponse<Membe
     }
   } catch (error) {
     console.error('Failed to add member:', error)
-    return { success: false, error: 'Failed to add member' }
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to add member' }
   }
 }
 
@@ -137,17 +138,60 @@ export async function updateMember(
     return { success: true, data: updatedMember }
   } catch (error) {
     console.error('Failed to update member:', error)
-    return { success: false, error: 'Failed to update member' }
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to update member' }
   }
 }
 
-export async function deactivateMember(id: string): Promise<ApiResponse<Member>> {
+export async function deactivateMember(id: string): Promise<ApiResponse<void>> {
   try {
-    // Note: Backend doesn't have a deactivate_member function yet
-    return { success: false, error: 'Member deactivation not implemented' }
+    await invoke('set_member_active', { memberId: parseInt(id), active: false })
+    return { success: true }
   } catch (error) {
     console.error('Failed to deactivate member:', error)
-    return { success: false, error: 'Failed to deactivate member' }
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to deactivate member' }
+  }
+}
+
+/** Current accrued savings balance for a member. */
+export async function getMemberSavings(id: string): Promise<ApiResponse<number>> {
+  try {
+    const balance = await invoke<number>('member_balance', { memberId: parseInt(id) })
+    return { success: true, data: balance }
+  } catch (error) {
+    console.error('Failed to get member savings:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to load savings balance' }
+  }
+}
+
+/** Pay out a member's accrued savings as a voucher (reduces their savings). */
+export async function payoutMemberSavings(
+  id: string,
+  amount: number,
+  paymentMethod: 'cash' | 'bank',
+  bankTxnId?: string | null,
+): Promise<ApiResponse<void>> {
+  try {
+    await withAutoPrint(() => invoke('payout_member_savings_cmd', {
+      memberId: parseInt(id),
+      amount,
+      paymentMethod: paymentMethod.toUpperCase(),
+      bankTxnId: bankTxnId ?? null,
+      createdAt: new Date().toISOString(),
+    }))
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to pay out savings:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to pay out savings' }
+  }
+}
+
+export async function reactivateMember(id: string): Promise<ApiResponse<void>> {
+  try {
+    await invoke('set_member_active', { memberId: parseInt(id), active: true })
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to reactivate member:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to reactivate member' }
   }
 }
 

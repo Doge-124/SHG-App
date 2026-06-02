@@ -30,8 +30,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { invoke } from '@tauri-apps/api/core'
 import { getMembers } from '@/lib/api/members'
+import { formatCurrency } from '@/lib/format'
 import type { Member, VoucherFormData } from '@/lib/types'
+
+/** Special voucher reason that withdraws a member's accrued savings. */
+export const SAVINGS_PAYOUT_REASON = 'Member savings payout'
 
 const voucherSchema = z.object({
   memberId: z.string().min(1, 'Please select a member'),
@@ -44,6 +49,7 @@ const voucherSchema = z.object({
 
 // Preset reasons for vouchers
 const voucherReasons = [
+  SAVINGS_PAYOUT_REASON,
   'Office supplies',
   'Administrative expenses',
   'Bank charges',
@@ -77,6 +83,7 @@ export function VoucherForm({
   const [members, setMembers] = useState<Member[]>([])
   const [loadingMembers, setLoadingMembers] = useState(false)
   const [selectedReason, setSelectedReason] = useState('')
+  const [savings, setSavings] = useState<number | null>(null)
 
   useEffect(() => {
     const loadMembers = async () => {
@@ -111,10 +118,24 @@ export function VoucherForm({
   })
 
   const paymentMethod = form.watch('paymentMethod')
+  const memberId = form.watch('memberId')
+  const isPayout = selectedReason === SAVINGS_PAYOUT_REASON
+
+  // When paying out savings, look up the member's available balance.
+  useEffect(() => {
+    if (!isPayout || !memberId) { setSavings(null); return }
+    let cancelled = false
+    invoke<number>('member_balance', { memberId: parseInt(memberId) })
+      .then(bal => { if (!cancelled) setSavings(bal) })
+      .catch(() => { if (!cancelled) setSavings(null) })
+    return () => { cancelled = true }
+  }, [isPayout, memberId])
 
   const handleSubmit = async (data: VoucherFormData) => {
     await onSubmit(data)
     form.reset()
+    setSelectedReason('')
+    setSavings(null)
   }
 
   return (
@@ -174,6 +195,20 @@ export function VoucherForm({
                       {...field}
                     />
                   </FormControl>
+                  {isPayout && savings !== null && (
+                    <p className="text-xs text-muted-foreground">
+                      Available savings: <span className="font-medium">{formatCurrency(savings)}</span>
+                      {savings > 0 && (
+                        <button
+                          type="button"
+                          className="ml-2 text-primary underline"
+                          onClick={() => form.setValue('amount', savings, { shouldValidate: true })}
+                        >
+                          Withdraw all
+                        </button>
+                      )}
+                    </p>
+                  )}
                   <FormMessage />
                 </FormItem>
               )}

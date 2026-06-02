@@ -167,8 +167,14 @@ pub fn create_loan(
     }
 
     // Voucher: full principal disbursed. record_voucher (checked) enforces
-    // sufficient balance inside the same transaction.
-    let voucher_note = if note.trim().is_empty() { "Loan disbursement".to_string() } else { note.to_string() };
+    // sufficient balance inside the same transaction. The transaction reason is
+    // always "Loan disbursement" (its nature); the loan's purpose, if given, is
+    // appended so it shows on the printed voucher without masking the category.
+    let voucher_note = if note.trim().is_empty() {
+        "Loan disbursement".to_string()
+    } else {
+        format!("Loan disbursement — Purpose: {}", note.trim())
+    };
     ledger::record_voucher(
         &mut tx,
         amount,
@@ -1012,11 +1018,17 @@ pub fn issue_member_loan(
         (member_id, amount),
     )?;
 
-    // 3. SHG voucher (money goes out)
+    // 3. SHG voucher (money goes out). Reason is always "Loan disbursement";
+    // the purpose (if any) is appended for the printed voucher.
+    let voucher_note = if note.trim().is_empty() {
+        "Loan disbursement".to_string()
+    } else {
+        format!("Loan disbursement — Purpose: {}", note.trim())
+    };
     ledger::record_voucher(
         &mut tx,
         amount,
-        note,
+        &voucher_note,
         payment_method,
         Some("MEMBER_LOAN"),
         Some(member_id),
@@ -1169,9 +1181,13 @@ pub fn get_loan_repayment_schedule(
     let today = chrono::Local::now().date_naive();
 
     // ── Fetch repayments ──────────────────────────────────────────────────
+    // Exclude the upfront-interest row: it's the interest collected at
+    // disbursement (shown on the "Loan Issued" row), not a repayment, so it
+    // must not appear as a payment line or count toward total_repaid.
     let mut pay_stmt = conn.prepare(
         "SELECT amount, payment_method, created_at FROM loan_payments
-         WHERE loan_id = ?1 ORDER BY created_at ASC"
+         WHERE loan_id = ?1 AND COALESCE(note, '') <> 'Upfront Interest'
+         ORDER BY created_at ASC"
     )?;
     let payments: Vec<(f64, String, chrono::NaiveDate)> = pay_stmt
         .query_map([loan_id], |r| {
@@ -1220,10 +1236,15 @@ pub fn get_loan_repayment_schedule(
         events.push((today, "today", "Today".to_string()));
     }
 
-    // Payment events
+    // Payment events. Also build a per-date queue so multiple payments on the
+    // same day map to their own amounts (matching by date alone would show the
+    // first payment's amount on every same-day row).
+    let mut pay_queue: std::collections::HashMap<chrono::NaiveDate, std::collections::VecDeque<(f64, String)>> =
+        std::collections::HashMap::new();
     for (amt, method, date) in &payments {
         events.push((*date, "payment",
             format!("Repayment ({})", method.to_lowercase())));
+        pay_queue.entry(*date).or_default().push_back((*amt, method.clone()));
     }
 
     // Sort by date, then by type priority (payments before same-day markers)
@@ -1248,9 +1269,10 @@ pub fn get_loan_repayment_schedule(
         let is_overdue   = due_date_nd.map_or(false, |dd| *date > dd && is_past);
 
         let (pay_amount, pay_method) = if *entry_type == "payment" {
-            // Find the corresponding payment
-            let p = payments.iter().find(|(_, _, d)| d == date);
-            p.map(|(a, m, _)| (*a, m.clone())).unwrap_or((0.0, String::new()))
+            // Dequeue the next payment recorded on this date.
+            pay_queue.get_mut(date)
+                .and_then(|q| q.pop_front())
+                .unwrap_or((0.0, String::new()))
         } else {
             (0.0, String::new())
         };

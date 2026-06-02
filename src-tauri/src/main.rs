@@ -72,11 +72,17 @@ fn main() {
             commands::members::get_member_profile,
             commands::members::list_members_by_type_cmd,
             commands::members::update_member_type,
+            commands::members::set_member_active,
             commands::members::get_member_passbook,
+            commands::members::get_member_loan_passbook,
+            commands::members::get_member_chit_passbook,
             commands::members::get_total_members,
             commands::members::get_total_loans_outstanding,
             commands::members::get_active_chit_groups,
             commands::contributions::record_weekly_contribution_cmd,
+            commands::contributions::payout_member_savings_cmd,
+            commands::contributions::get_installment_status_cmd,
+            commands::contributions::set_installment_number_cmd,
             commands::contributions::get_weekly_contribution_status_cmd,
             commands::loans::record_past_loan,
             commands::loans::get_all_loans,
@@ -176,6 +182,7 @@ fn main() {
             commands::past_edit::delete_past_loan,
             commands::past_edit::delete_past_chit_cycle,
             commands::past_edit::cancel_shg_transaction,
+            commands::printing::silent_print_pdf,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

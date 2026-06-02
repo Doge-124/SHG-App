@@ -94,13 +94,13 @@ export default function ReceiptsPage() {
     ? receipts
     : receipts.filter((r) => r.payment_method === paymentFilter.toLowerCase())
 
-  const totalCash = receipts
-    .filter((r) => r.payment_method === 'CASH')
-    .reduce((sum, r) => sum + r.amount, 0)
+  // Mixed receipts carry a cash_amount/bank_amount split; count each side
+  // toward the right total so the cards still reconcile.
+  const totalCash = receipts.reduce(
+    (sum, r) => sum + (r.payment_method === 'CASH' ? r.amount : (r.cash_amount ?? 0)), 0)
 
-  const totalBank = receipts
-    .filter((r) => r.payment_method === 'BANK')
-    .reduce((sum, r) => sum + r.amount, 0)
+  const totalBank = receipts.reduce(
+    (sum, r) => sum + (r.payment_method === 'BANK' ? r.amount : (r.bank_amount ?? 0)), 0)
 
   const handleCreateReceipt = async (data: ReceiptFormData) => {
     setIsSubmitting(true)
@@ -189,6 +189,11 @@ export default function ReceiptsPage() {
           </span>
           {receipt.member_name && (
             <span className="text-xs text-muted-foreground block">From: {receipt.member_name}</span>
+          )}
+          {receipt.payment_method === 'MIXED' && (
+            <span className="text-xs text-muted-foreground block">
+              Cash {formatCurrency(receipt.cash_amount ?? 0)} + Bank {formatCurrency(receipt.bank_amount ?? 0)}
+            </span>
           )}
           {receipt.bank_txn_id && (
             <span className="text-xs text-muted-foreground block">Txn ID: {receipt.bank_txn_id}</span>

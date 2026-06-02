@@ -37,6 +37,51 @@ function escapeHtml(s: string): string {
 }
 
 /**
+ * Render report HTML and open the print dialog.
+ *
+ * We deliberately do NOT use `window.open()` — in the Tauri WebView2 popups are
+ * blocked and it returns null, so the old "Print / PDF" buttons silently did
+ * nothing. Instead we write the HTML into a hidden iframe in the current document
+ * and call print() on it, which reliably opens the OS print dialog (choose a
+ * printer or "Save as PDF").
+ */
+function printHtml(html: string): void {
+  const iframe = document.createElement('iframe')
+  iframe.style.position = 'fixed'
+  iframe.style.right = '0'
+  iframe.style.bottom = '0'
+  iframe.style.width = '0'
+  iframe.style.height = '0'
+  iframe.style.border = '0'
+  iframe.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(iframe)
+
+  const doc = iframe.contentWindow?.document
+  if (!doc) {
+    document.body.removeChild(iframe)
+    return
+  }
+  doc.open()
+  doc.write(html)
+  doc.close()
+
+  const trigger = () => {
+    try {
+      iframe.contentWindow?.focus()
+      iframe.contentWindow?.print()
+    } catch (e) {
+      console.error('Print failed', e)
+    }
+  }
+  // Give the iframe a tick to lay out before printing.
+  iframe.onload = () => setTimeout(trigger, 150)
+  if (doc.readyState === 'complete') setTimeout(trigger, 200)
+
+  // Remove the iframe well after the print job has had time to spool.
+  setTimeout(() => { try { document.body.removeChild(iframe) } catch {} }, 60000)
+}
+
+/**
  * Open a printable window for a set of bank transaction IDs. Uses the browser
  * print dialog (the WebView supports window.print()), so the user can "print"
  * to PDF or paper. No external PDF library needed.
@@ -83,10 +128,7 @@ export function printBankTransactionIds(
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`
 
-  const w = window.open('', '_blank')
-  if (!w) return
-  w.document.write(html)
-  w.document.close()
+  printHtml(html)
 }
 
 /** Generic Day Book → printable HTML (Print / Save as PDF). */
@@ -160,10 +202,7 @@ export function printDayBook(
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`
 
-  const w = window.open('', '_blank')
-  if (!w) return
-  w.document.write(html)
-  w.document.close()
+  printHtml(html)
 }
 
 // ─── Income ledgers (interest / chit / savings) ──────────────────────────
@@ -186,13 +225,15 @@ export interface IncomeLedger {
   fromDate: string
   toDate: string
   interest: IncomeLedgerSection
+  principal: IncomeLedgerSection
   chit: IncomeLedgerSection
   savings: IncomeLedgerSection
   grandTotal: number
 }
 
-const INCOME_SECTIONS: { key: 'interest' | 'chit' | 'savings'; title: string }[] = [
+const INCOME_SECTIONS: { key: 'interest' | 'principal' | 'chit' | 'savings'; title: string }[] = [
   { key: 'interest', title: 'Interest Income' },
+  { key: 'principal', title: 'Loan Principal Collected' },
   { key: 'chit', title: 'Chit Commission Income' },
   { key: 'savings', title: 'Savings Collected' },
 ]
@@ -259,16 +300,14 @@ export function printIncomeLedger(
       <h1>${escapeHtml(opts.shgName || 'SHG Manager')}</h1>
       <div class="sub">Income Ledger · ${escapeHtml(opts.fromLabel)} to ${escapeHtml(opts.toLabel)}</div>
       ${sectionHtml('Interest Income', ledger.interest)}
+      ${sectionHtml('Loan Principal Collected', ledger.principal)}
       ${sectionHtml('Chit Commission Income', ledger.chit)}
       ${sectionHtml('Savings Collected', ledger.savings)}
       <div class="grand">Grand Total (Interest + Chit): ${escapeHtml(formatCurrency(ledger.grandTotal))}</div>
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`
 
-  const w = window.open('', '_blank')
-  if (!w) return
-  w.document.write(html)
-  w.document.close()
+  printHtml(html)
 }
 
 // ─── Chit cycles money-flow report ───────────────────────────────────────
@@ -333,8 +372,5 @@ export function printChitCycles(
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`
 
-  const w = window.open('', '_blank')
-  if (!w) return
-  w.document.write(html)
-  w.document.close()
+  printHtml(html)
 }

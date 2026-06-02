@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS chit_payments (
     cycle_id INTEGER NOT NULL,
     member_id INTEGER NOT NULL,
     amount REAL NOT NULL,
-    payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK')),
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK', 'MIXED')),
     paid_at TEXT NOT NULL,
     FOREIGN KEY (chit_id) REFERENCES chit_groups(id),
     FOREIGN KEY (cycle_id) REFERENCES chit_cycles(id),
@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS loan_payments (
     amount REAL NOT NULL,
     principal_amount REAL NOT NULL DEFAULT 0,
     interest_amount  REAL NOT NULL DEFAULT 0,
-    payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK')),
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK', 'MIXED')),
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     FOREIGN KEY (loan_id) REFERENCES loans(id),
@@ -301,6 +301,12 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         add_column_if_missing(&tx, "settings", "shg_opening_cash", "REAL NOT NULL DEFAULT 0")?;
         add_column_if_missing(&tx, "settings", "shg_opening_bank", "REAL NOT NULL DEFAULT 0")?;
         add_column_if_missing(&tx, "settings", "shg_opening_locked", "INTEGER NOT NULL DEFAULT 0")?;
+        // 18) Weekly installment tracker. The "current installment number" is the
+        // expected count as of today; it equals the anchor number plus the number
+        // of whole weeks elapsed since it was set, so it auto-increments by one
+        // per week without any scheduled job. 0 = not configured.
+        add_column_if_missing(&tx, "settings", "installment_anchor_number", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column_if_missing(&tx, "settings", "installment_anchor_date", "TEXT")?;
     }
 
     // 9) Daily interest rate and upfront interest for new loan logic.
@@ -428,6 +434,14 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     add_column_if_missing(&tx, "loan_payments", "bank_amount", "REAL")?;
     add_column_if_missing(&tx, "chit_payments", "cash_amount", "REAL")?;
     add_column_if_missing(&tx, "chit_payments", "bank_amount", "REAL")?;
+
+    // 16b) Mixed payments write a single derived row with payment_method='MIXED'
+    // (the authoritative cash/bank split lives on the two shg_transactions rows).
+    // Older DBs have a CHECK that only allows CASH/BANK, which rejects the insert
+    // with a constraint error. Rebuild those tables to widen the CHECK. Runs after
+    // the cash_amount/bank_amount columns above so the rebuilt table is complete.
+    rebuild_loan_payments_if_needed(&tx)?;
+    rebuild_chit_payments_if_needed(&tx)?;
 
     // 13) Loan unpaid-interest balance — tracks interest that has accrued
     // but not been paid yet (e.g. when the borrower made a partial payment
@@ -586,6 +600,90 @@ fn rebuild_member_transactions_if_needed(tx: &rusqlite::Transaction) -> Result<(
         FROM member_transactions_old;
 
         DROP TABLE member_transactions_old;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Widen loan_payments.payment_method CHECK to allow 'MIXED'. Idempotent: skips
+/// when the table already permits it. Preserves all rows and ids.
+fn rebuild_loan_payments_if_needed(tx: &rusqlite::Transaction) -> Result<(), AppError> {
+    let sql = table_sql(tx, "loan_payments")?.unwrap_or_default();
+    if sql.contains("'MIXED'") {
+        return Ok(());
+    }
+
+    tx.execute_batch(
+        r#"
+        ALTER TABLE loan_payments RENAME TO loan_payments_old;
+
+        CREATE TABLE loan_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loan_id INTEGER NOT NULL,
+            member_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            principal_amount REAL NOT NULL DEFAULT 0,
+            interest_amount  REAL NOT NULL DEFAULT 0,
+            payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK', 'MIXED')),
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            cash_amount REAL,
+            bank_amount REAL,
+            FOREIGN KEY (loan_id) REFERENCES loans(id),
+            FOREIGN KEY (member_id) REFERENCES members(id)
+        );
+
+        INSERT INTO loan_payments
+            (id, loan_id, member_id, amount, principal_amount, interest_amount,
+             payment_method, note, created_at, cash_amount, bank_amount)
+        SELECT id, loan_id, member_id, amount, principal_amount, interest_amount,
+               payment_method, note, created_at, cash_amount, bank_amount
+        FROM loan_payments_old;
+
+        DROP TABLE loan_payments_old;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Widen chit_payments.payment_method CHECK to allow 'MIXED'. Idempotent: skips
+/// when the table already permits it. Preserves all rows and ids.
+fn rebuild_chit_payments_if_needed(tx: &rusqlite::Transaction) -> Result<(), AppError> {
+    let sql = table_sql(tx, "chit_payments")?.unwrap_or_default();
+    if sql.contains("'MIXED'") {
+        return Ok(());
+    }
+
+    tx.execute_batch(
+        r#"
+        ALTER TABLE chit_payments RENAME TO chit_payments_old;
+
+        CREATE TABLE chit_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chit_id INTEGER NOT NULL,
+            cycle_id INTEGER NOT NULL,
+            member_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK', 'MIXED')),
+            paid_at TEXT NOT NULL,
+            cash_amount REAL,
+            bank_amount REAL,
+            FOREIGN KEY (chit_id) REFERENCES chit_groups(id),
+            FOREIGN KEY (cycle_id) REFERENCES chit_cycles(id),
+            FOREIGN KEY (member_id) REFERENCES members(id),
+            UNIQUE (cycle_id, member_id)
+        );
+
+        INSERT INTO chit_payments
+            (id, chit_id, cycle_id, member_id, amount, payment_method, paid_at,
+             cash_amount, bank_amount)
+        SELECT id, chit_id, cycle_id, member_id, amount, payment_method, paid_at,
+               cash_amount, bank_amount
+        FROM chit_payments_old;
+
+        DROP TABLE chit_payments_old;
         "#,
     )?;
 

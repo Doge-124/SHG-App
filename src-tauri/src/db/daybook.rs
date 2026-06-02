@@ -477,4 +477,69 @@ mod tests {
             "Loan Repayment"
         );
     }
+
+    /// Guarantee: data entered through the Past Data Entry features (member
+    /// opening balances, past loans, past chit cycles) is reference-only and
+    /// must NEVER appear in the Day Book. The Day Book is derived solely from
+    /// RECEIPT/VOUCHER rows in shg_transactions, and none of these past-entry
+    /// paths write there. This test runs all three and asserts the books stay
+    /// empty, so a future change that accidentally routes past data through the
+    /// SHG ledger fails loudly here.
+    #[test]
+    fn past_data_never_enters_day_book() {
+        use crate::db::{schema, settings, members, loans, chits_past_entry};
+        use chits_past_entry::PastWinnerInput;
+        use rusqlite::Connection;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_migrations(&mut conn).unwrap();
+        settings::init_settings_table(&mut conn).unwrap();
+
+        // Two SHG members.
+        let m1 = members::add_member(&mut conn, "1", "Asha", None, None, "2024-01-01T00:00:00", "SHG").unwrap();
+        let m2 = members::add_member(&mut conn, "2", "Bina", None, None, "2024-01-01T00:00:00", "SHG").unwrap();
+
+        // Past data #1 — member opening balance.
+        members::set_member_opening_data(&mut conn, m1, 5000.0, Some("CASH"), 10).unwrap();
+
+        // Past data #2 — a past loan with a repayment.
+        loans::record_past_loan(
+            &mut conn, m1, 10000.0, 1.0, "CASH", "monthly", "past loan",
+            "2024-02-01T00:00:00",
+            &[(2000.0, "CASH", "2024-03-01T00:00:00")],
+        ).unwrap();
+
+        // Past data #3 — a past chit cycle.
+        conn.execute(
+            "INSERT INTO chit_groups
+               (name, total_amount, months, total_members, monthly_contribution,
+                commission_percent, start_date, status)
+             VALUES ('Chit A', 100000.0, 10, 2, 1000.0, 5.0, '2024-01-01', 'ACTIVE')",
+            [],
+        ).unwrap();
+        let chit_id = conn.last_insert_rowid();
+        conn.execute("INSERT INTO chit_members (chit_id, member_id, joined_at) VALUES (?1, ?2, '2024-01-01')", (chit_id, m1)).unwrap();
+        conn.execute("INSERT INTO chit_members (chit_id, member_id, joined_at) VALUES (?1, ?2, '2024-01-01')", (chit_id, m2)).unwrap();
+
+        let winners = [PastWinnerInput {
+            member_id: m1, winner_type: "FIXED", bid_discount: 0.0, commission: 50.0,
+            payout_amount: 9500.0, payment_method: "CASH",
+        }];
+        let payments = [(m1, 1000.0, "CASH"), (m2, 1000.0, "CASH")];
+        chits_past_entry::record_past_chit_cycle(
+            &mut conn, chit_id, 1, "2024-02-15", &winners, 0.0, &payments,
+        ).unwrap();
+
+        // The Day Book must be empty — none of the above are live SHG money movements.
+        let entries = get_day_book_entries(&conn, "2000-01-01T00:00:00", "2100-01-01T23:59:59").unwrap();
+        assert!(entries.is_empty(), "past data leaked into the day book: {entries:?}");
+
+        // Belt and braces: no RECEIPT/VOUCHER rows should exist at all.
+        let live_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM shg_transactions WHERE txn_type IN ('RECEIPT','VOUCHER')",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(live_count, 0, "past data created live SHG ledger rows");
+    }
 }

@@ -17,7 +17,7 @@ import { recordWeeklyContribution } from '@/lib/api/receipts'
 import { formatCurrency, formatDate } from '@/lib/format'
 import {
   CheckCircle2, Clock, ChevronLeft, ChevronRight, RefreshCw,
-  Users, Banknote, AlertCircle, Plus,
+  Users, Banknote, AlertCircle, Plus, CalendarClock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +31,8 @@ interface MemberStatus {
   paidAt: string | null
   paymentCount: number
   totalSavings: number
+  installmentsPaid: number
+  behindBy: number
 }
 
 interface Summary {
@@ -40,6 +42,8 @@ interface Summary {
   paidCount: number
   pendingCount: number
   totalCollected: number
+  currentInstallmentNumber: number
+  behindCount: number
   members: MemberStatus[]
 }
 
@@ -71,8 +75,13 @@ export default function ContributionsPage() {
   const [weekOf, setWeekOf] = useState<Date>(() => weekStart(new Date()))
   const [summary, setSummary] = useState<Summary | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [filter, setFilter] = useState<'all' | 'paid' | 'pending'>('all')
+  const [filter, setFilter] = useState<'all' | 'paid' | 'pending' | 'behind'>('all')
   const [search, setSearch] = useState('')
+
+  // Set-installment-number dialog
+  const [numberDialogOpen, setNumberDialogOpen] = useState(false)
+  const [numberInput, setNumberInput] = useState('')
+  const [isSavingNumber, setIsSavingNumber] = useState(false)
 
   // Quick-pay dialog
   const [payDialog, setPayDialog] = useState<{ open: boolean; member: MemberStatus | null }>({ open: false, member: null })
@@ -106,10 +115,27 @@ export default function ContributionsPage() {
   const isCurrentWeek = toISO(weekOf) === toISO(weekStart(new Date()))
   const isInFuture = weekOf > weekStart(new Date())
 
+  const handleSaveNumber = async () => {
+    const n = parseInt(numberInput, 10)
+    if (isNaN(n) || n < 0) { toast.error('Enter a valid number'); return }
+    setIsSavingNumber(true)
+    try {
+      await invoke('set_installment_number_cmd', { number: n })
+      toast.success(`Current installment set to #${n}`)
+      setNumberDialogOpen(false)
+      load(fromDate, toDate)
+    } catch (e: any) {
+      toast.error(e?.toString() || 'Failed to set installment number')
+    } finally {
+      setIsSavingNumber(false)
+    }
+  }
+
   // Filtered members
   const displayed = (summary?.members ?? []).filter(m => {
     if (filter === 'paid' && !m.hasPaid) return false
     if (filter === 'pending' && m.hasPaid) return false
+    if (filter === 'behind' && m.behindBy <= 0) return false
     if (search) {
       const q = search.toLowerCase()
       return m.memberName.toLowerCase().includes(q) || m.memberCode.toLowerCase().includes(q)
@@ -191,6 +217,49 @@ export default function ContributionsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Installment tracker */}
+      {summary && (
+        <Card className="border-indigo-200">
+          <CardContent className="pt-4 pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-100">
+                  <CalendarClock className="h-5 w-5 text-indigo-700" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Current Installment Number</p>
+                  {summary.currentInstallmentNumber > 0 ? (
+                    <p className="font-bold text-lg text-indigo-700">
+                      #{summary.currentInstallmentNumber}
+                      {summary.behindCount > 0 && (
+                        <span className="text-xs font-normal text-orange-600 ml-2">
+                          {summary.behindCount} member{summary.behindCount !== 1 ? 's' : ''} behind
+                        </span>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Not set</p>
+                  )}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setNumberInput(summary.currentInstallmentNumber > 0 ? String(summary.currentInstallmentNumber) : '')
+                  setNumberDialogOpen(true)
+                }}
+              >
+                Set Number
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Expected number of installments each member should have paid by now. It increases by one every week automatically.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {isLoading && (
         <div className="flex justify-center py-12">
@@ -287,7 +356,7 @@ export default function ContributionsPage() {
               className="w-48"
             />
             <div className="flex gap-1 rounded-lg border p-1">
-              {(['all', 'paid', 'pending'] as const).map(f => (
+              {(['all', 'paid', 'pending', 'behind'] as const).map(f => (
                 <Button
                   key={f}
                   variant={filter === f ? 'default' : 'ghost'}
@@ -295,7 +364,10 @@ export default function ContributionsPage() {
                   className="h-7 px-3"
                   onClick={() => setFilter(f)}
                 >
-                  {f === 'all' ? 'All' : f === 'paid' ? `Paid (${summary.paidCount})` : `Pending (${summary.pendingCount})`}
+                  {f === 'all' ? 'All'
+                    : f === 'paid' ? `Paid (${summary.paidCount})`
+                    : f === 'pending' ? `Pending (${summary.pendingCount})`
+                    : `Behind (${summary.behindCount})`}
                 </Button>
               ))}
             </div>
@@ -328,8 +400,20 @@ export default function ContributionsPage() {
                 {/* Member info */}
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-sm truncate">{member.memberName}</p>
-                  <p className="text-xs text-muted-foreground">{member.memberCode}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {member.memberCode}
+                    {summary.currentInstallmentNumber > 0 && (
+                      <span className="ml-2">· {member.installmentsPaid}/{summary.currentInstallmentNumber} installments</span>
+                    )}
+                  </p>
                 </div>
+
+                {/* Behind badge */}
+                {member.behindBy > 0 && (
+                  <Badge variant="outline" className="text-xs flex-shrink-0 border-red-300 text-red-700">
+                    Behind {member.behindBy}
+                  </Badge>
+                )}
 
                 {/* Paid info or pending */}
                 {member.hasPaid ? (
@@ -409,6 +493,41 @@ export default function ContributionsPage() {
             <Button onClick={handlePay} disabled={isPaying || !payAmount}>
               {isPaying ? <Spinner className="mr-2 h-4 w-4" /> : null}
               Record
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set installment number dialog */}
+      <Dialog open={numberDialogOpen} onOpenChange={setNumberDialogOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Set Current Installment Number</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Enter how many installments each member should have paid by now. From
+              today it will automatically increase by one every week. Members who have
+              paid fewer than this are flagged as behind.
+            </p>
+            <div className="space-y-1">
+              <Label>Installment number</Label>
+              <Input
+                type="number" min="0" step="1" placeholder="e.g. 12"
+                value={numberInput}
+                onChange={e => setNumberInput(e.target.value)}
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter') handleSaveNumber() }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setNumberDialogOpen(false)} disabled={isSavingNumber}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveNumber} disabled={isSavingNumber || numberInput === ''}>
+              {isSavingNumber ? <Spinner className="mr-2 h-4 w-4" /> : null}
+              Save
             </Button>
           </DialogFooter>
         </DialogContent>

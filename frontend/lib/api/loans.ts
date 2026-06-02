@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { withAutoPrint } from '@/lib/auto-print'
 import type { Loan, LoanFormData, LoanRepayment, ApiResponse } from '@/lib/types'
 
 function mapLoan(loan: any): Loan {
@@ -101,7 +102,7 @@ export async function getLoanRepayments(loanId: string): Promise<ApiResponse<Loa
 
 export async function issueLoan(data: LoanFormData): Promise<ApiResponse<Loan>> {
   try {
-    const loanId = await invoke('issue_member_loan', {
+    const loanId = await withAutoPrint(() => invoke('issue_member_loan', {
       memberId: parseInt(data.memberId),
       amount: data.amount,
       dailyInterestRate: data.dailyInterestRate,
@@ -109,7 +110,7 @@ export async function issueLoan(data: LoanFormData): Promise<ApiResponse<Loan>> 
       loanType: data.loanType.toLowerCase(),
       note: data.note || '',
       createdAt: new Date().toISOString(),
-    }) as number
+    })) as number
 
     const loan = await invoke('get_loan', { loanId }) as any
     if (!loan) return { success: false, error: 'Loan created but could not be retrieved' }
@@ -138,7 +139,7 @@ export async function recordRepayment(
   opts: RepaymentOptions,
 ): Promise<ApiResponse<void>> {
   try {
-    await invoke('record_member_payment', {
+    await withAutoPrint(() => invoke('record_member_payment', {
       loanId: parseInt(loanId),
       amount,
       paymentMethod: opts.paymentMethod,
@@ -147,7 +148,7 @@ export async function recordRepayment(
       cashAmount: opts.cashAmount ?? null,
       bankAmount: opts.bankAmount ?? null,
       bankTxnId: opts.bankTxnId ?? null,
-    })
+    }))
     return { success: true }
   } catch (error) {
     console.error('Failed to record repayment:', error)
@@ -192,14 +193,14 @@ export async function prepayLoanInterest(
   opts: { paymentMethod: string; cashAmount?: number | null; bankAmount?: number | null; bankTxnId?: string | null },
 ): Promise<ApiResponse<PrepayResult>> {
   try {
-    const data = await invoke<PrepayResult>('prepay_loan_interest', {
+    const data = await withAutoPrint(() => invoke<PrepayResult>('prepay_loan_interest', {
       loanId: parseInt(loanId),
       paymentMethod: opts.paymentMethod,
       createdAt: new Date().toISOString(),
       cashAmount: opts.cashAmount ?? null,
       bankAmount: opts.bankAmount ?? null,
       bankTxnId: opts.bankTxnId ?? null,
-    })
+    }))
     return { success: true, data }
   } catch (error) {
     return { success: false, error: typeof error === 'string' ? error : 'Failed to prepay interest' }

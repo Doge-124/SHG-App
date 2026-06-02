@@ -21,7 +21,7 @@ import {
   type IncomeLedger, type IncomeLedgerSection,
 } from '@/lib/reports'
 import {
-  Coins, Landmark, PiggyBank, FileSpreadsheet, FileText, RefreshCw, TrendingUp,
+  Coins, Landmark, PiggyBank, FileSpreadsheet, FileText, RefreshCw, TrendingUp, Banknote,
 } from 'lucide-react'
 
 type Period = 'day' | 'week' | 'month' | 'year' | 'custom'
@@ -169,19 +169,24 @@ export default function IncomeLedgerPage() {
         </div>
       ) : ledger ? (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <StatCard title="Interest Income" value={formatCurrency(ledger.interest.total)}
               icon={Coins} description={`${ledger.interest.count} payment(s)`} />
+            <StatCard title="Loan Principal Collected" value={formatCurrency(ledger.principal.total)}
+              icon={Banknote} description={`${ledger.principal.count} payment(s)`} />
             <StatCard title="Chit Commission" value={formatCurrency(ledger.chit.total)}
               icon={Landmark} description={`${ledger.chit.count} entry(ies)`} />
             <StatCard title="Savings Collected" value={formatCurrency(ledger.savings.total)}
               icon={PiggyBank} description={`${ledger.savings.count} deposit(s)`} />
             <StatCard title="Total Income" value={formatCurrency(ledger.grandTotal)}
-              icon={TrendingUp} description="Interest + chit (excl. savings)" variant="success" />
+              icon={TrendingUp} description="Interest + chit (excl. principal & savings)" variant="success" />
           </div>
 
           <LedgerCard title="Interest Income" icon={<Coins className="h-5 w-5 text-amber-600" />}
             section={ledger.interest} />
+          <LedgerCard title="Loan Principal Collected" icon={<Banknote className="h-5 w-5 text-emerald-600" />}
+            section={ledger.principal}
+            note="All loan principal coming back in — the return of loaned capital, shown for tracking and not counted as profit." />
           <LedgerCard title="Chit Commission Income" icon={<Landmark className="h-5 w-5 text-purple-600" />}
             section={ledger.chit} />
           <LedgerCard title="Savings Collected" icon={<PiggyBank className="h-5 w-5 text-blue-600" />}

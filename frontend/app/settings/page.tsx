@@ -16,6 +16,7 @@ import {
   Download,
   FileText,
   Wrench,
+  Printer,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -50,6 +51,7 @@ import {
 } from '@/lib/api/settings'
 import { useAppearance } from '@/lib/appearance-context'
 import { useSettings } from '@/lib/settings-context'
+import { isAutoPrintEnabled, setAutoPrintEnabled, isSilentPrintEnabled, setSilentPrintEnabled } from '@/lib/auto-print'
 import type { AppSettings, BackupInfo } from '@/lib/types'
 
 export default function SettingsPage() {
@@ -87,7 +89,9 @@ export default function SettingsPage() {
   const [unlockDialogOpen, setUnlockDialogOpen] = useState(false)
   const [unlockAdminPin, setUnlockAdminPin] = useState('')
   const [isTogglingLock, setIsTogglingLock] = useState(false)
-  
+  const [autoPrintDocs, setAutoPrintDocs] = useState(false)
+  const [silentPrint, setSilentPrint] = useState(false)
+
   const { settings: globalSettings, updateSettings, refreshSettings, pastDataLocked: globalLocked, refreshPastDataLock } = useSettings()
   const appearance = useAppearance()
 
@@ -153,6 +157,32 @@ export default function SettingsPage() {
   }, [globalSettings, appearance.theme, appearance.language])
 
   useEffect(() => { setPastDataLocked(globalLocked) }, [globalLocked])
+
+  // Auto-print is a per-machine preference held in localStorage.
+  useEffect(() => {
+    setAutoPrintDocs(isAutoPrintEnabled())
+    setSilentPrint(isSilentPrintEnabled())
+  }, [])
+
+  const handleToggleAutoPrint = (checked: boolean) => {
+    setAutoPrintEnabled(checked)
+    setAutoPrintDocs(checked)
+    toast.success(
+      checked
+        ? 'Auto-print on — new receipts and vouchers will print automatically'
+        : 'Auto-print off'
+    )
+  }
+
+  const handleToggleSilentPrint = (checked: boolean) => {
+    setSilentPrintEnabled(checked)
+    setSilentPrint(checked)
+    toast.success(
+      checked
+        ? 'Silent printing on — documents print straight to the printer'
+        : 'Silent printing off — the print dialog will be shown'
+    )
+  }
 
   const handleSetShgOpeningBalance = async () => {
     const cash = parseFloat(shgOpeningCash) || 0
@@ -708,6 +738,57 @@ export default function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Printer className="h-5 w-5" />
+                Printing
+              </CardTitle>
+              <CardDescription>
+                Control how receipts and vouchers are printed
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5 pr-4">
+                  <Label>Auto-print receipts &amp; vouchers</Label>
+                  <p className="text-sm text-muted-foreground">
+                    When on, every receipt or voucher is sent straight to the printer
+                    the moment it is created — loan repayments, chit installments,
+                    payouts, contributions, and manual receipts/vouchers. Turn off to
+                    print each document manually.
+                  </p>
+                </div>
+                <Switch
+                  checked={autoPrintDocs}
+                  onCheckedChange={handleToggleAutoPrint}
+                />
+              </div>
+
+              {autoPrintDocs && (
+                <>
+                  <Separator />
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5 pr-4">
+                      <Label>Silent printing (no dialog)</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Send documents straight to the default printer without
+                        showing the print dialog. Requires a silent-capable PDF
+                        reader (e.g. SumatraPDF, Adobe, or Foxit Reader) set as
+                        the system default. If none is available, the app falls
+                        back to the print dialog automatically.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={silentPrint}
+                      onCheckedChange={handleToggleSilentPrint}
+                    />
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="notifications">
@@ -1199,7 +1280,7 @@ export default function SettingsPage() {
                   const r = await invoke<any>('rebuild_balances')
                   const cashDelta = (r.shgCashAfter - r.shgCashBefore).toFixed(2)
                   const bankDelta = (r.shgBankAfter - r.shgBankBefore).toFixed(2)
-                  toast.success(`Rebuilt ${r.memberRowsUpdated} member balance(s). Cash Δ ${cashDelta}, Bank Δ ${bankDelta}`)
+                  toast.success(`Rebuilt ${r.memberRowsUpdated} member + ${r.loanRowsUpdated} loan balance(s). Cash Δ ${cashDelta}, Bank Δ ${bankDelta}`)
                 } catch (err: any) {
                   toast.error('Rebuild failed: ' + err?.toString())
                 }

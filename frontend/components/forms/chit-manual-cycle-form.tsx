@@ -24,6 +24,10 @@ import {
   type AuctionWinnerInput,
 } from '@/lib/api/chits'
 import { getChitMembers } from '@/lib/api/chits'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs, emptyPaymentSplit,
+  type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -74,7 +78,7 @@ export function ChitManualCycleForm({
 
   // Auction discount for this cycle (from prev cycle, shown in payment tab)
   const [auctionDiscount, setAuctionDiscount] = useState<number>(0)
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank'>('cash')
+  const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [selectedMemberId, setSelectedMemberId] = useState<string>('')
 
   // Winner tab
@@ -152,15 +156,21 @@ export function ChitManualCycleForm({
     if (!currentCycle || !selectedMemberId) { toast.error('Please select a member'); return }
     const amount = perMemberAmount(selectedMemberId)
     if (amount <= 0) { toast.error('Payment amount must be positive'); return }
+    if (!isPaymentSplitValid(paySplit, amount)) {
+      toast.error('For a mixed payment, cash + bank must equal the amount to collect')
+      return
+    }
 
     setIsSubmitting(true)
     try {
       const result = await recordMemberPaymentWithDiscount(
-        chitGroupId, currentCycle.id, selectedMemberId, amount, auctionDiscount, paymentMethod
+        chitGroupId, currentCycle.id, selectedMemberId, amount, auctionDiscount,
+        paymentInvokeArgs(paySplit),
       )
       if (result.success) {
         toast.success(result.data?.message ?? 'Payment recorded')
         setSelectedMemberId('')
+        setPaySplit(emptyPaymentSplit)
         await loadData()
       } else {
         toast.error(result.error || 'Failed to record payment')
@@ -400,44 +410,40 @@ export function ChitManualCycleForm({
               <Card>
                 <CardHeader><CardTitle className="text-base">Record Member Payment</CardTitle></CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <Label>Select Member</Label>
-                      <Select value={selectedMemberId} onValueChange={setSelectedMemberId}>
-                        <SelectTrigger><SelectValue placeholder="Select member" /></SelectTrigger>
-                        <SelectContent>
-                          {unpaidMembers.map(m => (
-                            <SelectItem key={m.memberId} value={m.memberId}>
-                              {m.memberName}
-                              {m.isEligibleForDiscount
-                                ? ` (${formatCurrency(m.payableAmount)})`
-                                : ` (${formatCurrency(monthlyContribution)} — no discount)`}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1">
-                      <Label>Payment Method</Label>
-                      <Select value={paymentMethod} onValueChange={(v: 'cash' | 'bank') => setPaymentMethod(v)}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cash">Cash</SelectItem>
-                          <SelectItem value="bank">Bank</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                  <div className="space-y-1">
+                    <Label>Select Member</Label>
+                    <Select value={selectedMemberId} onValueChange={(v) => { setSelectedMemberId(v); setPaySplit(emptyPaymentSplit) }}>
+                      <SelectTrigger><SelectValue placeholder="Select member" /></SelectTrigger>
+                      <SelectContent>
+                        {unpaidMembers.map(m => (
+                          <SelectItem key={m.memberId} value={m.memberId}>
+                            {m.memberName}
+                            {m.isEligibleForDiscount
+                              ? ` (${formatCurrency(m.payableAmount)})`
+                              : ` (${formatCurrency(monthlyContribution)} — no discount)`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                   {selectedMemberId && (
-                    <Alert>
-                      <AlertDescription className="text-sm">
-                        Amount to collect: <strong>{formatCurrency(perMemberAmount(selectedMemberId))}</strong>
-                        {auctionDiscount > 0 && paymentSummary.find(p => p.memberId === selectedMemberId)?.isEligibleForDiscount
-                          ? <span className="text-muted-foreground ml-2">(discount applied)</span>
-                          : auctionDiscount > 0 ? <span className="text-orange-600 ml-2">(ineligible — full rate)</span>
-                          : null}
-                      </AlertDescription>
-                    </Alert>
+                    <>
+                      <Alert>
+                        <AlertDescription className="text-sm">
+                          Amount to collect: <strong>{formatCurrency(perMemberAmount(selectedMemberId))}</strong>
+                          {auctionDiscount > 0 && paymentSummary.find(p => p.memberId === selectedMemberId)?.isEligibleForDiscount
+                            ? <span className="text-muted-foreground ml-2">(discount applied)</span>
+                            : auctionDiscount > 0 ? <span className="text-orange-600 ml-2">(ineligible — full rate)</span>
+                            : null}
+                        </AlertDescription>
+                      </Alert>
+                      <PaymentMethodFields
+                        total={perMemberAmount(selectedMemberId)}
+                        value={paySplit}
+                        onChange={setPaySplit}
+                        idPrefix="chit-pay"
+                      />
+                    </>
                   )}
                   <Button onClick={handleRecordPayment} disabled={isSubmitting || !selectedMemberId} className="w-full">
                     Record Payment & Generate Receipt

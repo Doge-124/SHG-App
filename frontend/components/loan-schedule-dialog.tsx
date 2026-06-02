@@ -157,10 +157,15 @@ export function LoanScheduleDialog({ loanId, open, onOpenChange }: Props) {
                   Due: {formatDate(s.dueDate)}
                 </Badge>
               )}
-              {s.totalRepaid > 0 && (
+              {(s.totalRepaid + s.upfrontInterest) > 0 && (
                 <Badge variant="outline" className="gap-1 border-green-400 text-green-700">
                   <CheckCircle2 className="h-3 w-3" />
-                  Repaid: {formatCurrency(s.totalRepaid)}
+                  Total Paid: {formatCurrency(s.totalRepaid + s.upfrontInterest)}
+                  {s.upfrontInterest > 0 && (
+                    <span className="font-normal opacity-80 ml-1">
+                      (incl. {formatCurrency(s.upfrontInterest)} upfront)
+                    </span>
+                  )}
                 </Badge>
               )}
               <Badge variant={s.status === 'active' ? 'default' : 'secondary'} className={cn(s.status === 'paid' && 'bg-green-100 text-green-700')}>
@@ -228,7 +233,10 @@ export function LoanScheduleDialog({ loanId, open, onOpenChange }: Props) {
                           <span className="text-muted-foreground text-xs">
                             {formatCurrency(s.upfrontInterest)} upfront (paid)
                           </span>
-                        ) : entry.daysAfterUpfront === 0 ? (
+                        ) : entry.entryType === 'payment' || entry.daysAfterUpfront === 0 ? (
+                          // Interest Accrued is a projection (assumes no repayments),
+                          // so it's meaningless on an actual payment row — show "—"
+                          // to match the Projected Outstanding column.
                           <span className="text-muted-foreground text-xs">—</span>
                         ) : (
                           <span className={cn('font-medium', entry.isOverdue && 'text-red-600')}>

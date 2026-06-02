@@ -40,3 +40,11 @@ sentry = { version = "0.34", default-features = false, features = ["backtrace", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 regex = "1"
+
+# Windows-only: silent printing via the shell print verb (ShellExecuteW).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { withAutoPrint } from '@/lib/auto-print'
 import { formatCurrency, formatDateTime, generateReferenceNumber } from '@/lib/format'
 import type {
   Receipt,
@@ -40,7 +41,7 @@ export async function recordReceipt(data: ReceiptFormData): Promise<ApiResponse<
     
     
     const isMixed = data.paymentMethod === 'mixed'
-    await invoke('record_receipt', {
+    await withAutoPrint(() => invoke('record_receipt', {
       amount: data.amount,
       reason: reason,
       paymentMethod: data.paymentMethod.toUpperCase(),
@@ -50,7 +51,7 @@ export async function recordReceipt(data: ReceiptFormData): Promise<ApiResponse<
       cashAmount: isMixed ? (data.cashAmount ?? null) : null,
       bankAmount: isMixed ? (data.bankAmount ?? null) : null,
       bankTxnId: data.bankTxnId ?? null,
-    })
+    }))
     
     const receipt: Receipt = {
       id: Date.now().toString(),
@@ -83,7 +84,7 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
     const reason = data.reasonType === 'Other' ? (data.customReason || 'Other expense') : data.reasonType
     
     
-    await invoke('record_voucher', {
+    await withAutoPrint(() => invoke('record_voucher', {
       amount: data.amount,
       reason: reason,
       paymentMethod: data.paymentMethod.toUpperCase(),
@@ -91,7 +92,7 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
       referenceId: data.memberId ? parseInt(data.memberId) : null,
       createdAt: createdAt,
       bankTxnId: data.bankTxnId ?? null,
-    })
+    }))
     
     const voucher: Voucher = {
       id: Date.now().toString(),

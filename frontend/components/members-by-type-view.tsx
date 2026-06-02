@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Plus, Eye, Pencil, UserX, MoreHorizontal, PiggyBank, Users, Banknote } from 'lucide-react'
+import { Plus, Eye, Pencil, UserX, UserCheck, MoreHorizontal, PiggyBank, Users, Banknote } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -25,7 +25,7 @@ import { PageHeader } from '@/components/page-header'
 import { MemberForm } from '@/components/forms/member-form'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { useApp } from '@/context/app-context'
-import { addMember, updateMember, deactivateMember } from '@/lib/api/members'
+import { addMember, updateMember, deactivateMember, reactivateMember } from '@/lib/api/members'
 import { formatCurrency, formatPhone } from '@/lib/format'
 import { track } from '@/lib/track'
 import type { Member, MemberFormData, MemberType } from '@/lib/types'
@@ -63,6 +63,7 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingMember, setEditingMember] = useState<Member | undefined>()
   const [memberToDeactivate, setMemberToDeactivate] = useState<Member | null>(null)
+  const [memberToReactivate, setMemberToReactivate] = useState<Member | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all')
 
@@ -117,6 +118,21 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
         refreshMembers()
       } else {
         toast.error(response.error || 'Failed to deactivate')
+      }
+    } catch { toast.error('An error occurred') } finally { setIsSubmitting(false) }
+  }
+
+  const handleReactivate = async () => {
+    if (!memberToReactivate) return
+    setIsSubmitting(true)
+    try {
+      const response = await reactivateMember(memberToReactivate.id)
+      if (response.success) {
+        toast.success('Member reactivated')
+        setMemberToReactivate(null)
+        refreshMembers()
+      } else {
+        toast.error(response.error || 'Failed to reactivate')
       }
     } catch { toast.error('An error occurred') } finally { setIsSubmitting(false) }
   }
@@ -194,7 +210,7 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
             }}>
               <Pencil className="mr-2 h-4 w-4" />Edit Member
             </DropdownMenuItem>
-            {member.status === 'active' && (
+            {member.status === 'active' ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -202,6 +218,15 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
                   className="text-destructive focus:text-destructive"
                 >
                   <UserX className="mr-2 h-4 w-4" />Deactivate
+                </DropdownMenuItem>
+              </>
+            ) : (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); setMemberToReactivate(member) }}
+                >
+                  <UserCheck className="mr-2 h-4 w-4" />Reactivate
                 </DropdownMenuItem>
               </>
             )}
@@ -270,11 +295,20 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
         open={!!memberToDeactivate}
         onOpenChange={(open) => !open && setMemberToDeactivate(null)}
         title="Deactivate Member"
-        description={`Are you sure you want to deactivate ${memberToDeactivate?.name}?`}
+        description={`Are you sure you want to deactivate ${memberToDeactivate?.name}? Their history is kept, and they can be reactivated later.`}
         confirmText="Deactivate"
         variant="destructive"
         isLoading={isSubmitting}
         onConfirm={handleDeactivate}
+      />
+      <ConfirmDialog
+        open={!!memberToReactivate}
+        onOpenChange={(open) => !open && setMemberToReactivate(null)}
+        title="Reactivate Member"
+        description={`Reactivate ${memberToReactivate?.name}? They will appear in active member lists again.`}
+        confirmText="Reactivate"
+        isLoading={isSubmitting}
+        onConfirm={handleReactivate}
       />
     </div>
   )

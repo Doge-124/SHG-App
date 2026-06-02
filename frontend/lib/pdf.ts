@@ -79,6 +79,12 @@ function renderReceipt(doc: jsPDF, receipt: any, shgName?: string, offsetY = 0):
   const refNumber     = receipt.referenceNumber ?? `RCPT${String(receipt.id ?? '').padStart(6, '0')}`
   const amount        = receipt.amount ?? 0
   const reason        = resolveReason(receipt.reason, referenceType)
+  // Mixed (cash + bank) payments carry the split so the receipt can show both.
+  const cashAmount    = receipt.cashAmount ?? receipt.cash_amount ?? null
+  const bankAmount    = receipt.bankAmount ?? receipt.bank_amount ?? null
+  const bankTxnId     = receipt.bankTxnId ?? receipt.bank_txn_id ?? null
+  const isMixed       = paymentMethod === 'MIXED'
+    || (cashAmount != null && bankAmount != null && cashAmount > 0 && bankAmount > 0)
 
   // ── Header band (dark background) ──────────────────────────────────────────
   doc.setFillColor(30, 41, 59)   // slate-900
@@ -163,6 +169,34 @@ function renderReceipt(doc: jsPDF, receipt: any, shgName?: string, offsetY = 0):
   doc.setDrawColor(203, 213, 225)
   doc.setLineWidth(0.3)
   doc.line(M, y, W - M, y)
+
+  // ── Payment breakdown (mixed cash + bank) ───────────────────────────────────
+  if (isMixed) {
+    y += 7
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(100, 116, 139)
+    doc.text('PAYMENT BREAKDOWN', M, y)
+
+    y += 5
+    doc.setFontSize(9.5)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(30, 41, 59)
+    doc.text(`Cash: ${fmtAmount(cashAmount || 0)}`, M, y)
+    doc.text(`Bank: ${fmtAmount(bankAmount || 0)}`, W - M, y, { align: 'right' })
+
+    if (bankTxnId) {
+      y += 5
+      doc.setFontSize(8)
+      doc.setTextColor(100, 116, 139)
+      doc.text(`Bank Txn ID: ${bankTxnId}`, M, y)
+    }
+
+    y += 5
+    doc.setDrawColor(203, 213, 225)
+    doc.setLineWidth(0.3)
+    doc.line(M, y, W - M, y)
+  }
 
   // ── Reason / Purpose ───────────────────────────────────────────────────────
   y += 7

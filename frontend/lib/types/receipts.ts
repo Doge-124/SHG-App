@@ -13,7 +13,7 @@ export interface Receipt {
   txn_type: 'RECEIPT' | 'VOUCHER'
   amount: number
   reason: string
-  payment_method: 'CASH' | 'BANK'
+  payment_method: 'CASH' | 'BANK' | 'MIXED'
   reference_type?: string
   reference_id?: number
   created_at: string
@@ -21,6 +21,10 @@ export interface Receipt {
   voided_reason?: string | null
   reversal_of_id?: number | null
   bank_txn_id?: string | null
+  group_id?: string | null
+  // Set when a mixed (cash + bank) payment is collapsed into one receipt.
+  cash_amount?: number | null
+  bank_amount?: number | null
 }
 
 export interface ReceiptWithMember extends Receipt {

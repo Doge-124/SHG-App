@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
 import { getAllSettings, getPastDataLockStatus } from '@/lib/api/settings'
+import { cacheGroupName } from '@/lib/auto-print'
 import type { AppSettings } from '@/lib/types'
 
 interface SettingsContextType {
@@ -33,6 +34,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       ])
       if (settingsRes.success && settingsRes.data) {
         setSettings(settingsRes.data)
+        // Cache the group name so auto-printed receipts/vouchers carry the
+        // same header as manually printed ones.
+        cacheGroupName(settingsRes.data.general?.groupName)
       } else {
         setError(settingsRes.error || 'Failed to load settings')
       }

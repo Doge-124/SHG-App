@@ -159,13 +159,11 @@ export default function MemberDetailPage() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <PageHeader title={profile.member.name} description={`Member Code: ${profile.member.code}`}>
-          {isSHG && (
-            <Button variant="outline" size="sm" asChild>
-              <Link href={`/passbook?memberId=${id}`}>
-                <BookOpen className="mr-2 h-4 w-4" />Passbook
-              </Link>
-            </Button>
-          )}
+          <Button variant="outline" size="sm" asChild>
+            <Link href={`/passbook?memberId=${id}`}>
+              <BookOpen className="mr-2 h-4 w-4" />Passbook
+            </Link>
+          </Button>
           <Badge
             variant={profile.member.status === 'active' ? 'default' : 'secondary'}
             className={cn('text-sm', profile.member.status === 'active' && 'bg-success/10 text-success')}

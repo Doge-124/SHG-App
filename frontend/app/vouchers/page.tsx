@@ -17,8 +17,9 @@ import {
 import { DataTable, type Column } from '@/components/data-table'
 import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
-import { VoucherForm } from '@/components/forms/voucher-form'
+import { VoucherForm, SAVINGS_PAYOUT_REASON } from '@/components/forms/voucher-form'
 import { getVouchers, createVoucher } from '@/lib/api/ledger'
+import { payoutMemberSavings } from '@/lib/api/members'
 import { useSettings } from '@/lib/settings-context'
 import { generateVoucherPDF, generateMultipleVouchersPDF } from '@/lib/pdf'
 import { PrintPreview } from '@/components/print-preview'
@@ -88,9 +89,14 @@ export default function VouchersPage() {
   const handleCreateVoucher = async (data: VoucherFormData) => {
     setIsSubmitting(true)
     try {
-      const response = await createVoucher(data)
+      // Savings payout is a special voucher that also reduces the member's
+      // savings balance, so it goes through a dedicated backend command.
+      const isSavingsPayout = data.reasonType === SAVINGS_PAYOUT_REASON
+      const response = isSavingsPayout
+        ? await payoutMemberSavings(data.memberId, data.amount, data.paymentMethod, data.bankTxnId)
+        : await createVoucher(data)
       if (response.success) {
-        toast.success('Voucher created successfully')
+        toast.success(isSavingsPayout ? 'Savings paid out successfully' : 'Voucher created successfully')
         track('voucher.created', { payment_method: data.paymentMethod })
         setIsFormOpen(false)
         loadVouchers()

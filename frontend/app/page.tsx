@@ -92,9 +92,9 @@ export default function DashboardPage() {
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">
-              <Link href="/members/shg">
+              <Link href="/members/loan">
                 <UserPlus className="h-5 w-5 text-primary" />
-                <span>Add Member</span>
+                <span>Add Loan Member</span>
               </Link>
             </Button>
             <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { withAutoPrint } from '@/lib/auto-print'
 import type {
   ChitGroup,
   ChitGroupFormData,
@@ -333,7 +334,7 @@ export async function recordChitPayment(
   opts: ChitPaymentOptions,
 ): Promise<ApiResponse<ChitPayment>> {
   try {
-    const paymentData = await invoke('record_chit_payment', {
+    const paymentData = await withAutoPrint(() => invoke('record_chit_payment', {
       chitId: parseInt(chitGroupId),
       cycleId: parseInt(cycleId),
       memberId: parseInt(memberId),
@@ -343,7 +344,7 @@ export async function recordChitPayment(
       cashAmount: opts.cashAmount ?? null,
       bankAmount: opts.bankAmount ?? null,
       bankTxnId: opts.bankTxnId ?? null,
-    }) as any
+    })) as any
     
     const chitPayment: ChitPayment = {
       id: paymentData.id,
@@ -373,7 +374,7 @@ export async function payoutChitWinner(
   note: string
 ): Promise<ApiResponse<void>> {
   try {
-    await invoke('payout_chit_winner', {
+    await withAutoPrint(() => invoke('payout_chit_winner', {
       chitId: parseInt(chitGroupId),
       cycleId: parseInt(cycleId),
       winningMemberId: parseInt(winningMemberId),
@@ -381,7 +382,7 @@ export async function payoutChitWinner(
       paymentMethod: paymentMethod.toUpperCase(), // Convert to uppercase for backend
       payoutDate: new Date().toISOString(),
       note,
-    })
+    }))
     
     return { success: true }
   } catch (error) {
@@ -470,7 +471,12 @@ export async function recordMemberPaymentWithDiscount(
   memberId: string,
   grossAmount: number,
   auctionDiscount: number,
-  paymentMethod: 'cash' | 'bank'
+  opts: {
+    paymentMethod: string                 // CASH | BANK | MIXED
+    cashAmount?: number | null
+    bankAmount?: number | null
+    bankTxnId?: string | null
+  },
 ): Promise<ApiResponse<{
   paymentId: string;
   netAmount: number;
@@ -478,16 +484,19 @@ export async function recordMemberPaymentWithDiscount(
   message: string;
 }>> {
   try {
-    const result = await invoke('record_member_payment_with_discount', {
+    const result = await withAutoPrint(() => invoke('record_member_payment_with_discount', {
       input: {
         chit_id: parseInt(chitGroupId),
         cycle_id: parseInt(cycleId),
         member_id: parseInt(memberId),
         gross_amount: grossAmount,
         auction_discount: auctionDiscount,
-        payment_method: paymentMethod.toUpperCase(),
+        payment_method: opts.paymentMethod.toUpperCase(),
+        cash_amount: opts.cashAmount ?? null,
+        bank_amount: opts.bankAmount ?? null,
+        bank_txn_id: opts.bankTxnId ?? null,
       }
-    }) as any
+    })) as any
     
     
     return {
@@ -522,7 +531,7 @@ export async function processWinnerPayout(
   message: string;
 }>> {
   try {
-    const result = await invoke('process_winner_payout', {
+    const result = await withAutoPrint(() => invoke('process_winner_payout', {
       input: {
         chit_id: parseInt(chitGroupId),
         cycle_id: parseInt(cycleId),
@@ -532,7 +541,7 @@ export async function processWinnerPayout(
         payment_method: paymentMethod.toUpperCase(),
         note,
       }
-    }) as any
+    })) as any
 
     return {
       success: true,
@@ -749,7 +758,7 @@ export async function processCycleWinners(
   overrideDiscountPerMember?: number,
 ): Promise<ApiResponse<{ auctionDiscountPerMember: number; winners: import('@/lib/types').ChitCycleWinner[]; message: string }>> {
   try {
-    const result = await invoke('process_chit_cycle_winners', {
+    const result = await withAutoPrint(() => invoke('process_chit_cycle_winners', {
       chitId: parseInt(chitGroupId),
       cycleId: parseInt(cycleId),
       fixedWinnerMemberId: fixedWinnerMemberId ? parseInt(fixedWinnerMemberId) : null,
@@ -760,7 +769,7 @@ export async function processCycleWinners(
         payment_method: w.paymentMethod.toUpperCase(),
       })),
       overrideDiscountPerMember: overrideDiscountPerMember ?? null,
-    }) as any
+    })) as any
 
     const winners: import('@/lib/types').ChitCycleWinner[] = (result.winners ?? []).map((w: any) => ({
       id: w.id.toString(),

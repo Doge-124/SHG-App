@@ -40,9 +40,10 @@ pub struct IncomeLedger {
     pub from_date: String,
     pub to_date: String,
     pub interest: LedgerSection,
+    pub principal: LedgerSection, // loan principal collected (return of capital, not profit)
     pub chit: LedgerSection,
     pub savings: LedgerSection,
-    pub grand_total: f64,        // interest + chit (true income; savings excluded)
+    pub grand_total: f64,        // interest + chit (true income; principal & savings excluded)
 }
 
 fn section_from(entries: Vec<LedgerEntry>) -> LedgerSection {
@@ -61,6 +62,33 @@ fn interest_entries(conn: &Connection, from: &str, to: &str) -> Result<Vec<Ledge
          FROM loan_payments lp
          LEFT JOIN members m ON m.id = lp.member_id
          WHERE lp.interest_amount > 0.005
+           AND lp.created_at >= ?1 AND lp.created_at <= ?2
+         ORDER BY lp.created_at ASC, lp.id ASC",
+    )?;
+    let rows = stmt.query_map([from, to], |r| {
+        Ok(LedgerEntry {
+            id: r.get(0)?,
+            date: r.get(1)?,
+            member_name: r.get(2)?,
+            amount: r.get(3)?,
+            note: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows { out.push(row?); }
+    Ok(out)
+}
+
+/// Loan principal collected: the principal portion of each loan payment in the
+/// period — i.e. all loan money coming back in, separate from interest. Like the
+/// interest list this reads loan_payments, which is already the live set
+/// (cancelled repayments are deleted from it).
+fn principal_entries(conn: &Connection, from: &str, to: &str) -> Result<Vec<LedgerEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT lp.id, lp.created_at, m.name, lp.principal_amount, lp.note
+         FROM loan_payments lp
+         LEFT JOIN members m ON m.id = lp.member_id
+         WHERE lp.principal_amount > 0.005
            AND lp.created_at >= ?1 AND lp.created_at <= ?2
          ORDER BY lp.created_at ASC, lp.id ASC",
     )?;
@@ -129,6 +157,7 @@ pub fn get_income_ledger(
     to: &str,
 ) -> Result<IncomeLedger, AppError> {
     let interest = section_from(interest_entries(conn, from, to)?);
+    let principal = section_from(principal_entries(conn, from, to)?);
     let chit = section_from(receipt_entries(conn, from, to, "'CHIT_COMMISSION'", true)?);
     let savings = section_from(receipt_entries(
         conn, from, to,
@@ -142,6 +171,7 @@ pub fn get_income_ledger(
         from_date: from.to_string(),
         to_date: to.to_string(),
         interest,
+        principal,
         chit,
         savings,
         grand_total,

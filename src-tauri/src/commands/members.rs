@@ -289,6 +289,28 @@ pub fn get_member_passbook(
         .map_err(|e: AppError| e.to_string())
 }
 
+/// Get loan-history passbook for a member (Loan members).
+#[tauri::command]
+pub fn get_member_loan_passbook(
+    state: State<Mutex<AppState>>,
+    member_id: i64,
+) -> Result<db::members::MemberLoanPassbook, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::members::get_member_loan_passbook(conn, member_id).map_err(|e: AppError| e.to_string())
+}
+
+/// Get chit-history passbook for a member (Chit members).
+#[tauri::command]
+pub fn get_member_chit_passbook(
+    state: State<Mutex<AppState>>,
+    member_id: i64,
+) -> Result<db::members::MemberChitPassbook, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::members::get_member_chit_passbook(conn, member_id).map_err(|e: AppError| e.to_string())
+}
+
 /// Update a member's type
 #[tauri::command]
 pub fn update_member_type(
@@ -311,6 +333,31 @@ pub fn update_member_type(
         "UPDATE members SET member_type = ?1 WHERE id = ?2",
         (mt.to_string(), member_id),
     ).map_err(|e| e.to_string())?;
-    
+
+    Ok(())
+}
+
+/// Activate or deactivate a member (soft state — history is preserved).
+#[tauri::command]
+pub fn set_member_active(
+    state: State<Mutex<AppState>>,
+    member_id: i64,
+    active: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard
+        .db
+        .as_mut()
+        .ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db::members::set_member_active(conn, member_id, active).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(
+        conn,
+        if active { "MEMBER_REACTIVATED" } else { "MEMBER_DEACTIVATED" },
+        "member",
+        Some(member_id),
+        if active { "Member reactivated" } else { "Member deactivated" },
+    );
     Ok(())
 }
