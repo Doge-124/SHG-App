@@ -21,8 +21,10 @@ import { StatCard } from '@/components/stat-card'
 import { toast } from 'sonner'
 import { formatCurrency } from '@/lib/format'
 import { calculateRunningBalances, formatDate, formatTime } from '@/lib/api/daybook'
+import { getBankTransactionIds, printBankTransactionIds } from '@/lib/reports'
+import { useSettings } from '@/lib/settings-context'
 import type { DayBookSummary } from '@/lib/types/daybook'
-import { BookOpen, ArrowUpRight, ArrowDownRight, RefreshCw, LandmarkIcon } from 'lucide-react'
+import { BookOpen, ArrowUpRight, ArrowDownRight, RefreshCw, LandmarkIcon, Printer } from 'lucide-react'
 
 function friendlyReason(referenceType: string | undefined | null, raw: string): string {
   switch (referenceType) {
@@ -43,11 +45,13 @@ function friendlyReason(referenceType: string | undefined | null, raw: string): 
 
 export default function BankBookPage() {
   const today = new Date().toISOString().split('T')[0]
+  const { settings } = useSettings()
 
   const [startDate, setStartDate] = useState(today)
   const [endDate, setEndDate] = useState(today)
   const [summary, setSummary] = useState<DayBookSummary | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isPrintingIds, setIsPrintingIds] = useState(false)
 
   const loadBankBook = async () => {
     setIsLoading(true)
@@ -65,6 +69,30 @@ export default function BankBookPage() {
     loadBankBook()
   }, [])
 
+  const handlePrintTxnIds = async () => {
+    setIsPrintingIds(true)
+    try {
+      const res = await getBankTransactionIds(startDate, endDate)
+      if (!res.success || !res.data) {
+        toast.error(res.error || 'Failed to load transaction IDs')
+        return
+      }
+      if (res.data.length === 0) {
+        toast.error('No bank transactions with a transaction ID in this period')
+        return
+      }
+      printBankTransactionIds(res.data, {
+        shgName: settings?.general?.groupName,
+        fromDate: startDate,
+        toDate: endDate,
+      })
+    } catch (err: any) {
+      toast.error(err?.toString() || 'Failed to print transaction IDs')
+    } finally {
+      setIsPrintingIds(false)
+    }
+  }
+
   const entriesWithBalance = useMemo(() => {
     if (!summary) return []
     return calculateRunningBalances(summary.transactions, summary.opening_balance)
@@ -76,10 +104,16 @@ export default function BankBookPage() {
         title="Bank Book"
         description="Bank account flow — bank receipts and payments only"
       >
-        <Button variant="outline" onClick={loadBankBook} disabled={isLoading}>
-          {isLoading ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={handlePrintTxnIds} disabled={isPrintingIds || isLoading}>
+            {isPrintingIds ? <Spinner className="mr-2 h-4 w-4" /> : <Printer className="mr-2 h-4 w-4" />}
+            Print Transaction IDs
+          </Button>
+          <Button variant="outline" onClick={loadBankBook} disabled={isLoading}>
+            {isLoading ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+            Refresh
+          </Button>
+        </div>
       </PageHeader>
 
       {/* Date range */}

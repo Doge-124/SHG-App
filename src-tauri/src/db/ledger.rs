@@ -145,10 +145,10 @@ pub fn record_voucher(
     created_at: &str,
 ) -> Result<(), AppError> {
     record_voucher_ex(tx, amount, reason, payment_method, reference_type,
-                      reference_id, created_at, None)
+                      reference_id, created_at, None, None)
 }
 
-/// Record a VOUCHER with an optional bank transaction id.
+/// Record a VOUCHER with an optional bank transaction id and group id.
 pub fn record_voucher_ex(
     tx: &mut Transaction,
     amount: f64,
@@ -158,6 +158,7 @@ pub fn record_voucher_ex(
     reference_id: Option<i64>,
     created_at: &str,
     bank_txn_id: Option<&str>,
+    group_id: Option<&str>,
 ) -> Result<(), AppError> {
     validation::validate_money_amount(amount)?;
     validation::validate_payment_method(payment_method)?;
@@ -180,9 +181,10 @@ pub fn record_voucher_ex(
     tx.execute(
         "INSERT INTO shg_transactions
          (txn_type, amount, reason, payment_method, reference_type, reference_id,
-          created_at, bank_txn_id)
-         VALUES ('VOUCHER', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        (amount, reason, payment_method, reference_type, reference_id, created_at, bank_txn_id),
+          created_at, bank_txn_id, group_id)
+         VALUES ('VOUCHER', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (amount, reason, payment_method, reference_type, reference_id, created_at,
+         bank_txn_id, group_id),
     )?;
 
     tx.execute(
@@ -191,6 +193,44 @@ pub fn record_voucher_ex(
     )?;
 
     Ok(())
+}
+
+/// Record a MIXED voucher — splits one logical outgoing payment into a CASH row
+/// and a BANK row, both tagged with the same `group_id` so cancellation reverses
+/// them together. Each half is balance-checked against its own method. The bank
+/// txn id (if any) is attached to the BANK half. Returns the generated group id.
+pub fn record_voucher_mixed(
+    tx: &mut Transaction,
+    cash_amount: f64,
+    bank_amount: f64,
+    reason: &str,
+    reference_type: Option<&str>,
+    reference_id: Option<i64>,
+    created_at: &str,
+    bank_txn_id: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let has_cash = cash_amount > 0.005;
+    let has_bank = bank_amount > 0.005;
+    if !has_cash && !has_bank {
+        return Err(AppError::validation("Mixed payment must have a positive cash or bank amount"));
+    }
+
+    let group_id: Option<String> = if has_cash && has_bank {
+        Some(format!("grp-{}", chrono::Utc::now().timestamp_micros()))
+    } else {
+        None
+    };
+    let gid = group_id.as_deref();
+
+    if has_cash {
+        record_voucher_ex(tx, cash_amount, reason, "CASH", reference_type,
+                          reference_id, created_at, None, gid)?;
+    }
+    if has_bank {
+        record_voucher_ex(tx, bank_amount, reason, "BANK", reference_type,
+                          reference_id, created_at, bank_txn_id, gid)?;
+    }
+    Ok(group_id)
 }
 
 /// Record a VOUCHER without checking balance (for special cases like chit payouts).

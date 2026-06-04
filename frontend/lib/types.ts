@@ -43,6 +43,7 @@ export interface MemberProfile {
   member: Member
   currentBalance: number
   openingBalance: number
+  regularBalance: number
   openingBalanceMethod?: string
   openingBalanceSetAt?: string
   initialInstallments: number    // Seeded from past data (locked)
@@ -123,7 +124,7 @@ export interface Voucher {
   id: string
   amount: number
   reason: string
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: 'cash' | 'bank' | 'mixed'
   reference?: string
   referenceNumber: string
   referenceType?: string
@@ -132,6 +133,11 @@ export interface Voucher {
   voidedAt?: number | null
   voidedReason?: string | null
   reversalOfId?: number | null
+  bankTxnId?: string | null
+  groupId?: string | null
+  // Set when a mixed (cash + bank) payment is collapsed into one voucher.
+  cashAmount?: number | null
+  bankAmount?: number | null
 }
 
 export interface VoucherFormData {
@@ -139,9 +145,11 @@ export interface VoucherFormData {
   amount: number
   reasonType: string
   customReason?: string
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: 'cash' | 'bank' | 'mixed'
   reference?: string
   bankTxnId?: string
+  cashAmount?: number
+  bankAmount?: number
 }
 
 // Chit Fund Types

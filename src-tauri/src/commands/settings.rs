@@ -333,8 +333,23 @@ pub fn clear_all_data(state: State<Mutex<AppState>>) -> Result<(), String> {
         .db
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
-    
+
     backup::clear_all_data(conn)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Clear all transactional data but keep members and their savings opening
+/// balances (for the testing → production handover).
+#[tauri::command]
+pub fn clear_data_keep_members(state: State<Mutex<AppState>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard
+        .db
+        .as_mut()
+        .ok_or_else(|| "DB not unlocked".to_string())?;
+
+    backup::clear_data_keep_members(conn)
         .map_err(|e| e.to_string())?;
     Ok(())
 }

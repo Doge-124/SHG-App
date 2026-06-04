@@ -167,16 +167,22 @@ export async function getMemberSavings(id: string): Promise<ApiResponse<number>>
 export async function payoutMemberSavings(
   id: string,
   amount: number,
-  paymentMethod: 'cash' | 'bank',
-  bankTxnId?: string | null,
+  opts: {
+    paymentMethod: string            // CASH | BANK | MIXED
+    cashAmount?: number | null
+    bankAmount?: number | null
+    bankTxnId?: string | null
+  },
 ): Promise<ApiResponse<void>> {
   try {
     await withAutoPrint(() => invoke('payout_member_savings_cmd', {
       memberId: parseInt(id),
       amount,
-      paymentMethod: paymentMethod.toUpperCase(),
-      bankTxnId: bankTxnId ?? null,
+      paymentMethod: opts.paymentMethod.toUpperCase(),
+      bankTxnId: opts.bankTxnId ?? null,
       createdAt: new Date().toISOString(),
+      cashAmount: opts.cashAmount ?? null,
+      bankAmount: opts.bankAmount ?? null,
     }))
     return { success: true }
   } catch (error) {
@@ -259,6 +265,7 @@ export async function getMemberProfile(memberId: number): Promise<MemberProfile>
       member,
       currentBalance: profile.currentBalance || 0,
       openingBalance: profile.openingBalance || 0,
+      regularBalance: profile.regularBalance ?? ((profile.currentBalance || 0) - (profile.openingBalance || 0)),
       openingBalanceMethod: profile.openingBalanceMethod,
       openingBalanceSetAt: profile.openingBalanceSetAt,
       initialInstallments: profile.initialInstallments || 0,

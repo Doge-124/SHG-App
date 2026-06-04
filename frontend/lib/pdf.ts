@@ -255,6 +255,12 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   const amount        = voucher.amount ?? 0
   const createdAt     = voucher.createdAt ?? voucher.created_at ?? ''
   const reason        = resolveReason(voucher.reason, voucher.referenceType ?? voucher.reference_type)
+  // Mixed (cash + bank) payments carry the split so the voucher can show both.
+  const cashAmount    = voucher.cashAmount ?? voucher.cash_amount ?? null
+  const bankAmount    = voucher.bankAmount ?? voucher.bank_amount ?? null
+  const bankTxnId     = voucher.bankTxnId ?? voucher.bank_txn_id ?? null
+  const isMixed       = paymentMethod === 'MIXED'
+    || (cashAmount != null && bankAmount != null && cashAmount > 0 && bankAmount > 0)
 
   // ── Header band (deep amber for vouchers) ──────────────────────────────────
   doc.setFillColor(120, 53, 15)    // amber-900
@@ -337,6 +343,34 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   doc.setDrawColor(203, 213, 225)
   doc.setLineWidth(0.3)
   doc.line(M, y, W - M, y)
+
+  // ── Payment breakdown (mixed cash + bank) ───────────────────────────────────
+  if (isMixed) {
+    y += 7
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(100, 116, 139)
+    doc.text('PAYMENT BREAKDOWN', M, y)
+
+    y += 5
+    doc.setFontSize(9.5)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(30, 41, 59)
+    doc.text(`Cash: ${fmtAmount(cashAmount || 0)}`, M, y)
+    doc.text(`Bank: ${fmtAmount(bankAmount || 0)}`, W - M, y, { align: 'right' })
+
+    if (bankTxnId) {
+      y += 5
+      doc.setFontSize(8)
+      doc.setTextColor(100, 116, 139)
+      doc.text(`Bank Txn ID: ${bankTxnId}`, M, y)
+    }
+
+    y += 5
+    doc.setDrawColor(203, 213, 225)
+    doc.setLineWidth(0.3)
+    doc.line(M, y, W - M, y)
+  }
 
   // ── Reason ────────────────────────────────────────────────────────────────
   y += 7

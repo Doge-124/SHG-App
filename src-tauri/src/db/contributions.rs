@@ -155,21 +155,35 @@ pub fn record_weekly_contribution(
 /// The withdrawal is stored as a negative CONTRIBUTION row in
 /// `member_transactions` so it lowers the running balance and shows up in the
 /// member's savings passbook. Returns the voucher's shg_transactions id.
+#[allow(clippy::too_many_arguments)]
 pub fn payout_member_savings(
     conn: &mut Connection,
     member_id: i64,
     amount: f64,
-    payment_method: &str,           // CASH | BANK
+    payment_method: &str,           // CASH | BANK | MIXED
     bank_txn_id: Option<&str>,
     created_at: &str,
+    cash_amount: Option<f64>,       // required when MIXED
+    bank_amount: Option<f64>,       // required when MIXED
 ) -> Result<i64, AppError> {
     if !amount.is_finite() || amount <= 0.0 {
         return Err(AppError::validation("amount must be > 0"));
     }
-    match payment_method {
-        "CASH" | "BANK" => {}
-        _ => return Err(AppError::validation("payment_method must be CASH or BANK")),
-    }
+    let (cash_part, bank_part) = match payment_method {
+        "CASH" | "BANK" => (None, None),
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - amount).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the payout amount"));
+            }
+            (Some(c), Some(b))
+        }
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
 
     let (member_code, member_name, is_active): (String, String, i64) = conn
         .query_row(
@@ -204,18 +218,34 @@ pub fn payout_member_savings(
 
     let mut tx = conn.transaction()?;
 
-    // 1) Money leaves the SHG — a voucher (balance-checked).
+    // 1) Money leaves the SHG — a voucher (balance-checked). Mixed splits into
+    //    a cash + bank voucher sharing a group id.
     let reason = format!("Savings payout to {member_name} ({member_code})");
-    ledger::record_voucher_ex(
-        &mut tx,
-        amount,
-        &reason,
-        payment_method,
-        Some("SAVINGS_WITHDRAWAL"),
-        Some(member_id),
-        created_at,
-        bank_txn_id,
-    )?;
+    if payment_method == "MIXED" {
+        ledger::record_voucher_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            &reason,
+            Some("SAVINGS_WITHDRAWAL"),
+            Some(member_id),
+            created_at,
+            bank_txn_id,
+        )?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_voucher_ex(
+            &mut tx,
+            amount,
+            &reason,
+            payment_method,
+            Some("SAVINGS_WITHDRAWAL"),
+            Some(member_id),
+            created_at,
+            bank_txn,
+            None,
+        )?;
+    }
     let voucher_id = tx.last_insert_rowid();
 
     // 2) Reduce the member's savings (negative CONTRIBUTION keeps the passbook

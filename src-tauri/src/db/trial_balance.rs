@@ -21,7 +21,8 @@ pub struct TrialBalance {
     pub opening_bank: f64,
     pub shg_opening_seed: f64,        // OPENING txns that fell inside this FY period
     pub savings_contributions: f64,   // WEEKLY_CONTRIBUTION + MEMBER_CONTRIBUTION + MEMBER_RECEIPT
-    pub loan_repayments: f64,         // MEMBER_PAYMENT receipts
+    pub loan_repayments: f64,         // MEMBER_PAYMENT receipts (real repayments only)
+    pub upfront_loan_interest: f64,   // interest retained at disbursement (MEMBER_PAYMENT, reason 'Upfront…')
     pub chit_installments: f64,       // CHIT_PAYMENT
     pub chit_commission: f64,         // CHIT_COMMISSION
     pub grants_donations: f64,        // GRANT + DONATION
@@ -29,9 +30,11 @@ pub struct TrialBalance {
     pub total_dr: f64,
 
     // ── Cr (Payments) ─────────────────────────────────────────────────────
-    pub loans_disbursed: f64,         // MEMBER_LOAN vouchers
+    pub loans_disbursed: f64,         // MEMBER_LOAN vouchers (gross principal)
+    pub savings_payouts: f64,         // SAVINGS_WITHDRAWAL vouchers
     pub chit_payouts: f64,            // CHIT_PAYOUT vouchers
-    pub other_payments: f64,          // remaining vouchers
+    pub member_payments: f64,         // MEMBER_VOUCHER (payments to members / general expenses)
+    pub other_payments: f64,          // remaining/uncategorised vouchers
     pub closing_cash: f64,            // derived: opening_cash + cash_in - cash_out
     pub closing_bank: f64,
     pub total_cr: f64,
@@ -135,13 +138,31 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let savings_contributions = receipt_by_types(
         "'WEEKLY_CONTRIBUTION','MEMBER_CONTRIBUTION','MEMBER_RECEIPT'"
     );
-    let loan_repayments   = receipt_by_types("'MEMBER_PAYMENT'");
+    // Loan-payment receipts split into the interest retained upfront at
+    // disbursement (reason 'Upfront…') vs genuine later repayments, so a freshly
+    // disbursed loan doesn't show a phantom "repayment".
+    let upfront_loan_interest: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+         WHERE txn_type = 'RECEIPT' AND reference_type = 'MEMBER_PAYMENT'
+         AND LOWER(reason) LIKE 'upfront%'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at >= ?1 AND created_at <= ?2",
+        [&from_date, &to_dt], |r| r.get(0),
+    ).unwrap_or(0.0);
+    let loan_repayments: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+         WHERE txn_type = 'RECEIPT' AND reference_type = 'MEMBER_PAYMENT'
+         AND LOWER(reason) NOT LIKE 'upfront%'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at >= ?1 AND created_at <= ?2",
+        [&from_date, &to_dt], |r| r.get(0),
+    ).unwrap_or(0.0);
     let chit_installments = receipt_by_types("'CHIT_PAYMENT'");
     let chit_commission   = receipt_by_types("'CHIT_COMMISSION'");
     let grants_donations  = receipt_by_types("'GRANT','DONATION'");
 
     let known_receipts = shg_opening_seed + savings_contributions + loan_repayments
-        + chit_installments + chit_commission + grants_donations;
+        + upfront_loan_interest + chit_installments + chit_commission + grants_donations;
 
     // All credit activity during the period (RECEIPT + OPENING)
     let all_period_credits: f64 = conn.query_row(
@@ -168,7 +189,9 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     };
 
     let loans_disbursed = voucher_by_types("'MEMBER_LOAN'");
+    let savings_payouts = voucher_by_types("'SAVINGS_WITHDRAWAL'");
     let chit_payouts    = voucher_by_types("'CHIT_PAYOUT'");
+    let member_payments = voucher_by_types("'MEMBER_VOUCHER'");
 
     let all_period_vouchers: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
@@ -178,7 +201,9 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
 
-    let other_payments = (all_period_vouchers - loans_disbursed - chit_payouts).max(0.0);
+    let other_payments =
+        (all_period_vouchers - loans_disbursed - savings_payouts - chit_payouts - member_payments)
+            .max(0.0);
 
     // ── Closing balances (derived) ─────────────────────────────────────────
     // period_cash_in includes OPENING txns (credit-side, CASH method)
@@ -219,11 +244,11 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
 
     // ── Totals ─────────────────────────────────────────────────────────────
     let total_dr = opening_cash + opening_bank
-        + shg_opening_seed + savings_contributions + loan_repayments
+        + shg_opening_seed + savings_contributions + loan_repayments + upfront_loan_interest
         + chit_installments + chit_commission + grants_donations + other_receipts;
 
-    let total_cr = loans_disbursed + chit_payouts + other_payments
-        + closing_cash + closing_bank;
+    let total_cr = loans_disbursed + savings_payouts + chit_payouts + member_payments
+        + other_payments + closing_cash + closing_bank;
 
     // ── Live balances for reconciliation ──────────────────────────────────
     let actual_cash: f64 = conn.query_row(
@@ -259,13 +284,16 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
         shg_opening_seed,
         savings_contributions,
         loan_repayments,
+        upfront_loan_interest,
         chit_installments,
         chit_commission,
         grants_donations,
         other_receipts,
         total_dr,
         loans_disbursed,
+        savings_payouts,
         chit_payouts,
+        member_payments,
         other_payments,
         closing_cash,
         closing_bank,

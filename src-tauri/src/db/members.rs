@@ -82,6 +82,10 @@ pub struct MemberProfile {
     pub member: Member,
     pub current_balance: f64,
     pub opening_balance: f64,
+    /// Savings accrued through the app (contributions), net of withdrawals,
+    /// with payouts drawn from the opening pool first so this never goes
+    /// negative just because opening-balance money was paid out.
+    pub regular_balance: f64,
     pub opening_balance_method: Option<String>,
     pub opening_balance_set_at: Option<String>,
     pub initial_installments: u32,      // Seeded from past data (locked)
@@ -572,6 +576,20 @@ pub fn get_member_profile(conn: &Connection, member_id: i64) -> Result<MemberPro
 
     let current_balance = get_member_balance(conn, member_id)?;
 
+    // "Regular balance" = savings beyond the pre-app opening. Savings payouts are
+    // stored as negative CONTRIBUTION rows; we treat a withdrawal as coming out
+    // of the opening pool first, so paying out opening-balance money leaves the
+    // contributions figure untouched (instead of driving it negative). The
+    // displayed opening_balance itself stays immutable.
+    let withdrawals: f64 = conn.query_row(
+        "SELECT COALESCE(-SUM(amount), 0) FROM member_transactions
+         WHERE member_id = ?1 AND txn_type = 'CONTRIBUTION' AND amount < 0",
+        [member_id],
+        |r| r.get(0),
+    ).unwrap_or(0.0);
+    let remaining_opening = (member.opening_balance - withdrawals).max(0.0);
+    let regular_balance = current_balance - remaining_opening;
+
     // Recent transactions (includes OPENING/LOAN/PAYMENT).
     let mut stmt = conn.prepare(
         "SELECT id, member_id, amount, txn_type, reason, created_at
@@ -604,6 +622,7 @@ pub fn get_member_profile(conn: &Connection, member_id: i64) -> Result<MemberPro
 
     Ok(MemberProfile {
         opening_balance: member.opening_balance,
+        regular_balance,
         opening_balance_method: member.opening_balance_method.clone(),
         opening_balance_set_at: member.opening_balance_set_at.clone(),
         initial_installments,

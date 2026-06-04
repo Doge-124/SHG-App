@@ -45,6 +45,8 @@ pub fn payout_member_savings_cmd(
     payment_method: String,
     bank_txn_id: Option<String>,
     created_at: String,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
 ) -> Result<i64, String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -59,6 +61,8 @@ pub fn payout_member_savings_cmd(
         &payment_method,
         bank_txn_id.as_deref(),
         &created_at,
+        cash_amount,
+        bank_amount,
     )
     .map_err(|e: AppError| e.to_string())?;
 

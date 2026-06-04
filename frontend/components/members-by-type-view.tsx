@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { Plus, Eye, Pencil, UserX, UserCheck, MoreHorizontal, PiggyBank, Users, Banknote } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -59,6 +59,7 @@ const TYPE_META: Record<MemberType, {
  */
 export function MembersByTypeView({ type }: { type: MemberType }) {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { members, loadingMembers, refreshMembers } = useApp()
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingMember, setEditingMember] = useState<Member | undefined>()
@@ -68,6 +69,11 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all')
 
   useEffect(() => { refreshMembers() }, [refreshMembers])
+
+  // Open the add-member form directly when arrived via a quick action (?add=1).
+  useEffect(() => {
+    if (searchParams?.get('add') === '1') setIsFormOpen(true)
+  }, [searchParams])
 
   const meta = TYPE_META[type]
 

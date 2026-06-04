@@ -33,17 +33,22 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { getMembers } from '@/lib/api/members'
 import { formatCurrency } from '@/lib/format'
+import {
+  PaymentMethodFields, isPaymentSplitValid, emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
+import { toast } from 'sonner'
 import type { Member, VoucherFormData } from '@/lib/types'
 
 /** Special voucher reason that withdraws a member's accrued savings. */
 export const SAVINGS_PAYOUT_REASON = 'Member savings payout'
 
+// Payment method is handled by the PaymentMethodFields component (cash/bank/
+// mixed) outside RHF, so it's not in this schema.
 const voucherSchema = z.object({
   memberId: z.string().min(1, 'Please select a member'),
   amount: z.coerce.number().min(1, 'Amount must be at least Rs. 1'),
   reasonType: z.string().min(2, 'Reason is required'),
   customReason: z.string().optional(),
-  paymentMethod: z.enum(['cash', 'bank']),
   reference: z.string().optional(),
 })
 
@@ -84,6 +89,7 @@ export function VoucherForm({
   const [loadingMembers, setLoadingMembers] = useState(false)
   const [selectedReason, setSelectedReason] = useState('')
   const [savings, setSavings] = useState<number | null>(null)
+  const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
 
   useEffect(() => {
     const loadMembers = async () => {
@@ -112,12 +118,11 @@ export function VoucherForm({
       amount: 0,
       reasonType: '',
       customReason: '',
-      paymentMethod: 'cash',
       reference: '',
     },
   })
 
-  const paymentMethod = form.watch('paymentMethod')
+  const amount = Number(form.watch('amount')) || 0
   const memberId = form.watch('memberId')
   const isPayout = selectedReason === SAVINGS_PAYOUT_REASON
 
@@ -132,10 +137,24 @@ export function VoucherForm({
   }, [isPayout, memberId])
 
   const handleSubmit = async (data: VoucherFormData) => {
-    await onSubmit(data)
+    if (!isPaymentSplitValid(paySplit, amount)) {
+      toast.error('For a mixed payment, cash + bank must equal the amount')
+      return
+    }
+    const finalData: VoucherFormData = {
+      ...data,
+      paymentMethod: paySplit.method,
+      cashAmount: paySplit.method === 'mixed' ? paySplit.cashAmount : undefined,
+      bankAmount: paySplit.method === 'mixed' ? paySplit.bankAmount : undefined,
+      bankTxnId: (paySplit.method === 'bank' || paySplit.method === 'mixed') && paySplit.bankTxnId.trim()
+        ? paySplit.bankTxnId.trim()
+        : undefined,
+    }
+    await onSubmit(finalData)
     form.reset()
     setSelectedReason('')
     setSavings(null)
+    setPaySplit(emptyPaymentSplit)
   }
 
   return (
@@ -266,46 +285,12 @@ export function VoucherForm({
               />
             )}
 
-            <FormField
-              control={form.control}
-              name="paymentMethod"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Payment Method</FormLabel>
-                  <Select
-                    onValueChange={(v) => field.onChange(v)}
-                    value={field.value}
-                  >
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="bank">Bank Transfer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
+            <PaymentMethodFields
+              total={amount}
+              value={paySplit}
+              onChange={setPaySplit}
+              idPrefix="voucher"
             />
-
-            {paymentMethod === 'bank' && (
-              <FormField
-                control={form.control}
-                name="bankTxnId"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Bank Transaction ID (optional)</FormLabel>
-                    <FormControl>
-                      <Input placeholder="UTR / cheque / reference no." maxLength={64} {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            )}
 
             <div className="flex justify-end gap-3 pt-4">
               <Button

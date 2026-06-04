@@ -285,8 +285,8 @@ export default function MemberDetailPage() {
               </div>
               <div className="text-center">
                 <p className="text-sm text-muted-foreground">Regular Balance</p>
-                <p className={cn('text-lg font-semibold', (profile.currentBalance - profile.openingBalance) < 0 && 'text-red-600')}>
-                  {formatCurrency(profile.currentBalance - profile.openingBalance)}
+                <p className={cn('text-lg font-semibold', profile.regularBalance < 0 && 'text-red-600')}>
+                  {formatCurrency(profile.regularBalance)}
                 </p>
               </div>
               <div className="text-center">

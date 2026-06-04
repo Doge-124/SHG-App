@@ -191,6 +191,17 @@ export async function clearAllData(): Promise<ApiResponse<void>> {
   }
 }
 
+/** Clear transactional data but keep members and their savings opening balances. */
+export async function clearDataKeepMembers(): Promise<ApiResponse<void>> {
+  try {
+    await invoke('clear_data_keep_members')
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to clear data:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to clear data' }
+  }
+}
+
 // Password verification
 export async function verifyMasterPassword(password: string): Promise<ApiResponse<boolean>> {
   try {

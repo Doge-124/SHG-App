@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   Users,
   Wallet,
@@ -26,6 +27,7 @@ import { formatCurrency, formatDate, getRelativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 export default function DashboardPage() {
+  const router = useRouter()
   const {
     dashboardStats,
     recentTransactions,
@@ -91,29 +93,28 @@ export default function DashboardPage() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">
-              <Link href="/members/loan">
-                <UserPlus className="h-5 w-5 text-primary" />
-                <span>Add Loan Member</span>
-              </Link>
+            {/* Navigate via router.push — in the Tauri build a bare <Link>'s
+                click interception is unreliable for nested routes (see the
+                sidebar's matching workaround). */}
+            <Button variant="outline" className="h-auto py-4 flex-col gap-2"
+              onClick={() => router.push('/members/loan?add=1')}>
+              <UserPlus className="h-5 w-5 text-primary" />
+              <span>Add Loan Member</span>
             </Button>
-            <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">
-              <Link href="/loans">
-                <HandCoins className="h-5 w-5 text-primary" />
-                <span>Issue Loan</span>
-              </Link>
+            <Button variant="outline" className="h-auto py-4 flex-col gap-2"
+              onClick={() => router.push('/loans')}>
+              <HandCoins className="h-5 w-5 text-primary" />
+              <span>Issue Loan</span>
             </Button>
-            <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">
-              <Link href="/receipts">
-                <Receipt className="h-5 w-5 text-success" />
-                <span>Create Receipt</span>
-              </Link>
+            <Button variant="outline" className="h-auto py-4 flex-col gap-2"
+              onClick={() => router.push('/receipts')}>
+              <Receipt className="h-5 w-5 text-success" />
+              <span>Create Receipt</span>
             </Button>
-            <Button asChild variant="outline" className="h-auto py-4 flex-col gap-2">
-              <Link href="/vouchers">
-                <FileText className="h-5 w-5 text-destructive" />
-                <span>Create Voucher</span>
-              </Link>
+            <Button variant="outline" className="h-auto py-4 flex-col gap-2"
+              onClick={() => router.push('/vouchers')}>
+              <FileText className="h-5 w-5 text-destructive" />
+              <span>Create Voucher</span>
             </Button>
           </div>
         </CardContent>

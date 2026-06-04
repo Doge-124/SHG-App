@@ -23,13 +23,16 @@ interface TrialBalance {
   shg_opening_seed: number
   savings_contributions: number
   loan_repayments: number
+  upfront_loan_interest: number
   chit_installments: number
   chit_commission: number
   grants_donations: number
   other_receipts: number
   total_dr: number
   loans_disbursed: number
+  savings_payouts: number
   chit_payouts: number
+  member_payments: number
   other_payments: number
   closing_cash: number
   closing_bank: number
@@ -254,6 +257,7 @@ export default function TrialBalancePage() {
                 {data.shg_opening_seed > 0 && <Row label="SHG Opening Balance (Seed)" amount={data.shg_opening_seed} />}
                 {data.savings_contributions > 0 && <Row label="Member Savings / Contributions" amount={data.savings_contributions} />}
                 {data.loan_repayments > 0 && <Row label="Loan Repayments (Principal + Interest)" amount={data.loan_repayments} />}
+                {data.upfront_loan_interest > 0 && <Row label="Upfront Loan Interest" amount={data.upfront_loan_interest} />}
                 {data.chit_installments > 0 && <Row label="Chit Installments" amount={data.chit_installments} />}
                 {data.chit_commission > 0 && <Row label="Chit Commission" amount={data.chit_commission} />}
                 {data.grants_donations > 0 && <Row label="Grants & Donations" amount={data.grants_donations} />}
@@ -275,8 +279,10 @@ export default function TrialBalancePage() {
               <CardContent className="space-y-1">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Payments During the Year</p>
                 {data.loans_disbursed > 0 && <Row label="Loans Disbursed to Members" amount={data.loans_disbursed} />}
+                {data.savings_payouts > 0 && <Row label="Savings Paid Out to Members" amount={data.savings_payouts} />}
                 {data.chit_payouts > 0 && <Row label="Chit Payouts to Winners" amount={data.chit_payouts} />}
-                {data.other_payments > 0 && <Row label="Other Payments / Expenses" amount={data.other_payments} />}
+                {data.member_payments > 0 && <Row label="Member Payments & Expenses" amount={data.member_payments} />}
+                {data.other_payments > 0 && <Row label="Other Payments" amount={data.other_payments} />}
 
                 <Separator className="my-3" />
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Closing Balance</p>

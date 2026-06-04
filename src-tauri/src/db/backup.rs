@@ -447,6 +447,84 @@ pub fn clear_all_data(conn: &mut Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Clear all transactional data but KEEP the member directory and each member's
+/// savings opening balance. Intended for the testing → production handover: after
+/// trialling the app you wipe the test loans/chits/receipts but keep the 150+
+/// members and their entered opening savings, so they don't have to be re-keyed.
+///
+/// Retained: members, their OPENING savings entries, past_installments, and all
+/// settings (group info etc.).
+/// Cleared: loans, chits, the SHG ledger + balances, contributions/payouts, and
+/// the SHG opening balance (so it can be re-set). Member savings balances are
+/// recomputed from the kept opening entries; current_installments is reset.
+pub fn clear_data_keep_members(conn: &mut Connection) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    tx.execute("PRAGMA foreign_keys = OFF", [])?;
+
+    // Chit data (child tables first).
+    tx.execute("DELETE FROM chit_payments", [])?;
+    let _ = tx.execute("DELETE FROM chit_cycle_winners", []);
+    let _ = tx.execute("DELETE FROM chit_member_eligibility", []);
+    tx.execute("DELETE FROM chit_cycles", [])?;
+    tx.execute("DELETE FROM chit_members", [])?;
+    tx.execute("DELETE FROM chit_groups", [])?;
+
+    // Loan data.
+    tx.execute("DELETE FROM loan_payments", [])?;
+    tx.execute("DELETE FROM loans", [])?;
+    let _ = tx.execute("DELETE FROM payments", []);
+    let _ = tx.execute("DELETE FROM receipts", []);
+
+    // SHG ledger + balances → fresh.
+    tx.execute("DELETE FROM shg_transactions", [])?;
+    tx.execute(
+        "INSERT OR REPLACE INTO shg_balances (method, balance) VALUES ('CASH', 0), ('BANK', 0)",
+        [],
+    )?;
+
+    // Member transactions: keep only OPENING (the entered savings opening
+    // balances); drop test contributions / payouts / etc.
+    tx.execute("DELETE FROM member_transactions WHERE txn_type != 'OPENING'", [])?;
+
+    // Recompute each member's savings balance from the kept OPENING rows.
+    tx.execute(
+        "UPDATE member_balances SET balance = COALESCE(
+            (SELECT SUM(amount) FROM member_transactions mt WHERE mt.member_id = member_balances.member_id), 0)",
+        [],
+    )?;
+
+    // Ongoing installment counter resets (contributions cleared); the locked
+    // past_installments seed stays.
+    tx.execute("UPDATE members SET current_installments = 0", [])?;
+
+    // Reset the SHG opening balance setup so it can be entered fresh (we just
+    // cleared the SHG ledger + balances). Other settings (group info, etc.) stay.
+    let _ = tx.execute(
+        "UPDATE settings SET shg_opening_cash = 0, shg_opening_bank = 0, shg_opening_locked = 0 WHERE id = 1",
+        [],
+    );
+
+    tx.execute("DELETE FROM audit_log", [])?;
+    let _ = tx.execute("DELETE FROM backup_info", []);
+
+    tx.execute("PRAGMA foreign_keys = ON", [])?;
+
+    // Reset autoincrement for the cleared tables only — members and their
+    // transactions/balances keep their ids.
+    let tables_to_reset = [
+        "shg_transactions", "loans", "loan_payments",
+        "chit_groups", "chit_members", "chit_cycles", "chit_payments",
+        "chit_cycle_winners", "chit_member_eligibility",
+        "payments", "receipts", "audit_log", "backup_info",
+    ];
+    for table in tables_to_reset {
+        let _ = tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table]);
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
 /// Get backup directory path
 fn get_backup_directory() -> Result<std::path::PathBuf, AppError> {
     let mut path = dirs::data_dir()

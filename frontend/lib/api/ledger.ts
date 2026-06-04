@@ -84,6 +84,7 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
     const reason = data.reasonType === 'Other' ? (data.customReason || 'Other expense') : data.reasonType
     
     
+    const isMixed = data.paymentMethod === 'mixed'
     await withAutoPrint(() => invoke('record_voucher', {
       amount: data.amount,
       reason: reason,
@@ -92,13 +93,17 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
       referenceId: data.memberId ? parseInt(data.memberId) : null,
       createdAt: createdAt,
       bankTxnId: data.bankTxnId ?? null,
+      cashAmount: isMixed ? (data.cashAmount ?? null) : null,
+      bankAmount: isMixed ? (data.bankAmount ?? null) : null,
     }))
     
     const voucher: Voucher = {
       id: Date.now().toString(),
       amount: data.amount,
       reason: reason,
-      paymentMethod: data.paymentMethod,
+      // The vouchers list re-fetches from the DB after creation; this transient
+      // object only needs a narrow value, so collapse 'mixed' to 'cash'.
+      paymentMethod: data.paymentMethod === 'mixed' ? 'cash' : data.paymentMethod,
       reference: data.reference,
       referenceNumber: generateReferenceNumber('voucher'),
       createdAt: createdAt,
@@ -197,20 +202,55 @@ export async function getVouchers(): Promise<ApiResponse<Voucher[]>> {
   try {
     const rawVouchers = await invoke('get_vouchers') as any[]
 
-    const vouchers: Voucher[] = rawVouchers.map((txn: any) => ({
-      id: txn.id.toString(),
-      amount: txn.amount,
-      reason: txn.reason,
-      paymentMethod: txn.payment_method.toLowerCase(),
-      reference: txn.member_name || txn.reference_id?.toString() || '',
-      referenceNumber: `VOU${txn.id.toString().padStart(6, '0')}`,
-      referenceType: txn.reference_type,
-      createdAt: txn.created_at,
-      memberName: txn.member_name,
-      voidedAt: txn.voided_at ?? null,
-      voidedReason: txn.voided_reason ?? null,
-      reversalOfId: txn.reversal_of_id ?? null,
-    }))
+    // Collapse mixed (cash+bank) vouchers — two rows sharing a group_id — into a
+    // single voucher carrying the combined amount and the cash/bank breakdown.
+    const byGroup = new Map<string, Voucher>()
+    const vouchers: Voucher[] = []
+    for (const txn of rawVouchers) {
+      const method = String(txn.payment_method).toLowerCase()
+      const base: Voucher = {
+        id: txn.id.toString(),
+        amount: txn.amount,
+        reason: txn.reason,
+        paymentMethod: method as Voucher['paymentMethod'],
+        reference: txn.member_name || txn.reference_id?.toString() || '',
+        referenceNumber: `VOU${txn.id.toString().padStart(6, '0')}`,
+        referenceType: txn.reference_type,
+        createdAt: txn.created_at,
+        memberName: txn.member_name,
+        voidedAt: txn.voided_at ?? null,
+        voidedReason: txn.voided_reason ?? null,
+        reversalOfId: txn.reversal_of_id ?? null,
+        bankTxnId: txn.bank_txn_id ?? null,
+        groupId: txn.group_id ?? null,
+      }
+
+      const gid = txn.group_id
+      if (!gid) { vouchers.push(base); continue }
+
+      const isCash = method === 'cash'
+      const existing = byGroup.get(gid)
+      if (!existing) {
+        const combined: Voucher = {
+          ...base,
+          paymentMethod: 'mixed',
+          cashAmount: isCash ? txn.amount : 0,
+          bankAmount: isCash ? 0 : txn.amount,
+          bankTxnId: isCash ? null : (txn.bank_txn_id ?? null),
+        }
+        byGroup.set(gid, combined)
+        vouchers.push(combined)
+      } else {
+        existing.amount += txn.amount
+        if (isCash) existing.cashAmount = (existing.cashAmount ?? 0) + txn.amount
+        else {
+          existing.bankAmount = (existing.bankAmount ?? 0) + txn.amount
+          if (txn.bank_txn_id) existing.bankTxnId = txn.bank_txn_id
+        }
+        if (parseInt(base.id) < parseInt(existing.id)) existing.id = base.id
+        if (txn.voided_at) { existing.voidedAt = txn.voided_at; existing.voidedReason = txn.voided_reason }
+      }
+    }
 
     return { success: true, data: vouchers }
   } catch (error) {

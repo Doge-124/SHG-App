@@ -78,13 +78,13 @@ export default function VouchersPage() {
     return paymentMatch && amountMatch && dateMatch
   })
 
-  const totalCash = vouchers
-    .filter((v) => v.paymentMethod === 'cash')
-    .reduce((sum, v) => sum + v.amount, 0)
+  // Mixed vouchers carry a cash_amount/bank_amount split; count each side
+  // toward the right total so the cards still reconcile.
+  const totalCash = vouchers.reduce(
+    (sum, v) => sum + (v.paymentMethod === 'cash' ? v.amount : (v.cashAmount ?? 0)), 0)
 
-  const totalBank = vouchers
-    .filter((v) => v.paymentMethod === 'bank')
-    .reduce((sum, v) => sum + v.amount, 0)
+  const totalBank = vouchers.reduce(
+    (sum, v) => sum + (v.paymentMethod === 'bank' ? v.amount : (v.bankAmount ?? 0)), 0)
 
   const handleCreateVoucher = async (data: VoucherFormData) => {
     setIsSubmitting(true)
@@ -93,7 +93,12 @@ export default function VouchersPage() {
       // savings balance, so it goes through a dedicated backend command.
       const isSavingsPayout = data.reasonType === SAVINGS_PAYOUT_REASON
       const response = isSavingsPayout
-        ? await payoutMemberSavings(data.memberId, data.amount, data.paymentMethod, data.bankTxnId)
+        ? await payoutMemberSavings(data.memberId, data.amount, {
+            paymentMethod: data.paymentMethod,
+            cashAmount: data.cashAmount,
+            bankAmount: data.bankAmount,
+            bankTxnId: data.bankTxnId,
+          })
         : await createVoucher(data)
       if (response.success) {
         toast.success(isSavingsPayout ? 'Savings paid out successfully' : 'Voucher created successfully')
@@ -178,6 +183,14 @@ export default function VouchersPage() {
             <span className="text-xs text-muted-foreground block">
               To: {voucher.memberName}
             </span>
+          )}
+          {voucher.paymentMethod === 'mixed' && (
+            <span className="text-xs text-muted-foreground block">
+              Cash {formatCurrency(voucher.cashAmount ?? 0)} + Bank {formatCurrency(voucher.bankAmount ?? 0)}
+            </span>
+          )}
+          {voucher.bankTxnId && (
+            <span className="text-xs text-muted-foreground block">Txn ID: {voucher.bankTxnId}</span>
           )}
           {voucher.voidedAt && voucher.voidedReason && (
             <span className="text-xs text-red-700 block">Cancelled: {voucher.voidedReason}</span>

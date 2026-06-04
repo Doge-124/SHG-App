@@ -158,6 +158,7 @@ fn main() {
             commands::settings::export_all_data,
             commands::settings::import_all_data,
             commands::settings::clear_all_data,
+            commands::settings::clear_data_keep_members,
             commands::settings::get_past_data_lock_status,
             commands::settings::lock_past_data_entry,
             commands::settings::unlock_past_data_entry,

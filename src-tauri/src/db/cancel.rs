@@ -120,6 +120,7 @@ pub fn cancel_shg_transaction(
         Some("CHIT_PAYOUT")          => cancel_chit_payout_with_commission(conn, &txn, reason),
         Some("WEEKLY_CONTRIBUTION") | Some("MEMBER_CONTRIBUTION")
                                      => cancel_member_contribution(conn, &txn, total, reason),
+        Some("SAVINGS_WITHDRAWAL")   => cancel_savings_withdrawal(conn, &txn, total, reason),
         _                            => cancel_manual(conn, &txn, reason),
     }
 }
@@ -455,6 +456,46 @@ fn cancel_member_contribution(
     void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
         Some(txn.id), &format!("CONTRIBUTION reversed (member #{}, Rs.{}): {}", member_id, total, reason))?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Cancel a savings payout (SAVINGS_WITHDRAWAL). The payout is the inverse of a
+/// contribution: it reduced the member's savings (a negative CONTRIBUTION row +
+/// balance decrement) and paid money out (a voucher, possibly a cash+bank
+/// group). Reversing it restores the savings balance, removes the withdrawal
+/// row, and reverses the voucher(s) so the SHG cash/bank is restored too.
+fn cancel_savings_withdrawal(
+    conn: &mut Connection,
+    txn: &ShgTxn,
+    total: f64,
+    reason: &str,
+) -> Result<(), AppError> {
+    let member_id = txn.reference_id.ok_or_else(||
+        AppError::business("Savings payout has no member reference."))?;
+
+    let tx = conn.transaction()?;
+
+    // Restore the member's savings balance (the payout decremented it).
+    tx.execute(
+        "INSERT INTO member_balances (member_id, balance) VALUES (?1, ?2)
+         ON CONFLICT(member_id) DO UPDATE SET balance = balance + ?2",
+        (member_id, total),
+    )?;
+
+    // Remove the negative CONTRIBUTION (withdrawal) row the payout inserted.
+    tx.execute(
+        "DELETE FROM member_transactions
+         WHERE member_id = ?1 AND txn_type = 'CONTRIBUTION'
+           AND ABS(amount + ?2) < 0.005 AND created_at = ?3",
+        (member_id, total, &txn.created_at),
+    )?;
+
+    // Reverse the voucher(s) (restores SHG cash/bank). Handles the cash+bank
+    // group for mixed payouts.
+    void_group(&tx, txn, reason)?;
+    audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
+        Some(txn.id), &format!("SAVINGS_PAYOUT reversed (member #{}, Rs.{}): {}", member_id, total, reason))?;
     tx.commit()?;
     Ok(())
 }

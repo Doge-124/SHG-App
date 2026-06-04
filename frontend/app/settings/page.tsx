@@ -42,6 +42,7 @@ import {
   exportAllData,
   importAllData,
   clearAllData,
+  clearDataKeepMembers,
   changeDatabasePassword,
   getBackupList,
   verifyMasterPassword,
@@ -71,6 +72,7 @@ export default function SettingsPage() {
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [isRestoreLoading, setIsRestoreLoading] = useState(false)
   const [clearDataDialogOpen, setClearDataDialogOpen] = useState(false)
+  const [clearMode, setClearMode] = useState<'all' | 'keep'>('all')
   const [clearDataPassword, setClearDataPassword] = useState('')
   const [clearDataConfirmed, setClearDataConfirmed] = useState(false)
   const [isVerifyingPassword, setIsVerifyingPassword] = useState(false)
@@ -398,7 +400,8 @@ export default function SettingsPage() {
     input.click()
   }
 
-  const handleClearData = () => {
+  const handleClearData = (mode: 'all' | 'keep' = 'all') => {
+    setClearMode(mode)
     setClearDataDialogOpen(true)
   }
 
@@ -427,21 +430,27 @@ export default function SettingsPage() {
 
       // PIN verified + box ticked → no native confirm() (unreliable in the
       // Tauri webview). Proceed directly.
-      const response = await clearAllData()
+      const response = clearMode === 'keep'
+        ? await clearDataKeepMembers()
+        : await clearAllData()
       if (!response.success) {
         toast.error(response.error || 'Failed to clear data')
         return
       }
 
-      toast.success('All data cleared successfully')
+      toast.success(clearMode === 'keep'
+        ? 'Data cleared — members and their opening balances were kept'
+        : 'All data cleared successfully')
       setClearDataDialogOpen(false)
       setClearDataPassword('')
       setClearDataConfirmed(false)
 
-      // Reset appearance to defaults immediately so the UI reflects the
-      // cleared state before the page reloads.
-      appearance.setTheme('light')
-      appearance.setLanguage('english')
+      // Full clear resets settings too, so mirror that in the live UI. The
+      // keep-members clear preserves settings, so leave appearance alone.
+      if (clearMode === 'all') {
+        appearance.setTheme('light')
+        appearance.setLanguage('english')
+      }
 
       // Refresh global settings context from the now-reset DB
       await refreshSettings()
@@ -1055,7 +1064,7 @@ export default function SettingsPage() {
                 <p className="text-sm text-muted-foreground mb-3">
                   These actions are irreversible. Please be careful.
                 </p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" onClick={handleExport}>
                     <Database className="mr-2 h-4 w-4" />
                     Export Data
@@ -1064,10 +1073,19 @@ export default function SettingsPage() {
                     <Database className="mr-2 h-4 w-4" />
                     Import Data
                   </Button>
-                  <Button variant="destructive" size="sm" onClick={handleClearData}>
+                  <Button variant="outline" size="sm" className="border-amber-400 text-amber-700 hover:bg-amber-50" onClick={() => handleClearData('keep')}>
+                    <Users className="mr-2 h-4 w-4" />
+                    Clear Data (Keep Members)
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={() => handleClearData('all')}>
                     Clear All Data
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  <strong>Clear Data (Keep Members)</strong> wipes loans, chits, receipts, vouchers and
+                  balances but keeps your members and their entered savings opening balances — use it
+                  to go live after testing without re-adding everyone.
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -1728,11 +1746,13 @@ export default function SettingsPage() {
       }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-destructive">Clear All Data</DialogTitle>
+            <DialogTitle className={clearMode === 'keep' ? 'text-amber-700' : 'text-destructive'}>
+              {clearMode === 'keep' ? 'Clear Data (Keep Members)' : 'Clear All Data'}
+            </DialogTitle>
             <DialogDescription>
-              This permanently deletes all members, transactions, loans, and chit data.
-              Settings are preserved. This cannot be undone. Enter the admin PIN you set
-              when the app was first set up to confirm.
+              {clearMode === 'keep'
+                ? 'This permanently deletes all loans, chits, receipts, vouchers and balances, but KEEPS your members and their entered savings opening balances. This cannot be undone. Enter the admin PIN you set when the app was first set up to confirm.'
+                : 'This permanently deletes all members, transactions, loans, and chit data. Settings are preserved. This cannot be undone. Enter the admin PIN you set when the app was first set up to confirm.'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -1758,7 +1778,9 @@ export default function SettingsPage() {
                 checked={clearDataConfirmed}
                 onChange={(e) => setClearDataConfirmed(e.target.checked)}
               />
-              <span>I understand this permanently deletes all data and cannot be undone.</span>
+              <span>{clearMode === 'keep'
+                ? 'I understand this permanently deletes all transactions (members and opening balances are kept) and cannot be undone.'
+                : 'I understand this permanently deletes all data and cannot be undone.'}</span>
             </label>
           </div>
           <DialogFooter>

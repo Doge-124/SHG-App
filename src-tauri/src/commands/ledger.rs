@@ -125,11 +125,12 @@ pub fn record_voucher(
     reference_id: Option<i64>,
     created_at: String,
     bank_txn_id: Option<String>,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
 ) -> Result<(), String> {
     validation::validate_money_amount(amount)
         .map_err(|e: AppError| e.to_string())?;
-    validation::validate_payment_method(&payment_method)
-        .map_err(|e: AppError| e.to_string())?;
+    check_payment(&payment_method, amount, cash_amount, bank_amount)?;
 
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -141,18 +142,32 @@ pub fn record_voucher(
         .transaction()
         .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
-    let bank_txn = if payment_method == "BANK" { bank_txn_id.as_deref() } else { None };
-    db::ledger::record_voucher_ex(
-        &mut tx,
-        amount,
-        &reason,
-        &payment_method,
-        reference_type.as_deref(),
-        reference_id,
-        &created_at,
-        bank_txn,
-    )
-    .map_err(|e: AppError| e.to_string())?;
+    if payment_method == "MIXED" {
+        db::ledger::record_voucher_mixed(
+            &mut tx,
+            cash_amount.unwrap_or(0.0),
+            bank_amount.unwrap_or(0.0),
+            &reason,
+            reference_type.as_deref(),
+            reference_id,
+            &created_at,
+            bank_txn_id.as_deref(),
+        ).map_err(|e: AppError| e.to_string())?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id.as_deref() } else { None };
+        db::ledger::record_voucher_ex(
+            &mut tx,
+            amount,
+            &reason,
+            &payment_method,
+            reference_type.as_deref(),
+            reference_id,
+            &created_at,
+            bank_txn,
+            None,
+        )
+        .map_err(|e: AppError| e.to_string())?;
+    }
 
     tx.commit()
         .map_err(|e| format!("Failed to commit transaction: {e}"))?;
