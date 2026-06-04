@@ -142,7 +142,9 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // SHG seed (OPENING type in shg_transactions — set via Settings)
     let shg_seed: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
-         WHERE txn_type = 'OPENING' AND created_at <= ?1",
+         WHERE txn_type = 'OPENING'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -150,6 +152,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let chit_commission: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type = 'CHIT_COMMISSION'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -158,6 +161,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let donations_grants: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type IN ('DONATION', 'GRANT')
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -174,7 +178,9 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // Other income: any RECEIPT not already categorised above
     let total_receipts: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
-         WHERE txn_type IN ('RECEIPT', 'OPENING') AND created_at <= ?1",
+         WHERE txn_type IN ('RECEIPT', 'OPENING')
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -189,6 +195,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT'
          AND reference_type IN ('WEEKLY_CONTRIBUTION','MEMBER_CONTRIBUTION','MEMBER_RECEIPT')
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -196,6 +203,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let chit_installments: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type = 'CHIT_PAYMENT'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -205,6 +213,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let loan_repayment_receipts: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type = 'MEMBER_PAYMENT'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -217,13 +226,16 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // Other expenses = all vouchers not related to loans or chit payouts
     let total_vouchers: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
-         WHERE txn_type = 'VOUCHER' AND created_at <= ?1",
+         WHERE txn_type = 'VOUCHER'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
     let loans_disbursed_txn: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER' AND reference_type = 'MEMBER_LOAN'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -231,6 +243,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let chit_payouts_txn: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER' AND reference_type = 'CHIT_PAYOUT'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);

@@ -121,6 +121,7 @@ pub fn get_income_expenditure(
     let chit_commission: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type = 'CHIT_COMMISSION'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],
         |r| r.get(0),
@@ -130,6 +131,7 @@ pub fn get_income_expenditure(
     let donations_grants: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT' AND reference_type IN ('DONATION', 'GRANT')
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],
         |r| r.get(0),
@@ -137,10 +139,12 @@ pub fn get_income_expenditure(
 
     // ── Other income ──────────────────────────────────────────────────────
     // Any RECEIPT not in pass-through categories (savings, loan repayments,
-    // chit installments) and not already counted above.
+    // chit installments) and not already counted above. Cancelled (voided) and
+    // reversal rows are excluded so a reversed transaction doesn't show as income.
     let other_income: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'RECEIPT'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND (reference_type IS NULL OR reference_type NOT IN (
              'WEEKLY_CONTRIBUTION','MEMBER_CONTRIBUTION','MEMBER_RECEIPT',
              'MEMBER_PAYMENT','CHIT_PAYMENT','CHIT_COMMISSION',
@@ -155,9 +159,12 @@ pub fn get_income_expenditure(
 
     // ── Operational expenses ──────────────────────────────────────────────
     // Vouchers that are genuine expenses — NOT loan disbursements, NOT chit payouts.
+    // Cancelled (voided) originals and reversal vouchers are excluded so a
+    // reversed transaction isn't counted as an expense.
     let operational_expenses: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND (reference_type IS NULL OR reference_type NOT IN ('MEMBER_LOAN', 'CHIT_PAYOUT'))
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],

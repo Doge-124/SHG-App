@@ -304,6 +304,7 @@ pub fn get_weekly_contribution_status(
              FROM shg_transactions
              WHERE txn_type = 'RECEIPT'
                AND reference_type = 'WEEKLY_CONTRIBUTION'
+               AND voided_at IS NULL AND reversal_of_id IS NULL
                AND created_at >= ?1
                AND created_at <= ?2
              GROUP BY reference_id

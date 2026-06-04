@@ -83,12 +83,17 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     // txn_type='OPENING' is a credit (money the SHG starts with), same as RECEIPT.
     // txn_type='VOUCHER'  is a debit  (money paid out).
     // Any other unknown type is treated as a debit for safety.
+    // Cancelled (voided) originals and their reversal rows are excluded from
+    // every sum below so a reversed transaction never shows as a receipt or a
+    // payment. The cancelled pair nets to zero, so balances still reconcile.
     let opening_cash: f64 = conn.query_row(
         "SELECT COALESCE(SUM(
              CASE WHEN txn_type IN ('RECEIPT','OPENING') THEN amount ELSE -amount END
          ), 0)
          FROM shg_transactions
-         WHERE payment_method = 'CASH' AND created_at < ?1",
+         WHERE payment_method = 'CASH'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at < ?1",
         [&from_date], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -97,7 +102,9 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
              CASE WHEN txn_type IN ('RECEIPT','OPENING') THEN amount ELSE -amount END
          ), 0)
          FROM shg_transactions
-         WHERE payment_method = 'BANK' AND created_at < ?1",
+         WHERE payment_method = 'BANK'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at < ?1",
         [&from_date], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -107,6 +114,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let shg_opening_seed: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'OPENING'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -117,6 +125,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
             &format!(
                 "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
                  WHERE txn_type = 'RECEIPT' AND reference_type IN ({types})
+                 AND voided_at IS NULL AND reversal_of_id IS NULL
                  AND created_at >= ?1 AND created_at <= ?2"
             ),
             [&from_date, &to_dt], |r| r.get(0),
@@ -138,6 +147,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let all_period_credits: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type IN ('RECEIPT', 'OPENING')
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -150,6 +160,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
             &format!(
                 "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
                  WHERE txn_type = 'VOUCHER' AND reference_type IN ({types})
+                 AND voided_at IS NULL AND reversal_of_id IS NULL
                  AND created_at >= ?1 AND created_at <= ?2"
             ),
             [&from_date, &to_dt], |r| r.get(0),
@@ -162,6 +173,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let all_period_vouchers: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -173,6 +185,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let period_cash_in: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type IN ('RECEIPT', 'OPENING') AND payment_method = 'CASH'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -180,6 +193,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let period_cash_out: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER' AND payment_method = 'CASH'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -187,6 +201,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let period_bank_in: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type IN ('RECEIPT', 'OPENING') AND payment_method = 'BANK'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
@@ -194,6 +209,7 @@ pub fn get_trial_balance(conn: &Connection, financial_year: i32) -> Result<Trial
     let period_bank_out: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER' AND payment_method = 'BANK'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt], |r| r.get(0),
     ).unwrap_or(0.0);
