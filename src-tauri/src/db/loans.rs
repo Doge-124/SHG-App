@@ -66,15 +66,19 @@ pub struct Loan {
 ///
 /// Monthly loans are open-ended. Weekly loans have a 100-day term + 20-day grace (120 days total)
 /// after which a daily fine accrues (calculated at repayment time, not stored here).
+#[allow(clippy::too_many_arguments)]
 pub fn create_loan(
     conn: &mut Connection,
     member_id: i64,
     amount: f64,
     daily_interest_rate: f64,
-    payment_method: &str,
+    payment_method: &str,           // CASH | BANK | MIXED
     loan_type: &str,
     note: &str,
     created_at: &str,
+    cash_amount: Option<f64>,       // required when MIXED
+    bank_amount: Option<f64>,       // required when MIXED
+    bank_txn_id: Option<&str>,      // bank reference / cheque no. (BANK or mixed bank half)
 ) -> Result<i64, AppError> {
     if !can_take_loans(conn, member_id)? {
         return Err(AppError::business(
@@ -82,6 +86,32 @@ pub fn create_loan(
         ));
     }
     validation::validate_money_amount(amount)?;
+
+    // Resolve the disbursement split. For MIXED the gross principal voucher is
+    // split into a cash half + a bank half that must sum to `amount`.
+    let (cash_part, bank_part) = match payment_method {
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed disbursement needs a positive amount in both cash and bank"));
+            }
+            if (c + b - amount).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the loan amount"));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
+    // loans.payment_method is constrained to CASH/BANK on some DBs; the
+    // authoritative cash/bank split for a MIXED loan lives on the ledger
+    // (shg_transactions voucher rows). Store the larger half as the indicative
+    // method so the loan record passes the CHECK without a schema migration.
+    let loan_method: &str = match payment_method {
+        "MIXED" => if cash_part.unwrap_or(0.0) >= bank_part.unwrap_or(0.0) { "CASH" } else { "BANK" },
+        other => other,
+    };
 
     let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
@@ -115,7 +145,7 @@ pub fn create_loan(
              VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13,?14,?15)
              RETURNING id",
             (member_id, amount, outstanding, daily_interest_rate, amount,
-             upfront_interest, upfront_interest, payment_method, loan_type, note,
+             upfront_interest, upfront_interest, loan_method, loan_type, note,
              created_at, created_at, &paid_through_init, amount, created_at),
             |row| row.get(0),
         )?
@@ -129,7 +159,7 @@ pub fn create_loan(
              VALUES (?1,?2,?3,0,?4,?5,?6,?7,?8,?9,?10,'active',?11,?12,?13)
              RETURNING id",
             (member_id, amount, outstanding, daily_interest_rate, amount,
-             upfront_interest, upfront_interest, payment_method, loan_type, note,
+             upfront_interest, upfront_interest, loan_method, loan_type, note,
              created_at, created_at, &paid_through_init),
             |row| row.get(0),
         )?
@@ -147,11 +177,13 @@ pub fn create_loan(
     // inflated balance and the net-outflow check is atomic.
     if upfront_interest > 0.0 {
         let upfront_note = "Upfront Interest";
+        // Upfront interest is collected as a single inflow under the indicative
+        // method (the larger half for a mixed disbursement).
         ledger::record_receipt(
             &mut tx,
             upfront_interest,
             upfront_note,
-            payment_method,
+            loan_method,
             Some("MEMBER_PAYMENT"),
             Some(member_id),
             created_at,
@@ -162,7 +194,7 @@ pub fn create_loan(
                (loan_id, member_id, amount, principal_amount, interest_amount,
                 payment_method, note, created_at)
              VALUES (?1, ?2, ?3, 0, ?3, ?4, ?5, ?6)",
-            (loan_id, member_id, upfront_interest, payment_method, upfront_note, created_at),
+            (loan_id, member_id, upfront_interest, loan_method, upfront_note, created_at),
         )?;
     }
 
@@ -175,15 +207,31 @@ pub fn create_loan(
     } else {
         format!("Loan disbursement — Purpose: {}", note.trim())
     };
-    ledger::record_voucher(
-        &mut tx,
-        amount,
-        &voucher_note,
-        payment_method,
-        Some("MEMBER_LOAN"),
-        Some(member_id),
-        created_at,
-    )?;
+    if payment_method == "MIXED" {
+        ledger::record_voucher_mixed(
+            &mut tx,
+            cash_part.unwrap_or(0.0),
+            bank_part.unwrap_or(0.0),
+            &voucher_note,
+            Some("MEMBER_LOAN"),
+            Some(member_id),
+            created_at,
+            bank_txn_id,
+        )?;
+    } else {
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_voucher_ex(
+            &mut tx,
+            amount,
+            &voucher_note,
+            payment_method,
+            Some("MEMBER_LOAN"),
+            Some(member_id),
+            created_at,
+            bank_txn,
+            None,
+        )?;
+    }
 
     tx.commit()?;
     Ok(loan_id)

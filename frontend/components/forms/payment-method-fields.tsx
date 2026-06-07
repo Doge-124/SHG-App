@@ -10,11 +10,14 @@ import { formatCurrency } from '@/lib/format'
 
 export type PayMethod = 'cash' | 'bank' | 'mixed'
 
+export type BankRefType = 'transfer' | 'cheque'
+
 export interface PaymentSplit {
   method: PayMethod
   cashAmount: number   // meaningful only when method === 'mixed'
   bankAmount: number   // meaningful only when method === 'mixed'
   bankTxnId: string    // for bank, or the bank half of mixed
+  bankRefType: BankRefType // how the bank portion was paid (transfer vs cheque)
 }
 
 export const emptyPaymentSplit: PaymentSplit = {
@@ -22,6 +25,7 @@ export const emptyPaymentSplit: PaymentSplit = {
   cashAmount: 0,
   bankAmount: 0,
   bankTxnId: '',
+  bankRefType: 'transfer',
 }
 
 /**
@@ -115,18 +119,34 @@ export function PaymentMethodFields({
       )}
 
       {showBankTxn && (
-        <div className="space-y-1">
-          <Label htmlFor={`${idPrefix}-txn`} className="text-xs">
-            Bank Transaction ID {value.method === 'mixed' ? '(for the bank portion)' : '(optional)'}
-          </Label>
-          <Input
-            id={`${idPrefix}-txn`}
-            type="text"
-            placeholder="UTR / cheque / reference no."
-            value={value.bankTxnId}
-            onChange={(e) => onChange({ ...value, bankTxnId: e.target.value })}
-            maxLength={64}
-          />
+        <div className="grid grid-cols-3 gap-2">
+          <div className="space-y-1 col-span-1">
+            <Label className="text-xs">Paid via</Label>
+            <Select
+              value={value.bankRefType}
+              onValueChange={(t) => onChange({ ...value, bankRefType: t as BankRefType })}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="transfer">Transfer</SelectItem>
+                <SelectItem value="cheque">Cheque</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1 col-span-2">
+            <Label htmlFor={`${idPrefix}-txn`} className="text-xs">
+              {value.bankRefType === 'cheque' ? 'Cheque Number' : 'Transaction ID / UTR'}
+              {value.method === 'mixed' ? ' (bank portion)' : ' (optional)'}
+            </Label>
+            <Input
+              id={`${idPrefix}-txn`}
+              type="text"
+              placeholder={value.bankRefType === 'cheque' ? 'Cheque no.' : 'UTR / reference no.'}
+              value={value.bankTxnId}
+              onChange={(e) => onChange({ ...value, bankTxnId: e.target.value })}
+              maxLength={64}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -147,12 +167,15 @@ export function isPaymentSplitValid(v: PaymentSplit, total: number): boolean {
  */
 export function paymentInvokeArgs(v: PaymentSplit) {
   const method = v.method.toUpperCase() // CASH | BANK | MIXED
+  const ref = (v.method === 'bank' || v.method === 'mixed') && v.bankTxnId.trim()
+    ? v.bankTxnId.trim()
+    : null
+  // Tag cheque references so they read clearly on the Bank Book / reports.
+  const bankTxnId = ref && v.bankRefType === 'cheque' ? `Cheque ${ref}` : ref
   return {
     paymentMethod: method,
     cashAmount: v.method === 'mixed' ? v.cashAmount : null,
     bankAmount: v.method === 'mixed' ? v.bankAmount : null,
-    bankTxnId: (v.method === 'bank' || v.method === 'mixed') && v.bankTxnId.trim()
-      ? v.bankTxnId.trim()
-      : null,
+    bankTxnId,
   }
 }

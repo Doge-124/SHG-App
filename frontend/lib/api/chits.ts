@@ -514,6 +514,117 @@ export async function recordMemberPaymentWithDiscount(
   }
 }
 
+export interface ChitPendingDue {
+  cycleId: string
+  cycleNo: number
+  memberId: string
+  memberName: string
+  amountOwed: number
+}
+
+/** Overdue installments for already-completed cycles in a chit. */
+export async function getChitPendingDues(chitGroupId: string): Promise<ApiResponse<ChitPendingDue[]>> {
+  try {
+    const rows = await invoke<any[]>('get_chit_pending_dues', { chitId: parseInt(chitGroupId) })
+    const dues: ChitPendingDue[] = (rows ?? []).map(r => ({
+      cycleId: r.cycleId.toString(),
+      cycleNo: r.cycleNo,
+      memberId: r.memberId.toString(),
+      memberName: r.memberName,
+      amountOwed: r.amountOwed,
+    }))
+    return { success: true, data: dues }
+  } catch (error) {
+    console.error('Failed to load pending dues:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to load pending dues' }
+  }
+}
+
+/** Collect an overdue installment for a completed (past/prior) cycle — real cash today. */
+export async function recordChitLatePayment(
+  chitGroupId: string,
+  cycleId: string,
+  memberId: string,
+  amount: number,
+  opts: {
+    paymentMethod: string                 // CASH | BANK | MIXED
+    cashAmount?: number | null
+    bankAmount?: number | null
+    bankTxnId?: string | null
+  },
+): Promise<ApiResponse<void>> {
+  try {
+    await withAutoPrint(() => invoke('record_chit_late_payment', {
+      input: {
+        chit_id: parseInt(chitGroupId),
+        cycle_id: parseInt(cycleId),
+        member_id: parseInt(memberId),
+        amount,
+        payment_method: opts.paymentMethod.toUpperCase(),
+        cash_amount: opts.cashAmount ?? null,
+        bank_amount: opts.bankAmount ?? null,
+        bank_txn_id: opts.bankTxnId ?? null,
+      },
+    }))
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to record late payment:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to record late payment' }
+  }
+}
+
+export interface ChitClosingInfo {
+  allCyclesComplete: boolean
+  outstandingDues: number
+  payoutEach: number
+  alreadyClosed: boolean
+  leftoverMembers: { memberId: string; memberName: string }[]
+}
+
+/** What a chit needs to close: cycle completeness, dues, and leftover winners. */
+export async function getChitClosingInfo(chitGroupId: string): Promise<ApiResponse<ChitClosingInfo>> {
+  try {
+    const r = await invoke<any>('get_chit_closing_info', { chitId: parseInt(chitGroupId) })
+    return {
+      success: true,
+      data: {
+        allCyclesComplete: r.allCyclesComplete,
+        outstandingDues: r.outstandingDues,
+        payoutEach: r.payoutEach,
+        alreadyClosed: r.alreadyClosed,
+        leftoverMembers: (r.leftoverMembers ?? []).map((m: any) => ({
+          memberId: m.memberId.toString(),
+          memberName: m.memberName,
+        })),
+      },
+    }
+  } catch (error) {
+    console.error('Failed to load closing info:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to load closing info' }
+  }
+}
+
+/** Close a chit, paying out the leftover (never-won) members. */
+export async function closeChit(
+  chitGroupId: string,
+  payouts: { memberId: string; paymentMethod: 'cash' | 'bank'; bankTxnId?: string | null }[],
+): Promise<ApiResponse<void>> {
+  try {
+    await withAutoPrint(() => invoke('close_chit', {
+      chitId: parseInt(chitGroupId),
+      payouts: payouts.map(p => ({
+        member_id: parseInt(p.memberId),
+        payment_method: p.paymentMethod.toUpperCase(),
+        bank_txn_id: p.bankTxnId ?? null,
+      })),
+    }))
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to close chit:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to close chit' }
+  }
+}
+
 export async function processWinnerPayout(
   chitGroupId: string,
   cycleId: string,
@@ -747,6 +858,7 @@ export interface AuctionWinnerInput {
   memberId: string
   bidDiscount: number
   paymentMethod: 'cash' | 'bank'
+  bankTxnId?: string | null
 }
 
 export async function processCycleWinners(
@@ -756,6 +868,7 @@ export async function processCycleWinners(
   fixedWinnerPaymentMethod: 'cash' | 'bank' | null,
   auctionWinners: AuctionWinnerInput[],
   overrideDiscountPerMember?: number,
+  fixedWinnerBankTxnId?: string | null,
 ): Promise<ApiResponse<{ auctionDiscountPerMember: number; winners: import('@/lib/types').ChitCycleWinner[]; message: string }>> {
   try {
     const result = await withAutoPrint(() => invoke('process_chit_cycle_winners', {
@@ -763,10 +876,12 @@ export async function processCycleWinners(
       cycleId: parseInt(cycleId),
       fixedWinnerMemberId: fixedWinnerMemberId ? parseInt(fixedWinnerMemberId) : null,
       fixedWinnerPaymentMethod: fixedWinnerPaymentMethod?.toUpperCase() ?? null,
+      fixedWinnerBankTxnId: fixedWinnerBankTxnId ?? null,
       auctionWinners: auctionWinners.map(w => ({
         member_id: parseInt(w.memberId),
         bid_discount: w.bidDiscount,
         payment_method: w.paymentMethod.toUpperCase(),
+        bank_txn_id: w.bankTxnId ?? null,
       })),
       overrideDiscountPerMember: overrideDiscountPerMember ?? null,
     })) as any

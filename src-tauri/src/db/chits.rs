@@ -342,14 +342,15 @@ pub fn override_member_eligibility(
 
 /// Record all winners for a cycle, compute the auction discount, create vouchers + commission receipts.
 ///
-/// `fixed_winner`: (member_id, payment_method)
-/// `auction_winners`: [(member_id, bid_discount, payment_method)]
+/// `fixed_winner`: (member_id, payment_method, bank_txn_id)
+/// `auction_winners`: [(member_id, bid_discount, payment_method, bank_txn_id)]
+/// `bank_txn_id` is the cheque no. / UTR for a BANK payout (ignored for CASH).
 pub fn process_cycle_winners(
     conn: &mut Connection,
     chit_id: i64,
     cycle_id: i64,
-    fixed_winner: Option<(i64, &str)>,
-    auction_winners: &[(i64, f64, &str)], // (member_id, bid_discount, payment_method)
+    fixed_winner: Option<(i64, &str, Option<&str>)>,
+    auction_winners: &[(i64, f64, &str, Option<&str>)], // (member_id, bid_discount, payment_method, bank_txn_id)
     override_discount_per_member: Option<f64>,
 ) -> Result<f64, AppError> { // returns auction_discount_per_member
     if is_cycle_completed(conn, cycle_id)? {
@@ -377,12 +378,12 @@ pub fn process_cycle_winners(
             |row| row.get(0),
         ).unwrap_or(false))
     };
-    if let Some((member_id, _)) = fixed_winner {
+    if let Some((member_id, _, _)) = fixed_winner {
         if check_already_won(member_id)? {
             return Err(AppError::business("Fixed winner has already won in a previous cycle"));
         }
     }
-    for (member_id, _, _) in auction_winners {
+    for (member_id, _, _, _) in auction_winners {
         if check_already_won(*member_id)? {
             return Err(AppError::business("An auction winner has already won in a previous cycle"));
         }
@@ -394,7 +395,7 @@ pub fn process_cycle_winners(
     let mut total_bid_discounts = 0.0_f64;
 
     // Fixed prize winner
-    if let Some((member_id, payment_method)) = fixed_winner {
+    if let Some((member_id, payment_method, bank_txn_id)) = fixed_winner {
         let payout = (prize - commission_per_winner).max(0.0);
         tx.execute(
             "INSERT INTO chit_cycle_winners
@@ -408,13 +409,14 @@ pub fn process_cycle_winners(
                 &reason_with_passbook("Chit Commission", &pb),
                 payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
         }
-        ledger::record_voucher(&mut tx, payout,
+        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_voucher_ex(&mut tx, payout,
             &reason_with_passbook("Chit Payout", &pb),
-            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now)?;
+            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
     }
 
     // Auction winners
-    for (member_id, bid_discount, payment_method) in auction_winners {
+    for (member_id, bid_discount, payment_method, bank_txn_id) in auction_winners {
         let payout = (prize - bid_discount - commission_per_winner).max(0.0);
         total_bid_discounts += bid_discount;
         tx.execute(
@@ -429,9 +431,10 @@ pub fn process_cycle_winners(
                 &reason_with_passbook("Chit Commission", &pb),
                 payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
         }
-        ledger::record_voucher(&mut tx, payout,
+        let bank_txn = if *payment_method == "BANK" { *bank_txn_id } else { None };
+        ledger::record_voucher_ex(&mut tx, payout,
             &reason_with_passbook("Chit Payout", &pb),
-            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now)?;
+            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
     }
 
     let discount_per_member = if let Some(ov) = override_discount_per_member {
@@ -444,8 +447,8 @@ pub fn process_cycle_winners(
 
     // Backfill winning_member_id on chit_cycles for legacy compat.
     let first_winner = fixed_winner
-        .map(|(id, _)| id)
-        .or_else(|| auction_winners.first().map(|(id, _, _)| *id));
+        .map(|(id, _, _)| id)
+        .or_else(|| auction_winners.first().map(|(id, _, _, _)| *id));
 
     tx.execute(
         "UPDATE chit_cycles SET
@@ -548,6 +551,15 @@ pub fn advance_to_next_cycle(
         },
     )?;
 
+    // A chit runs for a fixed number of cycles (chit_groups.months). Don't let
+    // the operator start a cycle beyond that.
+    if next_cycle_no > chit.months {
+        return Err(AppError::business(format!(
+            "This chit runs for {} cycle(s) — all cycles are complete. You can't start another.",
+            chit.months
+        )));
+    }
+
     let auction_date = if let Some(ref current) = current_cycle {
         let current_date = chrono::NaiveDate::parse_from_str(&current.auction_date, "%Y-%m-%d")
             .unwrap_or_else(|_| chrono::Local::now().naive_local().date());
@@ -595,6 +607,7 @@ pub fn advance_to_next_cycle(
 /// `gross_amount` is the net amount collected (after per-member auction discount deducted).
 /// `auction_discount` is the per-member discount — stored in the receipt description for reference.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn record_member_payment_with_discount(
     conn: &mut Connection,
     chit_id: i64,
@@ -607,6 +620,7 @@ pub fn record_member_payment_with_discount(
     cash_amount: Option<f64>,       // required when MIXED
     bank_amount: Option<f64>,       // required when MIXED
     bank_txn_id: Option<&str>,      // optional bank reference
+    allow_completed: bool,          // true → permit paying a cycle that already has a winner (late dues)
 ) -> Result<ChitPayment, AppError> {
     validation::validate_money_amount(gross_amount)?;
     let (cash_part, bank_part) = match payment_method {
@@ -638,7 +652,9 @@ pub fn record_member_payment_with_discount(
         [cycle_id],
         |row| row.get(0),
     ).map_err(|_| AppError::business("Chit cycle not found"))?;
-    if winner_inside.is_some() {
+    // A completed cycle (winner chosen) is normally locked. Collecting an
+    // overdue installment for such a cycle (late dues) explicitly opts in.
+    if winner_inside.is_some() && !allow_completed {
         return Err(AppError::business(
             "This cycle is locked — the winner has already been paid out. No further payments can be recorded."
         ));
@@ -718,6 +734,220 @@ pub fn record_member_payment_with_discount(
         payment_method: payment_method.to_string(),
         paid_at: paid_at.to_string(),
     })
+}
+
+/// One outstanding installment a member still owes for an already-completed cycle.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDue {
+    pub cycle_id: i64,
+    pub cycle_no: i64,
+    pub member_id: i64,
+    pub member_name: String,
+    pub amount_owed: f64,
+}
+
+/// List overdue installments for a chit: every member who hasn't paid a
+/// *completed* cycle (one that already has a winner). The amount owed for a
+/// cycle is the monthly contribution minus the discount that applied to it
+/// (= the previous cycle's auction discount per member), matching how the
+/// live/past payment amounts are computed.
+pub fn get_chit_pending_dues(
+    conn: &Connection,
+    chit_id: i64,
+) -> Result<Vec<PendingDue>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT cc.id, cc.cycle_no, m.id, m.name,
+                cg.monthly_contribution,
+                COALESCE((SELECT prev.auction_discount_per_member FROM chit_cycles prev
+                          WHERE prev.chit_id = cc.chit_id AND prev.cycle_no = cc.cycle_no - 1), 0)
+         FROM chit_cycles cc
+         JOIN chit_groups cg ON cg.id = cc.chit_id
+         JOIN chit_members cm ON cm.chit_id = cc.chit_id
+         JOIN members m ON m.id = cm.member_id
+         WHERE cc.chit_id = ?1
+           AND cc.winning_member_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM chit_payments cp
+               WHERE cp.cycle_id = cc.id AND cp.member_id = cm.member_id
+           )
+         ORDER BY cc.cycle_no ASC, m.name ASC",
+    )?;
+
+    let rows = stmt.query_map([chit_id], |row| {
+        let monthly: f64 = row.get(4)?;
+        let prev_discount: f64 = row.get(5)?;
+        Ok(PendingDue {
+            cycle_id: row.get(0)?,
+            cycle_no: row.get(1)?,
+            member_id: row.get(2)?,
+            member_name: row.get(3)?,
+            amount_owed: (monthly - prev_discount).max(0.0),
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
+// ─── Closing cycle / final settlement ────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosingMember {
+    pub member_id: i64,
+    pub member_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosingInfo {
+    pub all_cycles_complete: bool,
+    pub outstanding_dues: i64,
+    pub payout_each: f64,
+    pub already_closed: bool,
+    pub leftover_members: Vec<ClosingMember>,
+}
+
+/// Read what a chit needs for its closing cycle: whether all regular cycles are
+/// done, how many overdue installments remain, and which members never won (and
+/// must be paid out at close). `payout_each` = prize − commission per winner.
+pub fn get_chit_closing_info(conn: &Connection, chit_id: i64) -> Result<ClosingInfo, AppError> {
+    let (months, prize, commission_per_winner, status): (i64, f64, f64, String) = conn.query_row(
+        "SELECT months, COALESCE(fixed_prize_amount, total_amount),
+                COALESCE(commission_per_winner, 0), status
+         FROM chit_groups WHERE id = ?1",
+        [chit_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+
+    let completed_regular: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chit_cycles
+         WHERE chit_id = ?1 AND cycle_no >= 1 AND cycle_no <= ?2 AND winning_member_id IS NOT NULL",
+        (chit_id, months),
+        |r| r.get(0),
+    ).unwrap_or(0);
+
+    let outstanding_dues = get_chit_pending_dues(conn, chit_id)?.len() as i64;
+
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.name
+         FROM chit_members cm
+         JOIN members m ON m.id = cm.member_id
+         WHERE cm.chit_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM chit_cycle_winners w
+               WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
+           )
+         ORDER BY m.name ASC",
+    )?;
+    let rows = stmt.query_map([chit_id], |r| {
+        Ok(ClosingMember { member_id: r.get(0)?, member_name: r.get(1)? })
+    })?;
+    let mut leftover = Vec::new();
+    for r in rows { leftover.push(r?); }
+
+    Ok(ClosingInfo {
+        all_cycles_complete: completed_regular >= months,
+        outstanding_dues,
+        payout_each: (prize - commission_per_winner).max(0.0),
+        already_closed: status == "CLOSED",
+        leftover_members: leftover,
+    })
+}
+
+/// Close a chit: pay out every member who never won (prize − commission) in a
+/// final closing cycle, then mark the chit CLOSED. Requires all regular cycles
+/// complete and all overdue dues already collected.
+pub fn close_chit(
+    conn: &mut Connection,
+    chit_id: i64,
+    payouts: &[(i64, String, Option<String>)], // (member_id, payment_method, bank_txn_id) per leftover winner
+) -> Result<(), AppError> {
+    let (months, prize, commission_per_winner, status): (i64, f64, f64, String) = conn.query_row(
+        "SELECT months, COALESCE(fixed_prize_amount, total_amount),
+                COALESCE(commission_per_winner, 0), status
+         FROM chit_groups WHERE id = ?1",
+        [chit_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+
+    if status == "CLOSED" {
+        return Err(AppError::business("This chit is already closed."));
+    }
+
+    let completed_regular: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chit_cycles
+         WHERE chit_id = ?1 AND cycle_no >= 1 AND cycle_no <= ?2 AND winning_member_id IS NOT NULL",
+        (chit_id, months),
+        |r| r.get(0),
+    ).unwrap_or(0);
+    if completed_regular < months {
+        return Err(AppError::business("Finish all regular cycles before closing the chit."));
+    }
+
+    if !get_chit_pending_dues(conn, chit_id)?.is_empty() {
+        return Err(AppError::business("Collect all pending dues before closing the chit."));
+    }
+
+    // Validate every payout target is a real leftover member.
+    for (member_id, method, _) in payouts {
+        validation::validate_payment_method(method)?;
+        let is_member: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM chit_members WHERE chit_id = ?1 AND member_id = ?2",
+            (chit_id, member_id), |r| r.get(0),
+        ).unwrap_or(false);
+        if !is_member {
+            return Err(AppError::business("A payout member is not part of this chit."));
+        }
+        let already_won: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM chit_cycle_winners WHERE chit_id = ?1 AND member_id = ?2",
+            (chit_id, member_id), |r| r.get(0),
+        ).unwrap_or(false);
+        if already_won {
+            return Err(AppError::business("A payout member has already won a cycle."));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let payout = (prize - commission_per_winner).max(0.0);
+    let mut tx = conn.transaction()?;
+
+    if !payouts.is_empty() {
+        // One closing cycle row (cycle_no beyond the regular count).
+        tx.execute(
+            "INSERT INTO chit_cycles
+             (chit_id, cycle_no, auction_date, winning_member_id, bid_discount, payout_amount,
+              total_bid_discounts, auction_discount_per_member, is_past_entry)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, 0, 0)",
+            (chit_id, months + 1, &now[..10], payouts[0].0, prize),
+        )?;
+        let cycle_id = tx.last_insert_rowid();
+
+        for (member_id, method, bank_txn_id) in payouts {
+            tx.execute(
+                "INSERT INTO chit_cycle_winners
+                 (chit_id, cycle_id, member_id, winner_type, bid_discount, commission, payout_amount, payment_method, paid_at)
+                 VALUES (?1, ?2, ?3, 'FIXED', 0, ?4, ?5, ?6, ?7)",
+                (chit_id, cycle_id, *member_id, commission_per_winner, payout, method.as_str(), &now),
+            )?;
+            let pb = passbook_number(&tx, chit_id, *member_id);
+            if commission_per_winner > 0.0 {
+                ledger::record_receipt(&mut tx, commission_per_winner,
+                    &reason_with_passbook("Chit Commission (closing)", &pb),
+                    method.as_str(), Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
+            }
+            let bank_txn = if method == "BANK" { bank_txn_id.as_deref() } else { None };
+            ledger::record_voucher_ex(&mut tx, payout,
+                &reason_with_passbook("Chit Payout (closing)", &pb),
+                method.as_str(), Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
+        }
+    }
+
+    tx.execute("UPDATE chit_groups SET status = 'CLOSED' WHERE id = ?1", [chit_id])?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Process winner payout.

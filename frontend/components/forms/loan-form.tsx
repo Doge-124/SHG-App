@@ -33,16 +33,22 @@ import {
 } from '@/components/ui/select'
 import { getMembers } from '@/lib/api/members'
 import { formatCurrency } from '@/lib/format'
+import { toast } from 'sonner'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import type { Member, LoanFormData } from '@/lib/types'
 
 const loanSchema = z.object({
   memberId: z.string().min(1, 'Please select a member'),
   amount: z.coerce.number().min(100, 'Minimum loan amount is Rs. 100'),
   dailyInterestRate: z.coerce.number().min(0, 'Rate must be 0 or higher').max(10, 'Daily rate cannot exceed 10%'),
-  paymentMethod: z.enum(['cash', 'bank']),
   loanType: z.enum(['monthly', 'weekly']),
   note: z.string().optional(),
 })
+
+type LoanFormValues = z.infer<typeof loanSchema>
 
 interface LoanFormProps {
   open: boolean
@@ -54,14 +60,14 @@ interface LoanFormProps {
 export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: LoanFormProps) {
   const [members, setMembers] = useState<Member[]>([])
   const [loadingMembers, setLoadingMembers] = useState(true)
+  const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
 
-  const form = useForm<LoanFormData>({
+  const form = useForm<LoanFormValues>({
     resolver: zodResolver(loanSchema),
     defaultValues: {
       memberId: '',
       amount: 0,
       dailyInterestRate: 0.06,
-      paymentMethod: 'cash',
       loanType: 'monthly',
       note: '',
     },
@@ -88,9 +94,21 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
     }).finally(() => setLoadingMembers(false))
   }, [open])
 
-  const handleSubmit = async (data: LoanFormData) => {
-    await onSubmit(data)
+  const handleSubmit = async (data: LoanFormValues) => {
+    if (!isPaymentSplitValid(paySplit, amount)) {
+      toast.error('Cash + bank portions must add up to the loan amount')
+      return
+    }
+    const pay = paymentInvokeArgs(paySplit)
+    await onSubmit({
+      ...data,
+      paymentMethod: paySplit.method,
+      cashAmount: pay.cashAmount,
+      bankAmount: pay.bankAmount,
+      bankTxnId: pay.bankTxnId,
+    })
     form.reset()
+    setPaySplit(emptyPaymentSplit)
   }
 
   return (
@@ -207,25 +225,15 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
               </div>
             )}
 
-            <FormField
-              control={form.control}
-              name="paymentMethod"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Payment Method</FormLabel>
-                  <Select onValueChange={field.onChange} defaultValue={field.value}>
-                    <FormControl>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="bank">Bank Transfer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            <div className="space-y-1">
+              <FormLabel>Disbursement Method</FormLabel>
+              <PaymentMethodFields
+                total={amount}
+                value={paySplit}
+                onChange={setPaySplit}
+                idPrefix="loan-disb"
+              />
+            </div>
 
             <FormField
               control={form.control}

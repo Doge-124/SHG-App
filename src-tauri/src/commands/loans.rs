@@ -177,6 +177,7 @@ pub fn get_all_loans(state: State<Mutex<AppState>>) -> Result<Vec<db::loans::Loa
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn issue_member_loan(
     state: State<Mutex<AppState>>,
     member_id: i64,
@@ -186,9 +187,12 @@ pub fn issue_member_loan(
     loan_type: String,
     note: String,
     created_at: String,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<String>,
 ) -> Result<i64, String> {
     validation::validate_money_amount(amount).map_err(|e: AppError| e.to_string())?;
-    validation::validate_payment_method(&payment_method).map_err(|e: AppError| e.to_string())?;
+    // payment_method (CASH | BANK | MIXED) is validated inside create_loan.
 
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
@@ -205,6 +209,9 @@ pub fn issue_member_loan(
         &loan_type,
         &note,
         &created_at,
+        cash_amount,
+        bank_amount,
+        bank_txn_id.as_deref(),
     ).map_err(|e: AppError| e.to_string())?;
 
     db::audit::log_audit(conn, "LOAN_ISSUED", "loan", Some(loan_id),

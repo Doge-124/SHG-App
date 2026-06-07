@@ -77,7 +77,10 @@ export interface LoanFormData {
   memberId: string
   amount: number
   dailyInterestRate: number     // % per day
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: 'cash' | 'bank' | 'mixed'
+  cashAmount?: number | null    // bank/cash split when paymentMethod === 'mixed'
+  bankAmount?: number | null
+  bankTxnId?: string | null     // bank reference / cheque no. for the bank portion
   loanType: 'monthly' | 'weekly'
   note?: string
 }

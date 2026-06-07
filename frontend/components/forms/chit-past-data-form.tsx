@@ -87,6 +87,29 @@ export function ChitPastDataForm({
   // ── Derived (declared before useEffects that use them) ──────────────────
   const totalBidDiscounts = auctionWinners.reduce((s, w) => s + w.bidDiscount, 0)
   const auctionDiscountPerMember = members.length > 0 ? totalBidDiscounts / members.length : 0
+  // Chit discounts carry forward: a cycle's bid reduces the NEXT cycle's
+  // contributions. So THIS cycle's member payments are reduced by the PREVIOUS
+  // cycle's discount, not this cycle's own. The first cycle has no prior discount.
+  const prevCycleDetail = cyclesWithDetails.find(c => c.cycleNumber === cycleNumber - 1)
+  const prevDiscountPerMember = prevCycleDetail && members.length > 0
+    ? prevCycleDetail.bidDiscount / members.length
+    : 0
+  // Bid-discount eligibility: a member only gets the carried-forward discount if
+  // they have no outstanding dues from earlier cycles. Members with dues pay the
+  // full contribution for this cycle.
+  const memberHasDues = (memberId: string) => {
+    const st = paymentStatuses.find(s => s.memberId === memberId)
+    return !!st && st.lateCycles.some(c => c < cycleNumber)
+  }
+  const payableFor = (memberId: string) =>
+    memberHasDues(memberId)
+      ? monthlyContribution
+      : Math.max(0, monthlyContribution - prevDiscountPerMember)
+  // Passbook suffix for member labels, e.g. " (Passbook: 123)". Empty if none.
+  const passbookSuffix = (memberId: string) => {
+    const pb = members.find(m => m.memberId === memberId)?.passbookNumber
+    return pb ? ` (Passbook: ${pb})` : ''
+  }
   const fixedWinnerPayout = Math.max(0, totalAmount - commissionPerWinner)
   const auctionWinnerPayout = (bidDiscount: number) => Math.max(0, totalAmount - bidDiscount - commissionPerWinner)
 
@@ -112,15 +135,15 @@ export function ChitPastDataForm({
   // Recompute member payment defaults whenever members or discount changes
   useEffect(() => {
     if (members.length === 0) return
-    const perMember = Math.max(0, monthlyContribution - auctionDiscountPerMember)
     setMemberPayments(members.map(m => ({
       memberId: m.memberId,
       memberName: m.memberName,
-      amount: perMember,
+      amount: payableFor(m.memberId),
       paymentMethod: 'cash' as const,
       hasPaid: true,
     })))
-  }, [members, monthlyContribution, auctionDiscountPerMember])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members, monthlyContribution, prevDiscountPerMember, paymentStatuses, cycleNumber])
 
   useEffect(() => {
     if (migrationStatus) setCycleNumber(migrationStatus.cyclesEntered + 1)
@@ -158,8 +181,7 @@ export function ChitPastDataForm({
   }
 
   const markAllPaid = () => {
-    const perMember = Math.max(0, monthlyContribution - auctionDiscountPerMember)
-    setMemberPayments(prev => prev.map(p => ({ ...p, amount: perMember, hasPaid: true })))
+    setMemberPayments(prev => prev.map(p => ({ ...p, amount: payableFor(p.memberId), hasPaid: true })))
   }
 
   // ── Submit ────────────────────────────────────────────────────────────────
@@ -340,7 +362,7 @@ export function ChitPastDataForm({
                             {nonWinnerMembers
                               .filter(m => !selectedWinnerIds.has(m.memberId) || m.memberId === fixedWinnerId)
                               .map(m => (
-                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>
+                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>
                               ))}
                           </SelectContent>
                         </Select>
@@ -384,7 +406,7 @@ export function ChitPastDataForm({
                                 {nonWinnerMembers
                                   .filter(m => !selectedWinnerIds.has(m.memberId) || m.memberId === row.memberId)
                                   .map(m => (
-                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>
+                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>
                                   ))}
                               </SelectContent>
                             </Select>
@@ -433,7 +455,7 @@ export function ChitPastDataForm({
                         <span className="text-blue-700">{formatCurrency(auctionDiscountPerMember)}</span>
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Each member's instalment is reduced by this amount for this cycle.
+                        This discount reduces each member's instalment in the <strong>next</strong> cycle (not this one).
                       </p>
                     </div>
                   )}
@@ -460,11 +482,13 @@ export function ChitPastDataForm({
                           payment.hasPaid ? 'bg-background' : 'bg-muted/50 opacity-60'
                         )}>
                         <div className="flex-1 min-w-0">
-                          <p className="font-medium truncate">{payment.memberName}</p>
+                          <p className="font-medium truncate">{payment.memberName}{passbookSuffix(payment.memberId)}</p>
                           <p className="text-xs text-muted-foreground">
-                            {payment.hasPaid && auctionDiscountPerMember > 0
-                              ? `${formatCurrency(monthlyContribution)} − ${formatCurrency(auctionDiscountPerMember)} discount`
-                              : payment.hasPaid ? 'Standard instalment' : 'Not paid'}
+                            {!payment.hasPaid ? 'Not paid'
+                              : memberHasDues(payment.memberId) ? 'Full instalment — has dues, no discount'
+                              : prevDiscountPerMember > 0
+                                ? `${formatCurrency(monthlyContribution)} − ${formatCurrency(prevDiscountPerMember)} prev-cycle discount`
+                                : 'Standard instalment'}
                           </p>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">

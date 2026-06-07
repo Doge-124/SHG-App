@@ -572,6 +572,7 @@ pub fn record_member_payment_with_discount(
         input.cash_amount,
         input.bank_amount,
         input.bank_txn_id.as_deref(),
+        false, // normal flow: completed cycles stay locked
     )
     .map_err(|e: AppError| e.to_string())?;
 
@@ -585,6 +586,113 @@ pub fn record_member_payment_with_discount(
         receipt_generated: true,
         message: format!("Payment of ₹{} recorded and added to SHG balance", input.gross_amount),
     })
+}
+
+/// List overdue installments for already-completed cycles in a chit.
+#[tauri::command]
+pub fn get_chit_pending_dues(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+) -> Result<Vec<db::chits::PendingDue>, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::get_chit_pending_dues(conn, chit_id).map_err(|e: AppError| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChitLatePaymentInput {
+    pub chit_id: i64,
+    pub cycle_id: i64,
+    pub member_id: i64,
+    pub amount: f64,
+    pub payment_method: String,          // CASH | BANK | MIXED
+    #[serde(default)]
+    pub cash_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,
+}
+
+/// Collect an overdue installment for an already-completed (past or prior) cycle.
+/// Records a real SHG receipt today and marks that cycle paid for the member.
+#[tauri::command]
+pub fn record_chit_late_payment(
+    state: State<Mutex<AppState>>,
+    input: ChitLatePaymentInput,
+) -> Result<RecordPaymentResponse, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let paid_at = chrono::Utc::now().to_rfc3339();
+
+    let payment = db::chits::record_member_payment_with_discount(
+        conn,
+        input.chit_id,
+        input.cycle_id,
+        input.member_id,
+        input.amount,
+        0.0, // no auction discount on a late dues collection
+        &input.payment_method,
+        &paid_at,
+        input.cash_amount,
+        input.bank_amount,
+        input.bank_txn_id.as_deref(),
+        true, // allow paying a completed cycle (late dues)
+    )
+    .map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_LATE_PAYMENT", "chit_cycle", Some(input.cycle_id),
+        &format!("₹{} late dues by member {} (chit {}, cycle {})",
+            input.amount, input.member_id, input.chit_id, input.cycle_id));
+
+    Ok(RecordPaymentResponse {
+        payment_id: payment.id,
+        net_amount: input.amount,
+        receipt_generated: true,
+        message: format!("Late payment of ₹{} recorded", input.amount),
+    })
+}
+
+/// Info needed to close a chit: cycle completeness, outstanding dues, and the
+/// members who still need paying out.
+#[tauri::command]
+pub fn get_chit_closing_info(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+) -> Result<db::chits::ClosingInfo, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::get_chit_closing_info(conn, chit_id).map_err(|e: AppError| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ClosingPayout {
+    pub member_id: i64,
+    pub payment_method: String,
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,
+}
+
+/// Close a chit — pay out all leftover (never-won) members and mark it CLOSED.
+#[tauri::command]
+pub fn close_chit(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    payouts: Vec<ClosingPayout>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let pairs: Vec<(i64, String, Option<String>)> = payouts.into_iter()
+        .map(|p| (p.member_id, p.payment_method, p.bank_txn_id))
+        .collect();
+
+    db::chits::close_chit(conn, chit_id, &pairs).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_CLOSED", "chit_group", Some(chit_id),
+        &format!("Chit {} closed; {} leftover payout(s)", chit_id, pairs.len()));
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -974,11 +1082,12 @@ pub fn override_member_eligibility(
 }
 
 #[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AuctionWinnerInput {
     pub member_id: i64,
     pub bid_discount: f64,
     pub payment_method: String,
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -990,12 +1099,14 @@ pub struct ProcessWinnersResponse {
 
 /// Record all winners for a cycle (fixed + auction), compute and store the auction discount.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn process_chit_cycle_winners(
     state: State<Mutex<AppState>>,
     chit_id: i64,
     cycle_id: i64,
     fixed_winner_member_id: Option<i64>,
     fixed_winner_payment_method: Option<String>,
+    fixed_winner_bank_txn_id: Option<String>,
     auction_winners: Vec<AuctionWinnerInput>,
     override_discount_per_member: Option<f64>,
 ) -> Result<ProcessWinnersResponse, String> {
@@ -1005,11 +1116,12 @@ pub fn process_chit_cycle_winners(
     let fixed = fixed_winner_member_id.zip(fixed_winner_payment_method.as_deref().map(str::to_uppercase))
         .map(|(id, pm)| (id, pm));
 
-    let auction: Vec<(i64, f64, &str)> = auction_winners.iter()
-        .map(|w| (w.member_id, w.bid_discount, w.payment_method.as_str()))
+    let auction: Vec<(i64, f64, &str, Option<&str>)> = auction_winners.iter()
+        .map(|w| (w.member_id, w.bid_discount, w.payment_method.as_str(), w.bank_txn_id.as_deref()))
         .collect();
 
-    let fixed_ref: Option<(i64, &str)> = fixed.as_ref().map(|(id, pm)| (*id, pm.as_str()));
+    let fixed_ref: Option<(i64, &str, Option<&str>)> = fixed.as_ref()
+        .map(|(id, pm)| (*id, pm.as_str(), fixed_winner_bank_txn_id.as_deref()));
 
     let discount = db::chits::process_cycle_winners(
         conn, chit_id, cycle_id, fixed_ref, &auction, override_discount_per_member,

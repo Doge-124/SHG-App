@@ -34,7 +34,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getMembers } from '@/lib/api/members'
 import { formatCurrency } from '@/lib/format'
 import {
-  PaymentMethodFields, isPaymentSplitValid, emptyPaymentSplit, type PaymentSplit,
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs, emptyPaymentSplit, type PaymentSplit,
 } from '@/components/forms/payment-method-fields'
 import { toast } from 'sonner'
 import type { Member, VoucherFormData } from '@/lib/types'
@@ -141,14 +141,13 @@ export function VoucherForm({
       toast.error('For a mixed payment, cash + bank must equal the amount')
       return
     }
+    const pay = paymentInvokeArgs(paySplit)
     const finalData: VoucherFormData = {
       ...data,
       paymentMethod: paySplit.method,
       cashAmount: paySplit.method === 'mixed' ? paySplit.cashAmount : undefined,
       bankAmount: paySplit.method === 'mixed' ? paySplit.bankAmount : undefined,
-      bankTxnId: (paySplit.method === 'bank' || paySplit.method === 'mixed') && paySplit.bankTxnId.trim()
-        ? paySplit.bankTxnId.trim()
-        : undefined,
+      bankTxnId: pay.bankTxnId ?? undefined,
     }
     await onSubmit(finalData)
     form.reset()

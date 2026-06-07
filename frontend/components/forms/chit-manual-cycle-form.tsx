@@ -21,7 +21,13 @@ import {
   getCycleEligibility,
   overrideMemberEligibility,
   processCycleWinners,
+  getChitPendingDues,
+  recordChitLatePayment,
+  getChitClosingInfo,
+  closeChit,
   type AuctionWinnerInput,
+  type ChitPendingDue,
+  type ChitClosingInfo,
 } from '@/lib/api/chits'
 import { getChitMembers } from '@/lib/api/chits'
 import {
@@ -31,6 +37,42 @@ import {
 import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+
+type BankRefType = 'transfer' | 'cheque'
+
+/** Tag a cheque reference so it reads clearly on the Bank Book / reports. */
+function tagBankRef(refType: BankRefType | undefined, val: string | undefined): string | null {
+  const t = (val ?? '').trim()
+  if (!t) return null
+  return refType === 'cheque' ? `Cheque ${t}` : t
+}
+
+/** Compact Transfer/Cheque selector + reference input for a bank payout. */
+function BankRefInline({ refType, value, onRefType, onValue }: {
+  refType: BankRefType
+  value: string
+  onRefType: (t: BankRefType) => void
+  onValue: (v: string) => void
+}) {
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      <Select value={refType} onValueChange={(t) => onRefType(t as BankRefType)}>
+        <SelectTrigger className="h-8 col-span-1"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="transfer">Transfer</SelectItem>
+          <SelectItem value="cheque">Cheque</SelectItem>
+        </SelectContent>
+      </Select>
+      <Input
+        className="h-8 col-span-2"
+        placeholder={refType === 'cheque' ? 'Cheque no.' : 'UTR / ref no.'}
+        value={value}
+        onChange={(e) => onValue(e.target.value)}
+        maxLength={64}
+      />
+    </div>
+  )
+}
 
 interface ChitManualCycleFormProps {
   chitGroupId: string
@@ -61,6 +103,8 @@ interface AuctionWinnerRow {
   memberId: string
   bidDiscount: number
   paymentMethod: 'cash' | 'bank'
+  bankTxnId?: string
+  bankRefType?: BankRefType
 }
 
 export function ChitManualCycleForm({
@@ -84,12 +128,31 @@ export function ChitManualCycleForm({
   // Winner tab
   const [fixedWinnerId, setFixedWinnerId] = useState<string>('')
   const [fixedWinnerMethod, setFixedWinnerMethod] = useState<'cash' | 'bank'>('cash')
+  const [fixedWinnerRefType, setFixedWinnerRefType] = useState<BankRefType>('transfer')
+  const [fixedWinnerBankRef, setFixedWinnerBankRef] = useState<string>('')
   const [auctionWinners, setAuctionWinners] = useState<AuctionWinnerRow[]>([])
   const [overrideDiscount, setOverrideDiscount] = useState<string>('')
+
+  // Pending dues from earlier (completed) cycles
+  const [pendingDues, setPendingDues] = useState<ChitPendingDue[]>([])
+  const [collectDue, setCollectDue] = useState<ChitPendingDue | null>(null)
+  const [collectSplit, setCollectSplit] = useState<PaymentSplit>(emptyPaymentSplit)
+
+  // Closing cycle / final settlement
+  const [closingInfo, setClosingInfo] = useState<ChitClosingInfo | null>(null)
+  const [closingMethods, setClosingMethods] = useState<Record<string, 'cash' | 'bank'>>({})
+  const [closingRefTypes, setClosingRefTypes] = useState<Record<string, BankRefType>>({})
+  const [closingBankRefs, setClosingBankRefs] = useState<Record<string, string>>({})
 
   const perMemberAmount = (memberId: string) => {
     const summary = paymentSummary.find(p => p.memberId === memberId)
     return summary ? summary.payableAmount : monthlyContribution - auctionDiscount
+  }
+
+  // Passbook suffix for member dropdowns, e.g. " (Passbook: 123)". Empty if none.
+  const passbookSuffix = (memberId: string) => {
+    const pb = members.find(m => m.memberId === memberId)?.passbookNumber
+    return pb ? ` (Passbook: ${pb})` : ''
   }
 
   useEffect(() => {
@@ -107,10 +170,14 @@ export function ChitManualCycleForm({
   const loadData = async () => {
     setIsLoading(true)
     try {
-      const [membersRes, cycleRes] = await Promise.all([
+      const [membersRes, cycleRes, duesRes, closingRes] = await Promise.all([
         getChitMembers(chitGroupId),
         getCurrentCycleWithSummary(chitGroupId),
+        getChitPendingDues(chitGroupId),
+        getChitClosingInfo(chitGroupId),
       ])
+      if (duesRes.success && duesRes.data) setPendingDues(duesRes.data)
+      if (closingRes.success && closingRes.data) setClosingInfo(closingRes.data)
       if (membersRes.success && membersRes.data) setMembers(membersRes.data)
       if (cycleRes.success && cycleRes.data) {
         setCurrentCycle(cycleRes.data.cycle)
@@ -144,6 +211,72 @@ export function ChitManualCycleForm({
         onSuccess?.()
       } else {
         toast.error(result.error || 'Failed to advance cycle')
+      }
+    } catch {
+      toast.error('An error occurred')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const openCollectDue = (due: ChitPendingDue) => {
+    setCollectDue(due)
+    setCollectSplit(emptyPaymentSplit)
+  }
+
+  const handleCollectDue = async () => {
+    if (!collectDue) return
+    if (!isPaymentSplitValid(collectSplit, collectDue.amountOwed)) {
+      toast.error('For a mixed payment, cash + bank must equal the amount owed')
+      return
+    }
+    setIsSubmitting(true)
+    try {
+      const result = await recordChitLatePayment(
+        chitGroupId, collectDue.cycleId, collectDue.memberId, collectDue.amountOwed,
+        paymentInvokeArgs(collectSplit),
+      )
+      if (result.success) {
+        toast.success(`Collected cycle ${collectDue.cycleNo} dues from ${collectDue.memberName}`)
+        setCollectDue(null)
+        await loadData()
+      } else {
+        toast.error(result.error || 'Failed to collect dues')
+      }
+    } catch {
+      toast.error('An error occurred')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleCloseChit = async () => {
+    if (!closingInfo) return
+    if (closingInfo.outstandingDues > 0) {
+      toast.error('Collect all pending dues before closing the chit')
+      return
+    }
+    const payouts = closingInfo.leftoverMembers.map(m => {
+      const method = closingMethods[m.memberId] ?? 'cash'
+      return {
+        memberId: m.memberId,
+        paymentMethod: method,
+        bankTxnId: method === 'bank'
+          ? tagBankRef(closingRefTypes[m.memberId], closingBankRefs[m.memberId])
+          : null,
+      }
+    })
+    setIsSubmitting(true)
+    try {
+      const result = await closeChit(chitGroupId, payouts)
+      if (result.success) {
+        toast.success(payouts.length > 0
+          ? `Chit closed — paid out ${payouts.length} remaining member(s)`
+          : 'Chit closed')
+        await loadData()
+        onSuccess?.()
+      } else {
+        toast.error(result.error || 'Failed to close chit')
       }
     } catch {
       toast.error('An error occurred')
@@ -196,7 +329,12 @@ export function ChitManualCycleForm({
 
     const validAuctionWinners: AuctionWinnerInput[] = auctionWinners
       .filter(w => w.memberId)
-      .map(w => ({ memberId: w.memberId, bidDiscount: w.bidDiscount, paymentMethod: w.paymentMethod }))
+      .map(w => ({
+        memberId: w.memberId,
+        bidDiscount: w.bidDiscount,
+        paymentMethod: w.paymentMethod,
+        bankTxnId: w.paymentMethod === 'bank' ? tagBankRef(w.bankRefType, w.bankTxnId) : null,
+      }))
 
     setIsSubmitting(true)
     try {
@@ -206,10 +344,15 @@ export function ChitManualCycleForm({
         fixedWinnerId ? fixedWinnerMethod : null,
         validAuctionWinners,
         overrideDiscount ? parseFloat(overrideDiscount) : undefined,
+        fixedWinnerId && fixedWinnerMethod === 'bank'
+          ? tagBankRef(fixedWinnerRefType, fixedWinnerBankRef)
+          : null,
       )
       if (result.success && result.data) {
         toast.success(result.data.message)
         setFixedWinnerId('')
+        setFixedWinnerBankRef('')
+        setFixedWinnerRefType('transfer')
         setAuctionWinners([])
         setOverrideDiscount('')
         await loadData()
@@ -256,6 +399,7 @@ export function ChitManualCycleForm({
   const auctionWinnerPayout = (bidDiscount: number) => Math.max(0, totalAmount - bidDiscount - commissionPerWinner)
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[90vh]">
         <DialogHeader>
@@ -306,6 +450,39 @@ export function ChitManualCycleForm({
           {/* ── Current Cycle Tab ── */}
           {activeTab === 'current' && (
             <div className="space-y-4">
+              {/* Pending dues from earlier (completed) cycles — e.g. someone who
+                  missed a past cycle paying it now. Collecting records cash today. */}
+              {pendingDues.length > 0 && (
+                <Card className="border-amber-300">
+                  <CardHeader>
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                      Pending Dues — Earlier Cycles
+                      <Badge variant="secondary">{pendingDues.length}</Badge>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      Overdue installments from completed cycles. Collecting one records a cash receipt today.
+                    </p>
+                    <div className="space-y-2">
+                      {pendingDues.map(d => (
+                        <div key={`${d.cycleId}-${d.memberId}`} className="flex items-center justify-between p-2 rounded border text-sm">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{d.memberName}</span>
+                            <Badge variant="outline" className="text-xs">Cycle {d.cycleNo}</Badge>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-muted-foreground">{formatCurrency(d.amountOwed)}</span>
+                            <Button size="sm" variant="outline" onClick={() => openCollectDue(d)}>Collect</Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
               {currentCycle && (
                 <Card>
                   <CardHeader><CardTitle className="text-base">Payment Summary</CardTitle></CardHeader>
@@ -368,16 +545,89 @@ export function ChitManualCycleForm({
               )}
 
               <Card>
-                <CardHeader><CardTitle className="text-base">Cycle Control</CardTitle></CardHeader>
+                <CardHeader><CardTitle className="text-base">
+                  {closingInfo?.allCyclesComplete && !closingInfo.alreadyClosed ? 'Closing Cycle — Final Settlement' : 'Cycle Control'}
+                </CardTitle></CardHeader>
                 <CardContent>
-                  <Button
-                    onClick={handleAdvanceCycle}
-                    disabled={isSubmitting || !!(currentCycle && !currentCycle.winnerId)}
-                    className="w-full"
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    {currentCycle ? 'Start Next Cycle' : 'Start First Cycle'}
-                  </Button>
+                  {closingInfo?.alreadyClosed ? (
+                    <p className="text-sm text-green-700 font-medium text-center">
+                      This chit is closed — all cycles complete and remaining members paid out.
+                    </p>
+                  ) : closingInfo?.allCyclesComplete ? (
+                    <div className="space-y-3">
+                      {closingInfo.outstandingDues > 0 ? (
+                        <p className="text-xs text-amber-700">
+                          {closingInfo.outstandingDues} pending due(s) must be collected (see Pending Dues above) before closing.
+                        </p>
+                      ) : closingInfo.leftoverMembers.length > 0 ? (
+                        <>
+                          <p className="text-xs text-muted-foreground">
+                            These members never won — each is paid {formatCurrency(closingInfo.payoutEach)} when you close the chit.
+                          </p>
+                          <div className="space-y-2">
+                            {closingInfo.leftoverMembers.map(m => (
+                              <div key={m.memberId} className="space-y-2 p-2 rounded border text-sm">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-medium">{m.memberName}{passbookSuffix(m.memberId)}</span>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-muted-foreground">{formatCurrency(closingInfo.payoutEach)}</span>
+                                    <Select
+                                      value={closingMethods[m.memberId] ?? 'cash'}
+                                      onValueChange={(v: 'cash' | 'bank') => setClosingMethods(prev => ({ ...prev, [m.memberId]: v }))}
+                                    >
+                                      <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="cash">Cash</SelectItem>
+                                        <SelectItem value="bank">Bank</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                                {(closingMethods[m.memberId] ?? 'cash') === 'bank' && (
+                                  <BankRefInline
+                                    refType={closingRefTypes[m.memberId] ?? 'transfer'}
+                                    value={closingBankRefs[m.memberId] ?? ''}
+                                    onRefType={t => setClosingRefTypes(prev => ({ ...prev, [m.memberId]: t }))}
+                                    onValue={v => setClosingBankRefs(prev => ({ ...prev, [m.memberId]: v }))}
+                                  />
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Everyone has won. Closing will finalize the chit.</p>
+                      )}
+                      <Button
+                        onClick={handleCloseChit}
+                        disabled={isSubmitting || closingInfo.outstandingDues > 0}
+                        className="w-full"
+                      >
+                        <Trophy className="h-4 w-4 mr-2" />
+                        {closingInfo.leftoverMembers.length > 0 ? 'Close Chit & Pay Out' : 'Close Chit'}
+                      </Button>
+                    </div>
+                  ) : isFinalCycle ? (
+                    <p className="text-sm text-muted-foreground text-center">
+                      Final cycle ({durationMonths} of {durationMonths}) — process its winner in the Winners tab, then close the chit.
+                    </p>
+                  ) : (
+                    <>
+                      {currentCycle && currentCycle.winnerId && (
+                        <p className="text-xs text-muted-foreground mb-2">
+                          This cycle is complete — start the next cycle to continue. The discount carries forward automatically.
+                        </p>
+                      )}
+                      <Button
+                        onClick={handleAdvanceCycle}
+                        disabled={isSubmitting || !!(currentCycle && !currentCycle.winnerId)}
+                        className="w-full"
+                      >
+                        <Plus className="h-4 w-4 mr-2" />
+                        {currentCycle ? 'Start Next Cycle' : 'Start First Cycle'}
+                      </Button>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             </div>
@@ -417,7 +667,7 @@ export function ChitManualCycleForm({
                       <SelectContent>
                         {unpaidMembers.map(m => (
                           <SelectItem key={m.memberId} value={m.memberId}>
-                            {m.memberName}
+                            {m.memberName}{passbookSuffix(m.memberId)}
                             {m.isEligibleForDiscount
                               ? ` (${formatCurrency(m.payableAmount)})`
                               : ` (${formatCurrency(monthlyContribution)} — no discount)`}
@@ -487,7 +737,7 @@ export function ChitManualCycleForm({
                         <SelectContent>
                           {eligibleMembersWithoutWin
                             .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
-                            .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>)}
+                            .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </div>
@@ -502,6 +752,17 @@ export function ChitManualCycleForm({
                       </Select>
                     </div>
                   </div>
+                  {fixedWinnerMethod === 'bank' && (
+                    <div className="space-y-1">
+                      <Label className="text-xs">Bank Reference</Label>
+                      <BankRefInline
+                        refType={fixedWinnerRefType}
+                        value={fixedWinnerBankRef}
+                        onRefType={setFixedWinnerRefType}
+                        onValue={setFixedWinnerBankRef}
+                      />
+                    </div>
+                  )}
                   <div className="text-sm text-muted-foreground">
                     Payout: {formatCurrency(totalAmount)} − {formatCurrency(commissionPerWinner)} commission = <strong>{formatCurrency(fixedWinnerPayout)}</strong>
                   </div>
@@ -533,7 +794,7 @@ export function ChitManualCycleForm({
                                 {eligibleMembersWithoutWin
                                   .filter(m => m.memberId !== fixedWinnerId &&
                                     !auctionWinners.find((w, j) => j !== i && w.memberId === m.memberId))
-                                  .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>)}
+                                  .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>)}
                               </SelectContent>
                             </Select>
                           </div>
@@ -556,6 +817,17 @@ export function ChitManualCycleForm({
                               </SelectContent>
                             </Select>
                           </div>
+                          {row.paymentMethod === 'bank' && (
+                            <div className="col-span-3 space-y-1">
+                              <Label className="text-xs">Bank Reference</Label>
+                              <BankRefInline
+                                refType={row.bankRefType ?? 'transfer'}
+                                value={row.bankTxnId ?? ''}
+                                onRefType={t => update('bankRefType', t)}
+                                onValue={v => update('bankTxnId', v)}
+                              />
+                            </div>
+                          )}
                         </div>
                       )
                     })}
@@ -608,5 +880,38 @@ export function ChitManualCycleForm({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    {/* Collect overdue dues for an earlier cycle */}
+    <Dialog open={!!collectDue} onOpenChange={open => { if (!open) setCollectDue(null) }}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Collect Cycle {collectDue?.cycleNo} Dues</DialogTitle>
+        </DialogHeader>
+        {collectDue && (
+          <div className="space-y-4">
+            <div className="rounded-lg bg-muted p-3 text-sm">
+              <p className="font-medium">{collectDue.memberName}</p>
+              <p className="text-muted-foreground text-xs mt-0.5">
+                Overdue installment for cycle {collectDue.cycleNo}
+              </p>
+              <p className="text-sm mt-1">Amount: <strong>{formatCurrency(collectDue.amountOwed)}</strong></p>
+            </div>
+            <PaymentMethodFields
+              total={collectDue.amountOwed}
+              value={collectSplit}
+              onChange={setCollectSplit}
+              idPrefix="chit-due"
+            />
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setCollectDue(null)} disabled={isSubmitting}>Cancel</Button>
+          <Button onClick={handleCollectDue} disabled={isSubmitting}>
+            Collect Payment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }

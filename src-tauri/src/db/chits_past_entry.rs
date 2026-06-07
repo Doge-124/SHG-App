@@ -197,7 +197,12 @@ pub fn record_bulk_past_chit_cycles(
     let n = all_member_ids.len() as f64;
     let mut recorded = 0usize;
 
-    for input in inputs {
+    // Process cycles in order so each one's discount is on record before the
+    // next reads it (discounts carry forward — cycle N's bid reduces cycle N+1).
+    let mut ordered: Vec<&BulkCycleInput> = inputs.iter().collect();
+    ordered.sort_by_key(|c| c.cycle_no);
+
+    for input in ordered {
         // Build the winners list: 1 FIXED + W-1 AUCTION
         let mut winner_strs: Vec<(i64, &str, f64, f64, String, String)> = Vec::new();
 
@@ -225,11 +230,23 @@ pub fn record_bulk_past_chit_cycles(
             }
         }).collect();
 
-        // Auction discount per member = sum of auction bid_discounts / N
+        // Auction discount per member = sum of auction bid_discounts / N.
+        // This is the discount THIS cycle generates (stored on the cycle, applied
+        // to the NEXT cycle's payments).
         let total_bid_discounts: f64 = input.auction_winners.iter().map(|w| w.bid_discount).sum();
         let auction_discount_per_member = if n > 0.0 { total_bid_discounts / n } else { 0.0 };
 
-        let per_member_amount = (monthly_contribution - auction_discount_per_member).max(0.0);
+        // THIS cycle's payments are reduced by the PREVIOUS cycle's discount,
+        // read from the cycle already on record (cycle_no - 1). The first cycle
+        // has no prior discount.
+        let prev_discount_per_member: f64 = conn.query_row(
+            "SELECT COALESCE(auction_discount_per_member, 0) FROM chit_cycles
+             WHERE chit_id = ?1 AND cycle_no = ?2",
+            (chit_id, input.cycle_no - 1),
+            |r| r.get(0),
+        ).unwrap_or(0.0);
+
+        let per_member_amount = (monthly_contribution - prev_discount_per_member).max(0.0);
         let payment_method_str = "CASH";
         let payments: Vec<(i64, f64, &str)> = all_member_ids
             .iter()

@@ -39,13 +39,16 @@ function escapeHtml(s: string): string {
 /**
  * Render report HTML and open the print dialog.
  *
- * We deliberately do NOT use `window.open()` — in the Tauri WebView2 popups are
- * blocked and it returns null, so the old "Print / PDF" buttons silently did
- * nothing. Instead we write the HTML into a hidden iframe in the current document
- * and call print() on it, which reliably opens the OS print dialog (choose a
- * printer or "Save as PDF").
+ * In the Tauri WebView2: `window.open()` is blocked (returns null), and a
+ * `document.write()` iframe doesn't reliably fire `onload`, so `print()` never
+ * gets called. We instead load the HTML into a hidden iframe via a **Blob URL**
+ * — the same mechanism the working receipt/voucher PDF print uses — whose
+ * `onload` fires dependably, then call print() on it.
  */
 function printHtml(html: string): void {
+  const blob = new Blob([html], { type: 'text/html' })
+  const url = URL.createObjectURL(blob)
+
   const iframe = document.createElement('iframe')
   iframe.style.position = 'fixed'
   iframe.style.right = '0'
@@ -54,31 +57,26 @@ function printHtml(html: string): void {
   iframe.style.height = '0'
   iframe.style.border = '0'
   iframe.setAttribute('aria-hidden', 'true')
+
+  iframe.onload = () => {
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus()
+        iframe.contentWindow?.print()
+      } catch (e) {
+        console.error('Print failed', e)
+      }
+    }, 200)
+  }
+
+  iframe.src = url
   document.body.appendChild(iframe)
 
-  const doc = iframe.contentWindow?.document
-  if (!doc) {
-    document.body.removeChild(iframe)
-    return
-  }
-  doc.open()
-  doc.write(html)
-  doc.close()
-
-  const trigger = () => {
-    try {
-      iframe.contentWindow?.focus()
-      iframe.contentWindow?.print()
-    } catch (e) {
-      console.error('Print failed', e)
-    }
-  }
-  // Give the iframe a tick to lay out before printing.
-  iframe.onload = () => setTimeout(trigger, 150)
-  if (doc.readyState === 'complete') setTimeout(trigger, 200)
-
-  // Remove the iframe well after the print job has had time to spool.
-  setTimeout(() => { try { document.body.removeChild(iframe) } catch {} }, 60000)
+  // Clean up after the print job has had time to spool.
+  setTimeout(() => {
+    try { document.body.removeChild(iframe) } catch {}
+    URL.revokeObjectURL(url)
+  }, 60000)
 }
 
 /**
