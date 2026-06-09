@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS shg_transactions (
     voided_reason TEXT,
     reversal_of_id INTEGER,
     bank_txn_id TEXT,
-    group_id TEXT
+    group_id TEXT,
+    member_ref_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS shg_balances (
@@ -428,6 +429,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_shg_tx_group ON shg_transactions(group_id);"
     )?;
+    // member_ref_id: the specific member a row is FOR, when reference_id can't
+    // identify them. Chit payout/commission rows reference the cycle (reference_id
+    // = cycle_id, relied on by cancellation), but a cycle can have several winners
+    // (multi-winner + closing cycles), so the member name can't be derived from
+    // the cycle alone. This pins the exact member for name resolution. NULL on
+    // older rows, which fall back to the cycle's winning_member_id.
+    add_column_if_missing(&tx, "shg_transactions", "member_ref_id", "INTEGER")?;
     // Mixed-payment split recorded on the derived rows (display only — the
     // authoritative cash/bank split lives on the two shg_transactions rows).
     add_column_if_missing(&tx, "loan_payments", "cash_amount", "REAL")?;
@@ -490,6 +498,28 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     // passbook ID used for drawing lots / selecting winners, distinct from
     // the member_code. One per membership row, manually entered.
     add_column_if_missing(&tx, "chit_members", "passbook_number", "TEXT")?;
+
+    // Guarantors for loans and chit memberships (optional, up to 2 each).
+    // scope = 'LOAN' (ref_id = loans.id) or 'CHIT_MEMBER' (ref_id = chit_members.id).
+    // guarantor_type: SELF (the borrower/member), MEMBER (another SHG member, by
+    // guarantor_member_id), or OTHER (free-text name + details).
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS guarantors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL CHECK (scope IN ('LOAN','CHIT_MEMBER')),
+            ref_id INTEGER NOT NULL,
+            slot INTEGER NOT NULL CHECK (slot IN (1,2)),
+            guarantor_type TEXT NOT NULL CHECK (guarantor_type IN ('SELF','MEMBER','OTHER')),
+            guarantor_member_id INTEGER,
+            guarantor_name TEXT,
+            guarantor_details TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (scope, ref_id, slot)
+        );
+        CREATE INDEX IF NOT EXISTS idx_guarantors_ref ON guarantors(scope, ref_id);
+        "#,
+    )?;
 
     tx.execute_batch(
         r#"

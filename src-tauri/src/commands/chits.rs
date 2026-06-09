@@ -599,6 +599,18 @@ pub fn get_chit_pending_dues(
     db::chits::get_chit_pending_dues(conn, chit_id).map_err(|e: AppError| e.to_string())
 }
 
+/// A member's detailed debit/credit ledger within one chit.
+#[tauri::command]
+pub fn get_member_chit_ledger(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    member_id: i64,
+) -> Result<db::chits::MemberChitLedger, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
+    db::chits::get_member_chit_ledger(conn, chit_id, member_id).map_err(|e: AppError| e.to_string())
+}
+
 #[derive(serde::Deserialize)]
 pub struct ChitLatePaymentInput {
     pub chit_id: i64,

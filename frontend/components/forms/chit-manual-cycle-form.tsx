@@ -35,7 +35,7 @@ import {
   type PaymentSplit,
 } from '@/components/forms/payment-method-fields'
 import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
-import { formatCurrency, formatDate } from '@/lib/format'
+import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 type BankRefType = 'transfer' | 'cheque'
@@ -146,7 +146,7 @@ export function ChitManualCycleForm({
 
   const perMemberAmount = (memberId: string) => {
     const summary = paymentSummary.find(p => p.memberId === memberId)
-    return summary ? summary.payableAmount : monthlyContribution - auctionDiscount
+    return summary ? summary.payableAmount : roundToFive(monthlyContribution - auctionDiscount)
   }
 
   // Passbook suffix for member dropdowns, e.g. " (Passbook: 123)". Empty if none.
@@ -670,7 +670,7 @@ export function ChitManualCycleForm({
                             {m.memberName}{passbookSuffix(m.memberId)}
                             {m.isEligibleForDiscount
                               ? ` (${formatCurrency(m.payableAmount)})`
-                              : ` (${formatCurrency(monthlyContribution)} — no discount)`}
+                              : ` (${formatCurrency(m.payableAmount)} — no discount)`}
                           </SelectItem>
                         ))}
                       </SelectContent>

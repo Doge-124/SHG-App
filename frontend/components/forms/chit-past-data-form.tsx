@@ -16,7 +16,7 @@ import { Lock } from 'lucide-react'
 import { recordPastChitCycle, getMemberPaymentStatus, getChitCyclesWithDetails, getChitMigrationStatus, getChitMembers } from '@/lib/api/chits'
 import { useSettings } from '@/lib/settings-context'
 import type { ChitMember, MemberPaymentStatus, ChitCycleDetail, ChitMigrationStatus } from '@/lib/types'
-import { formatCurrency, formatDate } from '@/lib/format'
+import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 interface ChitPastDataFormProps {
@@ -102,9 +102,9 @@ export function ChitPastDataForm({
     return !!st && st.lateCycles.some(c => c < cycleNumber)
   }
   const payableFor = (memberId: string) =>
-    memberHasDues(memberId)
+    roundToFive(memberHasDues(memberId)
       ? monthlyContribution
-      : Math.max(0, monthlyContribution - prevDiscountPerMember)
+      : Math.max(0, monthlyContribution - prevDiscountPerMember))
   // Passbook suffix for member labels, e.g. " (Passbook: 123)". Empty if none.
   const passbookSuffix = (memberId: string) => {
     const pb = members.find(m => m.memberId === memberId)?.passbookNumber
@@ -187,6 +187,10 @@ export function ChitPastDataForm({
   // ── Submit ────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (cycleNumber <= 0) { toast.error('Enter a valid cycle number'); return }
+    if (migrationStatus && cycleNumber > migrationStatus.totalMonths) {
+      toast.error(`This chit runs for ${migrationStatus.totalMonths} cycle(s) — cycle ${cycleNumber} is out of range.`)
+      return
+    }
     if (!auctionDate) { toast.error('Select an auction date'); return }
 
     const payments = memberPayments
@@ -313,8 +317,11 @@ export function ChitPastDataForm({
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label>Cycle Number</Label>
-                      <Input type="number" min={1} value={cycleNumber}
+                      <Input type="number" min={1} max={migrationStatus?.totalMonths ?? undefined} value={cycleNumber}
                         onChange={e => setCycleNumber(parseInt(e.target.value) || 1)} />
+                      {migrationStatus && (
+                        <p className="text-xs text-muted-foreground">of {migrationStatus.totalMonths} total cycles</p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label>Auction Date</Label>

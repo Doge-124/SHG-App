@@ -7,6 +7,15 @@ export function formatCurrency(amount: number): string {
   }).format(amount)
 }
 
+// Round a chit installment to the nearest multiple of 5, rounding UP when the
+// amount past the lower multiple of 5 is 3 or more and DOWN when it is less
+// than 3 (e.g. 173.8 -> 175, 172.2 -> 170). Mirrors the backend round_to_5 so
+// collected contributions are clean cash amounts.
+export function roundToFive(amount: number): number {
+  if (!Number.isFinite(amount) || amount <= 0) return 0
+  return Math.floor((amount + 2) / 5) * 5
+}
+
 // Human-friendly loan reference derived from the loan's row id (LN-0007).
 export function loanRef(id: string | number): string {
   const n = typeof id === 'number' ? id : parseInt(id, 10)

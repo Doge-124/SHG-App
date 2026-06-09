@@ -45,6 +45,8 @@ pub struct DayBookSummary {
 /// This guarantees the Day/Cash/Bank books never show a blank party.
 const MEMBER_NAME_EXPR: &str = "
     CASE
+        WHEN t.member_ref_id IS NOT NULL THEN
+            COALESCE((SELECT name FROM members WHERE id = t.member_ref_id), 'SHG')
         WHEN t.reference_type IN ('CHIT_PAYOUT','CHIT_COMMISSION') AND t.reference_id IS NOT NULL THEN
             COALESCE(
                 (SELECT m.name FROM members m

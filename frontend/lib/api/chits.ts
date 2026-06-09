@@ -540,6 +540,51 @@ export async function getChitPendingDues(chitGroupId: string): Promise<ApiRespon
   }
 }
 
+export interface ChitLedgerRow {
+  cycleNo: number
+  date: string
+  particulars: string
+  debit: number
+  credit: number
+  balance: number
+  isPayout: boolean
+}
+
+export interface MemberChitLedger {
+  chitId: number
+  memberId: number
+  memberName: string
+  memberCode: string
+  chitName: string
+  passbookNumber: string | null
+  monthlyContribution: number
+  totalCycles: number
+  wonCycleNo: number | null
+  payoutAmount: number
+  totalDebit: number
+  totalCredit: number
+  totalPayout: number
+  closingBalance: number
+  rows: ChitLedgerRow[]
+}
+
+/** A member's detailed debit/credit ledger within one chit (includes past data). */
+export async function getMemberChitLedger(
+  chitGroupId: string,
+  memberId: string,
+): Promise<ApiResponse<MemberChitLedger>> {
+  try {
+    const data = await invoke<MemberChitLedger>('get_member_chit_ledger', {
+      chitId: parseInt(chitGroupId),
+      memberId: parseInt(memberId),
+    })
+    return { success: true, data }
+  } catch (error) {
+    console.error('Failed to load chit ledger:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to load chit ledger' }
+  }
+}
+
 /** Collect an overdue installment for a completed (past/prior) cycle — real cash today. */
 export async function recordChitLatePayment(
   chitGroupId: string,

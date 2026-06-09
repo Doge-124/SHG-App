@@ -115,6 +115,12 @@ export async function issueLoan(data: LoanFormData): Promise<ApiResponse<Loan>> 
       createdAt: new Date().toISOString(),
     })) as number
 
+    // Attach guarantors (optional, up to 2) to the freshly created loan.
+    if (data.guarantors && data.guarantors.length > 0) {
+      const { setLoanGuarantors } = await import('@/lib/api/guarantors')
+      await setLoanGuarantors(loanId.toString(), data.guarantors)
+    }
+
     const loan = await invoke('get_loan', { loanId }) as any
     if (!loan) return { success: false, error: 'Loan created but could not be retrieved' }
     return { success: true, data: mapLoan(loan) }

@@ -83,6 +83,7 @@ export interface LoanFormData {
   bankTxnId?: string | null     // bank reference / cheque no. for the bank portion
   loanType: 'monthly' | 'weekly'
   note?: string
+  guarantors?: import('@/lib/api/guarantors').GuarantorInput[]
 }
 
 export interface LoanRepayment {

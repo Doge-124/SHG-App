@@ -35,6 +35,20 @@ pub fn record_past_chit_cycle(
         return Err(AppError::validation("Auction discount per member cannot be negative"));
     }
 
+    // A chit runs for a fixed number of cycles (chit_groups.months). Reject any
+    // past cycle outside 1..=months so past entry can't create phantom cycles
+    // that then break live cycle management.
+    let months: i64 = conn.query_row(
+        "SELECT months FROM chit_groups WHERE id = ?1",
+        [chit_id],
+        |r| r.get(0),
+    )?;
+    if cycle_no < 1 || cycle_no > months {
+        return Err(AppError::business(format!(
+            "This chit runs for {months} cycle(s); cycle {cycle_no} is out of range."
+        )));
+    }
+
     // Reject any winner who has already won in this chit.
     for w in winners {
         let already_won: bool = conn.query_row(
@@ -174,15 +188,25 @@ pub fn record_bulk_past_chit_cycles(
     chit_id: i64,
     inputs: &[BulkCycleInput],
 ) -> Result<usize, AppError> {
-    let (monthly_contribution, commission_per_winner, fixed_prize_amount): (f64, f64, f64) =
+    let (monthly_contribution, commission_per_winner, fixed_prize_amount, months): (f64, f64, f64, i64) =
         conn.query_row(
             "SELECT monthly_contribution,
                     COALESCE(commission_per_winner, 0.0),
-                    COALESCE(fixed_prize_amount, total_amount)
+                    COALESCE(fixed_prize_amount, total_amount),
+                    months
              FROM chit_groups WHERE id = ?1",
             [chit_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
+
+    // A chit runs for a fixed number of cycles. Reject any past cycle outside
+    // 1..=months so past entry can't create phantom cycles beyond the duration.
+    if let Some(bad) = inputs.iter().find(|c| c.cycle_no < 1 || c.cycle_no > months) {
+        return Err(AppError::business(format!(
+            "This chit runs for {months} cycle(s); cycle {} is out of range.",
+            bad.cycle_no
+        )));
+    }
 
     let all_member_ids: Vec<i64> = conn
         .prepare("SELECT member_id FROM chit_members WHERE chit_id = ?1")?

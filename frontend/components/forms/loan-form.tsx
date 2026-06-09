@@ -38,6 +38,8 @@ import {
   PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
   emptyPaymentSplit, type PaymentSplit,
 } from '@/components/forms/payment-method-fields'
+import { GuarantorFields } from '@/components/forms/guarantor-fields'
+import type { GuarantorInput } from '@/lib/api/guarantors'
 import type { Member, LoanFormData } from '@/lib/types'
 
 const loanSchema = z.object({
@@ -61,6 +63,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
   const [members, setMembers] = useState<Member[]>([])
   const [loadingMembers, setLoadingMembers] = useState(true)
   const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
+  const [guarantors, setGuarantors] = useState<GuarantorInput[]>([])
 
   const form = useForm<LoanFormValues>({
     resolver: zodResolver(loanSchema),
@@ -106,9 +109,11 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
       cashAmount: pay.cashAmount,
       bankAmount: pay.bankAmount,
       bankTxnId: pay.bankTxnId,
+      guarantors,
     })
     form.reset()
     setPaySplit(emptyPaymentSplit)
+    setGuarantors([])
   }
 
   return (
@@ -247,6 +252,13 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                   <FormMessage />
                 </FormItem>
               )}
+            />
+
+            <GuarantorFields
+              value={guarantors}
+              onChange={setGuarantors}
+              members={members.map(m => ({ id: m.id, name: m.name, code: m.code }))}
+              selfMemberId={form.watch('memberId')}
             />
 
             <div className="flex justify-end gap-3 pt-2">

@@ -217,6 +217,8 @@ pub fn get_vouchers(
             t.voided_reason,
             t.reversal_of_id,
             CASE
+                WHEN t.member_ref_id IS NOT NULL THEN
+                    (SELECT name FROM members WHERE id = t.member_ref_id)
                 WHEN t.reference_type = 'CHIT_PAYOUT' AND t.reference_id IS NOT NULL THEN
                     (SELECT m.name FROM members m
                      JOIN chit_cycles cc ON cc.winning_member_id = m.id
@@ -302,6 +304,8 @@ pub fn get_receipts(
             t.voided_reason,
             t.reversal_of_id,
             CASE
+                WHEN t.member_ref_id IS NOT NULL THEN
+                    (SELECT name FROM members WHERE id = t.member_ref_id)
                 WHEN t.reference_type = 'CHIT_COMMISSION' AND t.reference_id IS NOT NULL THEN
                     (SELECT m.name FROM members m
                      JOIN chit_cycles cc ON cc.winning_member_id = m.id
@@ -314,6 +318,9 @@ pub fn get_receipts(
                 ELSE NULL
             END as member_name,
             CASE
+                WHEN t.member_ref_id IS NOT NULL THEN
+                    (SELECT member_code FROM members WHERE id = t.member_ref_id)
+                WHEN t.reference_type = 'CHIT_COMMISSION' THEN NULL
                 WHEN t.reference_id IS NOT NULL THEN
                     (SELECT member_code FROM members WHERE id = t.reference_id)
                 ELSE NULL

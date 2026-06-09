@@ -372,3 +372,90 @@ export function printChitCycles(
 
   printHtml(html)
 }
+
+export interface ChitLedgerReportRow {
+  cycleNo: number
+  date: string
+  particulars: string
+  debit: number
+  credit: number
+  balance: number
+  isPayout: boolean
+}
+
+export function printChitMemberLedger(
+  data: {
+    memberName: string
+    memberCode: string
+    chitName: string
+    passbookNumber: string | null
+    wonCycleNo: number | null
+    payoutAmount: number
+    totalDebit: number
+    totalCredit: number
+    totalPayout: number
+    closingBalance: number
+    rows: ChitLedgerReportRow[]
+  },
+  opts: { shgName?: string },
+): void {
+  const body = data.rows.map((r) => `
+    <tr${r.isPayout ? ' style="background:#fef9c3"' : ''}>
+      <td style="text-align:center">${r.isPayout ? '★' : escapeHtml(String(r.cycleNo))}</td>
+      <td>${escapeHtml(fmtDate(r.date))}</td>
+      <td>${escapeHtml(r.particulars)}</td>
+      <td style="text-align:right;color:#166534">${r.debit ? escapeHtml(formatCurrency(r.debit)) : ''}</td>
+      <td style="text-align:right;color:#1d4ed8">${r.credit ? escapeHtml(formatCurrency(r.credit)) : ''}</td>
+      <td style="text-align:right">${escapeHtml(formatCurrency(r.balance))}</td>
+    </tr>`).join('')
+
+  const wonLine = data.wonCycleNo
+    ? `Won cycle ${data.wonCycleNo} · Prize ${formatCurrency(data.payoutAmount)}`
+    : 'Not yet won'
+
+  const html = `<!doctype html><html><head><meta charset="utf-8">
+    <title>Chit Ledger — ${escapeHtml(data.memberName)}</title>
+    <style>
+      body { font: 13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; color: #111; }
+      h1 { font-size: 18px; margin: 0 0 2px; }
+      .sub { color: #555; font-size: 12px; margin-bottom: 4px; }
+      .meta { font-size: 12px; margin-bottom: 14px; }
+      .meta b { color: #111; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #ccc; padding: 6px 8px; font-size: 12px; }
+      th { background: #f1f5f9; text-align: left; }
+      tfoot td { font-weight: 700; background: #fafafa; }
+      .legend { color:#666; font-size:11px; margin-top:10px; }
+      @media print { button { display: none; } }
+    </style></head>
+    <body>
+      <h1>${escapeHtml(opts.shgName || 'SHG Manager')}</h1>
+      <div class="sub">Chit Ledger — ${escapeHtml(data.chitName)}</div>
+      <div class="meta">
+        <b>${escapeHtml(data.memberName)}</b> (${escapeHtml(data.memberCode)})
+        ${data.passbookNumber ? ` · Passbook: <b>${escapeHtml(data.passbookNumber)}</b>` : ''}
+        · ${escapeHtml(wonLine)}
+      </div>
+      <table>
+        <thead>
+          <tr><th style="text-align:center">Cycle</th><th>Date</th><th>Particulars</th>
+              <th style="text-align:right">Debit</th><th style="text-align:right">Credit</th>
+              <th style="text-align:right">Balance</th></tr>
+        </thead>
+        <tbody>${body || '<tr><td colspan="6" style="text-align:center;color:#888">No entries</td></tr>'}</tbody>
+        <tfoot>
+          <tr><td colspan="3" style="text-align:right">Totals</td>
+            <td style="text-align:right;color:#166534">${escapeHtml(formatCurrency(data.totalDebit))}</td>
+            <td style="text-align:right;color:#1d4ed8">${escapeHtml(formatCurrency(data.totalCredit))}</td>
+            <td style="text-align:right">${escapeHtml(formatCurrency(data.closingBalance))}</td></tr>
+        </tfoot>
+      </table>
+      <div class="legend">
+        Debit = instalments paid before winning · Credit = instalments paid after winning ·
+        Balance = total paid − prize awarded (settles to ~0 once fully paid; the commission stays with the SHG).
+      </div>
+      <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
+    </body></html>`
+
+  printHtml(html)
+}

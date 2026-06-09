@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, CreditCard, MoreHorizontal, History, CalendarClock, Trash2 } from 'lucide-react'
+import { Plus, CreditCard, MoreHorizontal, History, CalendarClock, Trash2, ShieldCheck } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { toast } from 'sonner'
@@ -31,6 +31,7 @@ import { useSettings } from '@/lib/settings-context'
 import { issueLoan, recordRepayment } from '@/lib/api/loans'
 import { PastLoanForm } from '@/components/forms/past-loan-form'
 import { LoanScheduleDialog } from '@/components/loan-schedule-dialog'
+import { LoanGuarantorsDialog } from '@/components/forms/loan-guarantors-dialog'
 import { track } from '@/lib/track'
 
 // Bucket a numeric amount into small/medium/large (preserves signal without sending exact amounts)
@@ -53,6 +54,7 @@ export default function LoansPage() {
   const [repaymentLoan, setRepaymentLoan] = useState<Loan | null>(null)
   const [scheduleLoanId, setScheduleLoanId] = useState<number | null>(null)
   const [deleteLoanId, setDeleteLoanId] = useState<string | null>(null)
+  const [guarantorLoan, setGuarantorLoan] = useState<Loan | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paid' | 'defaulted'>('all')
   const [loanTypeFilter, setLoanTypeFilter] = useState<'all' | 'monthly' | 'weekly'>('all')
@@ -255,6 +257,10 @@ export default function LoansPage() {
               <CalendarClock className="mr-2 h-4 w-4" />
               View Schedule
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setGuarantorLoan(loan)}>
+              <ShieldCheck className="mr-2 h-4 w-4" />
+              Guarantors
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => setDeleteLoanId(loan.id)}
               className="text-red-600 focus:text-red-700"
@@ -406,6 +412,13 @@ export default function LoansPage() {
         loanId={scheduleLoanId}
         open={scheduleLoanId !== null}
         onOpenChange={open => { if (!open) setScheduleLoanId(null) }}
+      />
+      <LoanGuarantorsDialog
+        loanId={guarantorLoan?.id ?? null}
+        borrowerMemberId={guarantorLoan?.memberId ?? null}
+        borrowerName={guarantorLoan?.memberName}
+        open={!!guarantorLoan}
+        onOpenChange={(open) => { if (!open) setGuarantorLoan(null) }}
       />
 
       <AdminPinDialog

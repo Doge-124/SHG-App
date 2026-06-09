@@ -110,6 +110,7 @@ fn main() {
             commands::chits::advance_to_next_cycle,
             commands::chits::record_member_payment_with_discount,
             commands::chits::get_chit_pending_dues,
+            commands::chits::get_member_chit_ledger,
             commands::chits::record_chit_late_payment,
             commands::chits::get_chit_closing_info,
             commands::chits::close_chit,
@@ -189,6 +190,10 @@ fn main() {
             commands::past_edit::delete_past_chit_cycle,
             commands::past_edit::cancel_shg_transaction,
             commands::printing::silent_print_pdf,
+            commands::guarantors::set_loan_guarantors,
+            commands::guarantors::get_loan_guarantors,
+            commands::guarantors::set_chit_member_guarantors,
+            commands::guarantors::get_chit_member_guarantors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

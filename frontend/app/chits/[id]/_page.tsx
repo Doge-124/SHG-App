@@ -19,6 +19,8 @@ import {
   Pencil,
   Check,
   X,
+  BookOpen,
+  ShieldCheck,
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { AdminPinDialog } from '@/components/admin-pin-dialog'
@@ -44,6 +46,8 @@ import { getMembers } from '@/lib/api/members'
 import { ChitPastDataForm } from '@/components/forms/chit-past-data-form'
 import { ChitBulkPastEntryForm } from '@/components/forms/chit-bulk-past-entry-form'
 import { ChitManualCycleForm } from '@/components/forms/chit-manual-cycle-form'
+import { ChitMemberLedgerDialog } from '@/components/forms/chit-member-ledger-dialog'
+import { ChitMemberGuarantorsDialog } from '@/components/forms/chit-member-guarantors-dialog'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { printChitCycles, type ChitCycleReportRow } from '@/lib/reports'
 import { useSettings } from '@/lib/settings-context'
@@ -75,6 +79,8 @@ export default function ChitDetailPage() {
   const [showPastDataForm, setShowPastDataForm] = useState(false)
   const [showBulkEntry, setShowBulkEntry] = useState(false)
   const [showManualCycleForm, setShowManualCycleForm] = useState(false)
+  const [ledgerMemberId, setLedgerMemberId] = useState<string | null>(null)
+  const [guarantorMember, setGuarantorMember] = useState<{ id: string; name: string } | null>(null)
   const [paymentStatuses, setPaymentStatuses] = useState<MemberPaymentStatus[]>([])
   const [cycleWinners, setCycleWinners] = useState<Record<string, ChitCycleWinner[]>>({})
   const [deleteCycleId, setDeleteCycleId] = useState<string | null>(null)
@@ -132,6 +138,13 @@ export default function ChitDetailPage() {
 
   const handleConfirmAddMember = async () => {
     if (selectedMembers.size === 0) return
+    if (group) {
+      const remaining = group.totalMembers - members.length
+      if (selectedMembers.size > remaining) {
+        toast.error(`This chit is limited to ${group.totalMembers} member(s) — only ${Math.max(0, remaining)} slot(s) remaining.`)
+        return
+      }
+    }
     setIsAddingMembers(true)
     try {
       const results = await Promise.all(
@@ -270,6 +283,20 @@ export default function ChitDetailPage() {
             <Trophy className="mr-1 h-3 w-3" />Won (Cycle {member.winCycle})
           </Badge>
         ) : <Badge variant="outline">Active</Badge>
+      ),
+    },
+    {
+      key: 'actions',
+      header: '',
+      cell: (member) => (
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setGuarantorMember({ id: member.memberId, name: member.memberName })}>
+            <ShieldCheck className="mr-1 h-4 w-4" />Guarantors
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setLedgerMemberId(member.memberId)}>
+            <BookOpen className="mr-1 h-4 w-4" />Ledger
+          </Button>
+        </div>
       ),
     },
   ]
@@ -684,6 +711,22 @@ export default function ChitDetailPage() {
           open={showManualCycleForm} onOpenChange={setShowManualCycleForm} onSuccess={reload}
         />
       )}
+
+      <ChitMemberLedgerDialog
+        chitGroupId={id}
+        memberId={ledgerMemberId}
+        open={!!ledgerMemberId}
+        onOpenChange={(open) => { if (!open) setLedgerMemberId(null) }}
+        shgName={settings?.general?.groupName}
+      />
+
+      <ChitMemberGuarantorsDialog
+        chitGroupId={id}
+        memberId={guarantorMember?.id ?? null}
+        memberName={guarantorMember?.name}
+        open={!!guarantorMember}
+        onOpenChange={(open) => { if (!open) setGuarantorMember(null) }}
+      />
 
       <AdminPinDialog
         open={!!deleteCycleId}
