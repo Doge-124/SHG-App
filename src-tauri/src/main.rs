@@ -113,6 +113,7 @@ fn main() {
             commands::chits::get_member_chit_ledger,
             commands::chits::record_chit_late_payment,
             commands::chits::get_chit_closing_info,
+            commands::chits::pay_closing_members,
             commands::chits::close_chit,
             commands::chits::process_winner_payout,
             commands::chits::get_member_chit_groups,

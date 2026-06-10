@@ -686,9 +686,10 @@ pub struct ClosingPayout {
     pub bank_txn_id: Option<String>,
 }
 
-/// Close a chit — pay out all leftover (never-won) members and mark it CLOSED.
+/// Pay out leftover (never-won) members in the closing cycle. Allowed even while
+/// other members still owe dues; does not close the chit.
 #[tauri::command]
-pub fn close_chit(
+pub fn pay_closing_members(
     state: State<Mutex<AppState>>,
     chit_id: i64,
     payouts: Vec<ClosingPayout>,
@@ -700,10 +701,27 @@ pub fn close_chit(
         .map(|p| (p.member_id, p.payment_method, p.bank_txn_id))
         .collect();
 
-    db::chits::close_chit(conn, chit_id, &pairs).map_err(|e: AppError| e.to_string())?;
+    db::chits::pay_closing_members(conn, chit_id, &pairs).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_CLOSING_PAYOUT", "chit_group", Some(chit_id),
+        &format!("Chit {} — {} leftover member(s) paid out", chit_id, pairs.len()));
+    Ok(())
+}
+
+/// Mark a chit CLOSED — only once all dues are collected and every leftover
+/// member has been paid out.
+#[tauri::command]
+pub fn close_chit(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db::chits::close_chit(conn, chit_id).map_err(|e: AppError| e.to_string())?;
 
     db::audit::log_audit(conn, "CHIT_CLOSED", "chit_group", Some(chit_id),
-        &format!("Chit {} closed; {} leftover payout(s)", chit_id, pairs.len()));
+        &format!("Chit {chit_id} closed"));
     Ok(())
 }
 

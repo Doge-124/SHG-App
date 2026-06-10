@@ -847,6 +847,7 @@ pub struct LoanPassbookLoan {
     pub outstanding: f64,
     pub total_principal_paid: f64,
     pub total_interest_paid: f64,
+    pub guarantors: Vec<crate::db::guarantors::Guarantor>,
     pub entries: Vec<LoanLedgerEntry>,
 }
 
@@ -974,6 +975,9 @@ pub fn get_member_loan_passbook(
         total_principal_paid += loan_principal_paid;
         total_interest_paid += loan_interest_paid;
 
+        let loan_guarantors = crate::db::guarantors::get_guarantors(conn, "LOAN", loan_id)
+            .unwrap_or_default();
+
         loans.push(LoanPassbookLoan {
             loan_id,
             amount,
@@ -984,6 +988,7 @@ pub fn get_member_loan_passbook(
             outstanding,
             total_principal_paid: loan_principal_paid,
             total_interest_paid: loan_interest_paid,
+            guarantors: loan_guarantors,
             entries,
         });
     }

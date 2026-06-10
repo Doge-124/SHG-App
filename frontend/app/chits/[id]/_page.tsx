@@ -244,7 +244,7 @@ export default function ChitDetailPage() {
     )
   }
 
-  const progress = (group.currentCycle / group.durationMonths) * 100
+  const progress = Math.min(100, (group.currentCycle / group.durationMonths) * 100)
   const currentCycle = cycles.find((c) => c.status === 'active')
   const completedCycles = cycles.filter((c) => c.status === 'completed')
 

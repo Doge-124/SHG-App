@@ -119,7 +119,7 @@ export default function ChitsPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {chitGroups.map((group) => {
-            const progress = (group.currentCycle / group.durationMonths) * 100
+            const progress = Math.min(100, (group.currentCycle / group.durationMonths) * 100)
             return (
               <Card key={group.id} className="hover:shadow-md transition-shadow">
                 <CardHeader>

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { formatCurrency } from '@/lib/format'
+import { guarantorLabel } from '@/lib/api/guarantors'
 
 export interface BankTxnIdEntry {
   id: number
@@ -395,23 +396,31 @@ export function printChitMemberLedger(
     totalCredit: number
     totalPayout: number
     closingBalance: number
+    guarantors: import('@/lib/api/guarantors').Guarantor[]
     rows: ChitLedgerReportRow[]
   },
   opts: { shgName?: string },
 ): void {
+  const fmtBalance = (b: number) =>
+    Math.abs(b) < 0.005 ? 'NIL' : `${formatCurrency(Math.abs(b))} ${b > 0 ? 'CR' : 'DR'}`
+
   const body = data.rows.map((r) => `
     <tr${r.isPayout ? ' style="background:#fef9c3"' : ''}>
-      <td style="text-align:center">${r.isPayout ? '★' : escapeHtml(String(r.cycleNo))}</td>
+      <td style="text-align:center">${escapeHtml(String(r.cycleNo))}</td>
       <td>${escapeHtml(fmtDate(r.date))}</td>
       <td>${escapeHtml(r.particulars)}</td>
-      <td style="text-align:right;color:#166534">${r.debit ? escapeHtml(formatCurrency(r.debit)) : ''}</td>
-      <td style="text-align:right;color:#1d4ed8">${r.credit ? escapeHtml(formatCurrency(r.credit)) : ''}</td>
-      <td style="text-align:right">${escapeHtml(formatCurrency(r.balance))}</td>
+      <td style="text-align:right;color:#1d4ed8">${r.debit ? escapeHtml(formatCurrency(r.debit)) : ''}</td>
+      <td style="text-align:right;color:#166534">${r.credit ? escapeHtml(formatCurrency(r.credit)) : ''}</td>
+      <td style="text-align:right">${escapeHtml(fmtBalance(r.balance))}</td>
     </tr>`).join('')
 
   const wonLine = data.wonCycleNo
     ? `Won cycle ${data.wonCycleNo} · Prize ${formatCurrency(data.payoutAmount)}`
     : 'Not yet won'
+
+  const guarantorLine = data.guarantors.length > 0
+    ? data.guarantors.map(guarantorLabel).join(', ')
+    : '—'
 
   const html = `<!doctype html><html><head><meta charset="utf-8">
     <title>Chit Ledger — ${escapeHtml(data.memberName)}</title>
@@ -435,6 +444,7 @@ export function printChitMemberLedger(
         <b>${escapeHtml(data.memberName)}</b> (${escapeHtml(data.memberCode)})
         ${data.passbookNumber ? ` · Passbook: <b>${escapeHtml(data.passbookNumber)}</b>` : ''}
         · ${escapeHtml(wonLine)}
+        <br>Guaranteed by: ${escapeHtml(guarantorLine)}
       </div>
       <table>
         <thead>
@@ -445,14 +455,106 @@ export function printChitMemberLedger(
         <tbody>${body || '<tr><td colspan="6" style="text-align:center;color:#888">No entries</td></tr>'}</tbody>
         <tfoot>
           <tr><td colspan="3" style="text-align:right">Totals</td>
-            <td style="text-align:right;color:#166534">${escapeHtml(formatCurrency(data.totalDebit))}</td>
-            <td style="text-align:right;color:#1d4ed8">${escapeHtml(formatCurrency(data.totalCredit))}</td>
-            <td style="text-align:right">${escapeHtml(formatCurrency(data.closingBalance))}</td></tr>
+            <td style="text-align:right;color:#1d4ed8">${escapeHtml(formatCurrency(data.totalDebit))}</td>
+            <td style="text-align:right;color:#166534">${escapeHtml(formatCurrency(data.totalCredit))}</td>
+            <td style="text-align:right">${escapeHtml(fmtBalance(data.closingBalance))}</td></tr>
         </tfoot>
       </table>
       <div class="legend">
-        Debit = instalments paid before winning · Credit = instalments paid after winning ·
-        Balance = total paid − prize awarded (settles to ~0 once fully paid; the commission stays with the SHG).
+        Each cycle credits the member's full contribution — Receipt (cash) + Auction discount (bid discount).
+        The Winner payout is debited the gross prize. Balance: CR = creditor (SHG owes the member),
+        DR = debtor (member owes the SHG); settles to NIL when the chit completes.
+      </div>
+      <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
+    </body></html>`
+
+  printHtml(html)
+}
+
+export interface LoanLedgerReportRow {
+  date: string
+  particulars: string
+  debit: number
+  credit: number
+  runningOutstanding: number
+}
+
+export function printLoanLedger(
+  data: {
+    memberName: string
+    memberCode: string
+    loanRef: string
+    amount: number
+    status: string
+    issuedAt: string
+    loanType: string
+    outstanding: number
+    totalPrincipalPaid: number
+    totalInterestPaid: number
+    guarantors: import('@/lib/api/guarantors').Guarantor[]
+    rows: LoanLedgerReportRow[]
+  },
+  opts: { shgName?: string },
+): void {
+  const fmtDr = (x: number) => (x > 0.005 ? `${formatCurrency(x)} Dr` : 'NIL')
+  const totalDebit = data.rows.reduce((s, r) => s + r.debit, 0)
+  const totalCredit = data.rows.reduce((s, r) => s + r.credit, 0)
+
+  const body = data.rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(fmtDate(r.date))}</td>
+      <td>${escapeHtml(r.particulars)}</td>
+      <td style="text-align:right;color:#b45309">${r.debit ? escapeHtml(formatCurrency(r.debit)) : ''}</td>
+      <td style="text-align:right;color:#166534">${r.credit ? escapeHtml(formatCurrency(r.credit)) : ''}</td>
+      <td style="text-align:right">${escapeHtml(fmtDr(r.runningOutstanding))}</td>
+    </tr>`).join('')
+
+  const guarantorLine = data.guarantors.length > 0
+    ? data.guarantors.map(guarantorLabel).join(', ')
+    : '—'
+
+  const html = `<!doctype html><html><head><meta charset="utf-8">
+    <title>Loan Ledger — ${escapeHtml(data.memberName)}</title>
+    <style>
+      body { font: 13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; color: #111; }
+      h1 { font-size: 18px; margin: 0 0 2px; }
+      .sub { color: #555; font-size: 12px; margin-bottom: 4px; }
+      .meta { font-size: 12px; margin-bottom: 14px; }
+      .meta b { color: #111; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #ccc; padding: 6px 8px; font-size: 12px; }
+      th { background: #f1f5f9; text-align: left; }
+      tfoot td { font-weight: 700; background: #fafafa; }
+      .legend { color:#666; font-size:11px; margin-top:10px; }
+      @media print { button { display: none; } }
+    </style></head>
+    <body>
+      <h1>${escapeHtml(opts.shgName || 'SHG Manager')}</h1>
+      <div class="sub">Loan Ledger — ${escapeHtml(data.loanRef)} (${escapeHtml(data.loanType)})</div>
+      <div class="meta">
+        <b>${escapeHtml(data.memberName)}</b> (${escapeHtml(data.memberCode)})
+        · Loan ${escapeHtml(formatCurrency(data.amount))} · Issued ${escapeHtml(fmtDate(data.issuedAt))}
+        · Status: ${escapeHtml(data.status)} · Outstanding ${escapeHtml(fmtDr(data.outstanding))}
+        <br>Interest paid: ${escapeHtml(formatCurrency(data.totalInterestPaid))}
+        <br>Guaranteed by: ${escapeHtml(guarantorLine)}
+      </div>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Particulars</th>
+              <th style="text-align:right">Debit</th><th style="text-align:right">Credit</th>
+              <th style="text-align:right">Outstanding</th></tr>
+        </thead>
+        <tbody>${body || '<tr><td colspan="5" style="text-align:center;color:#888">No entries</td></tr>'}</tbody>
+        <tfoot>
+          <tr><td colspan="2" style="text-align:right">Totals</td>
+            <td style="text-align:right;color:#b45309">${escapeHtml(formatCurrency(totalDebit))}</td>
+            <td style="text-align:right;color:#166534">${escapeHtml(formatCurrency(totalCredit))}</td>
+            <td style="text-align:right">${escapeHtml(fmtDr(data.outstanding))}</td></tr>
+        </tfoot>
+      </table>
+      <div class="legend">
+        Debit = loan disbursed (member owes) · Credit = repayments received ·
+        Outstanding = principal still owed (Dr), settling to NIL when the loan is cleared.
       </div>
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`

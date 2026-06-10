@@ -9,9 +9,16 @@ import { Spinner } from '@/components/ui/spinner'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Printer, Trophy } from 'lucide-react'
 import { getMemberChitLedger, type MemberChitLedger } from '@/lib/api/chits'
+import { guarantorLabel } from '@/lib/api/guarantors'
 import { printChitMemberLedger } from '@/lib/reports'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+
+/** Format a running balance as a creditor/debtor figure: "₹2,500 CR", "₹500 DR", or "NIL". */
+function fmtBalance(b: number): string {
+  if (Math.abs(b) < 0.005) return 'NIL'
+  return `${formatCurrency(Math.abs(b))} ${b > 0 ? 'CR' : 'DR'}`
+}
 
 interface Props {
   chitGroupId: string
@@ -63,6 +70,11 @@ export function ChitMemberLedgerDialog({ chitGroupId, memberId, open, onOpenChan
                   {ledger.chitName}
                   {ledger.passbookNumber ? ` · Passbook: ${ledger.passbookNumber}` : ''}
                 </p>
+                <p className="text-xs text-muted-foreground">
+                  Guaranteed by: {ledger.guarantors.length > 0
+                    ? ledger.guarantors.map(guarantorLabel).join(', ')
+                    : '—'}
+                </p>
               </div>
               <div className="flex items-center gap-2">
                 {ledger.wonCycleNo ? (
@@ -92,13 +104,13 @@ export function ChitMemberLedgerDialog({ chitGroupId, memberId, open, onOpenChan
                     <tr><td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">No entries yet</td></tr>
                   ) : ledger.rows.map((r, i) => (
                     <tr key={i} className={cn('border-t', r.isPayout && 'bg-amber-50')}>
-                      <td className="px-3 py-2 text-center">{r.isPayout ? '★' : r.cycleNo}</td>
+                      <td className="px-3 py-2 text-center">{r.cycleNo}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{formatDate(r.date)}</td>
                       <td className="px-3 py-2">{r.particulars}</td>
-                      <td className="px-3 py-2 text-right text-success">{r.debit ? formatCurrency(r.debit) : ''}</td>
-                      <td className="px-3 py-2 text-right text-blue-700">{r.credit ? formatCurrency(r.credit) : ''}</td>
-                      <td className={cn('px-3 py-2 text-right tabular-nums', r.balance < 0 && 'text-destructive')}>
-                        {formatCurrency(r.balance)}
+                      <td className="px-3 py-2 text-right text-blue-700">{r.debit ? formatCurrency(r.debit) : ''}</td>
+                      <td className="px-3 py-2 text-right text-success">{r.credit ? formatCurrency(r.credit) : ''}</td>
+                      <td className={cn('px-3 py-2 text-right tabular-nums', r.balance < -0.005 && 'text-destructive')}>
+                        {fmtBalance(r.balance)}
                       </td>
                     </tr>
                   ))}
@@ -106,10 +118,10 @@ export function ChitMemberLedgerDialog({ chitGroupId, memberId, open, onOpenChan
                 <tfoot className="border-t bg-muted/50 font-medium">
                   <tr>
                     <td className="px-3 py-2 text-right" colSpan={3}>Totals</td>
-                    <td className="px-3 py-2 text-right text-success">{formatCurrency(ledger.totalDebit)}</td>
-                    <td className="px-3 py-2 text-right text-blue-700">{formatCurrency(ledger.totalCredit)}</td>
-                    <td className={cn('px-3 py-2 text-right tabular-nums', ledger.closingBalance < 0 && 'text-destructive')}>
-                      {formatCurrency(ledger.closingBalance)}
+                    <td className="px-3 py-2 text-right text-blue-700">{formatCurrency(ledger.totalDebit)}</td>
+                    <td className="px-3 py-2 text-right text-success">{formatCurrency(ledger.totalCredit)}</td>
+                    <td className={cn('px-3 py-2 text-right tabular-nums', ledger.closingBalance < -0.005 && 'text-destructive')}>
+                      {fmtBalance(ledger.closingBalance)}
                     </td>
                   </tr>
                 </tfoot>
@@ -117,8 +129,8 @@ export function ChitMemberLedgerDialog({ chitGroupId, memberId, open, onOpenChan
             </ScrollArea>
 
             <p className="text-xs text-muted-foreground">
-              Debit = instalments paid before winning · Credit = instalments paid after winning ·
-              Balance = total paid − prize awarded (settles to ~0 once fully paid; the commission stays with the SHG).
+              Each cycle credits the member&apos;s full contribution — Receipt (cash paid) + Auction discount (bid discount). The Winner payout is debited the gross prize.
+              Balance: <strong>CR</strong> = creditor (SHG owes the member), <strong>DR</strong> = debtor (member owes the SHG); it settles to NIL when the chit completes.
             </p>
           </div>
         )}

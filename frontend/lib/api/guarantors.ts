@@ -21,6 +21,16 @@ export interface Guarantor {
   details: string | null
 }
 
+/** Human-readable label for a stored guarantor. */
+export function guarantorLabel(g: Guarantor): string {
+  switch (g.guarantorType) {
+    case 'SELF': return 'Self'
+    case 'MEMBER': return g.memberName ?? 'SHG member'
+    case 'OTHER': return g.details ? `${g.name} (${g.details})` : (g.name ?? 'Other')
+    default: return ''
+  }
+}
+
 function toBackend(items: GuarantorInput[]) {
   return items
     // drop incomplete rows so empty slots aren't saved

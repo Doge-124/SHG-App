@@ -24,6 +24,7 @@ import {
   getChitPendingDues,
   recordChitLatePayment,
   getChitClosingInfo,
+  payClosingMembers,
   closeChit,
   type AuctionWinnerInput,
   type ChitPendingDue,
@@ -250,12 +251,10 @@ export function ChitManualCycleForm({
     }
   }
 
-  const handleCloseChit = async () => {
-    if (!closingInfo) return
-    if (closingInfo.outstandingDues > 0) {
-      toast.error('Collect all pending dues before closing the chit')
-      return
-    }
+  // Pay out the leftover (never-won) members. Allowed even with pending dues —
+  // they shouldn't be held up by late payers. Does not close the chit.
+  const handlePayClosing = async () => {
+    if (!closingInfo || closingInfo.leftoverMembers.length === 0) return
     const payouts = closingInfo.leftoverMembers.map(m => {
       const method = closingMethods[m.memberId] ?? 'cash'
       return {
@@ -268,11 +267,29 @@ export function ChitManualCycleForm({
     })
     setIsSubmitting(true)
     try {
-      const result = await closeChit(chitGroupId, payouts)
+      const result = await payClosingMembers(chitGroupId, payouts)
       if (result.success) {
-        toast.success(payouts.length > 0
-          ? `Chit closed — paid out ${payouts.length} remaining member(s)`
-          : 'Chit closed')
+        toast.success(`Paid out ${payouts.length} remaining member(s)`)
+        await loadData()
+        onSuccess?.()
+      } else {
+        toast.error(result.error || 'Failed to pay out members')
+      }
+    } catch {
+      toast.error('An error occurred')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  // Mark the chit CLOSED — only once dues are clear and everyone has been paid.
+  const handleCloseChit = async () => {
+    if (!closingInfo) return
+    setIsSubmitting(true)
+    try {
+      const result = await closeChit(chitGroupId)
+      if (result.success) {
+        toast.success('Chit closed')
         await loadData()
         onSuccess?.()
       } else {
@@ -555,14 +572,12 @@ export function ChitManualCycleForm({
                     </p>
                   ) : closingInfo?.allCyclesComplete ? (
                     <div className="space-y-3">
-                      {closingInfo.outstandingDues > 0 ? (
-                        <p className="text-xs text-amber-700">
-                          {closingInfo.outstandingDues} pending due(s) must be collected (see Pending Dues above) before closing.
-                        </p>
-                      ) : closingInfo.leftoverMembers.length > 0 ? (
+                      {/* Pay out leftover (never-won) members — allowed even while
+                          dues are still pending; they shouldn't wait on late payers. */}
+                      {closingInfo.leftoverMembers.length > 0 ? (
                         <>
                           <p className="text-xs text-muted-foreground">
-                            These members never won — each is paid {formatCurrency(closingInfo.payoutEach)} when you close the chit.
+                            These members never won — each is paid {formatCurrency(closingInfo.payoutEach)}. You can pay them out now even if some dues are still pending.
                           </p>
                           <div className="space-y-2">
                             {closingInfo.leftoverMembers.map(m => (
@@ -594,18 +609,29 @@ export function ChitManualCycleForm({
                               </div>
                             ))}
                           </div>
+                          <Button onClick={handlePayClosing} disabled={isSubmitting} variant="outline" className="w-full">
+                            <Trophy className="h-4 w-4 mr-2" />Pay Out Remaining Member(s)
+                          </Button>
                         </>
                       ) : (
-                        <p className="text-xs text-muted-foreground">Everyone has won. Closing will finalize the chit.</p>
+                        <p className="text-xs text-muted-foreground">All members have been paid out.</p>
                       )}
-                      <Button
-                        onClick={handleCloseChit}
-                        disabled={isSubmitting || closingInfo.outstandingDues > 0}
-                        className="w-full"
-                      >
-                        <Trophy className="h-4 w-4 mr-2" />
-                        {closingInfo.leftoverMembers.length > 0 ? 'Close Chit & Pay Out' : 'Close Chit'}
-                      </Button>
+
+                      {closingInfo.outstandingDues > 0 && (
+                        <p className="text-xs text-amber-700">
+                          {closingInfo.outstandingDues} pending due(s) must still be collected (see Pending Dues above) before the chit can be closed.
+                        </p>
+                      )}
+
+                      {closingInfo.leftoverMembers.length === 0 && closingInfo.outstandingDues === 0 ? (
+                        <Button onClick={handleCloseChit} disabled={isSubmitting} className="w-full">
+                          <Trophy className="h-4 w-4 mr-2" />Close Chit
+                        </Button>
+                      ) : (
+                        <Button disabled variant="secondary" className="w-full">
+                          Close Chit (settle all dues &amp; payouts first)
+                        </Button>
+                      )}
                     </div>
                   ) : isFinalCycle ? (
                     <p className="text-sm text-muted-foreground text-center">

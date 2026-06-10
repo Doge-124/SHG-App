@@ -33,7 +33,11 @@ export async function getChitGroups(): Promise<ApiResponse<ChitGroup[]>> {
         ])
         const totalMembers = group.total_members
         const currentMembers = chitMembers.length
-        const currentCycle = chitCyclesRaw.length > 0 ? Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)) : 0
+        // Cap at the chit's duration so the closing/settlement cycle (cycle_no =
+        // months + 1) doesn't push progress past 100%.
+        const currentCycle = chitCyclesRaw.length > 0
+          ? Math.min(group.months, Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)))
+          : 0
 
         return {
           id: group.id.toString(),
@@ -92,7 +96,10 @@ export async function getChitGroup(id: string): Promise<ApiResponse<ChitGroup>> 
       totalMembers,
       currentMembers,
       durationMonths: chitGroup.months,
-      currentCycle: chitCyclesRaw.length > 0 ? Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)) : 0,
+      // Capped at duration so the closing/settlement cycle doesn't exceed 100%.
+      currentCycle: chitCyclesRaw.length > 0
+        ? Math.min(chitGroup.months, Math.max(...chitCyclesRaw.map((c: any) => c.cycle_no)))
+        : 0,
       winnersPerCycle: chitGroup.winners_per_cycle ?? 1,
       commissionPerWinner: chitGroup.commission_per_winner ?? 0,
       fixedPrizeAmount: chitGroup.fixed_prize_amount ?? chitGroup.total_amount,
@@ -565,6 +572,7 @@ export interface MemberChitLedger {
   totalCredit: number
   totalPayout: number
   closingBalance: number
+  guarantors: import('@/lib/api/guarantors').Guarantor[]
   rows: ChitLedgerRow[]
 }
 
@@ -649,13 +657,14 @@ export async function getChitClosingInfo(chitGroupId: string): Promise<ApiRespon
   }
 }
 
-/** Close a chit, paying out the leftover (never-won) members. */
-export async function closeChit(
+/** Pay out leftover (never-won) members in the closing cycle. Allowed even while
+ *  other members still owe dues; does not close the chit. */
+export async function payClosingMembers(
   chitGroupId: string,
   payouts: { memberId: string; paymentMethod: 'cash' | 'bank'; bankTxnId?: string | null }[],
 ): Promise<ApiResponse<void>> {
   try {
-    await withAutoPrint(() => invoke('close_chit', {
+    await withAutoPrint(() => invoke('pay_closing_members', {
       chitId: parseInt(chitGroupId),
       payouts: payouts.map(p => ({
         member_id: parseInt(p.memberId),
@@ -663,6 +672,18 @@ export async function closeChit(
         bank_txn_id: p.bankTxnId ?? null,
       })),
     }))
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to pay out closing members:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to pay out members' }
+  }
+}
+
+/** Mark a chit CLOSED — only once all dues are collected and every leftover
+ *  member has been paid out. */
+export async function closeChit(chitGroupId: string): Promise<ApiResponse<void>> {
+  try {
+    await invoke('close_chit', { chitId: parseInt(chitGroupId) })
     return { success: true }
   } catch (error) {
     console.error('Failed to close chit:', error)

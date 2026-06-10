@@ -1,6 +1,56 @@
 import { invoke } from '@tauri-apps/api/core'
 import { withAutoPrint } from '@/lib/auto-print'
 import type { Loan, LoanFormData, LoanRepayment, ApiResponse } from '@/lib/types'
+import type { Guarantor } from '@/lib/api/guarantors'
+
+export interface LoanLedgerEntry {
+  id: number
+  date: string
+  particulars: string
+  debit: number
+  credit: number
+  principal: number
+  interest: number
+  runningOutstanding: number
+}
+
+export interface LoanPassbookLoan {
+  loanId: number
+  amount: number
+  issuedAt: string
+  status: string
+  loanType: string
+  dailyInterestRate: number
+  outstanding: number
+  totalPrincipalPaid: number
+  totalInterestPaid: number
+  guarantors: Guarantor[]
+  entries: LoanLedgerEntry[]
+}
+
+export interface MemberLoanPassbook {
+  memberId: number
+  memberName: string
+  memberCode: string
+  memberType: string
+  joinDate: string
+  loans: LoanPassbookLoan[]
+  totalDisbursed: number
+  totalPrincipalPaid: number
+  totalInterestPaid: number
+  totalOutstanding: number
+}
+
+/** A member's full loan history as a per-loan debit/credit ledger. */
+export async function getMemberLoanPassbook(memberId: string): Promise<ApiResponse<MemberLoanPassbook>> {
+  try {
+    const data = await invoke<MemberLoanPassbook>('get_member_loan_passbook', { memberId: parseInt(memberId) })
+    return { success: true, data }
+  } catch (error) {
+    console.error('Failed to load loan ledger:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to load loan ledger' }
+  }
+}
 
 function mapLoan(loan: any): Loan {
   return {

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
-import { ArrowLeft, Phone, MapPin, Calendar, Wallet, History, CircleDollarSign, AlertCircle, ExternalLink, Lock, Trophy, Gavel, Clock, BookOpen } from 'lucide-react'
+import { ArrowLeft, Phone, MapPin, Calendar, Wallet, History, CircleDollarSign, AlertCircle, ExternalLink, Lock, Trophy, Gavel, Clock, BookOpen, Printer } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -23,7 +23,10 @@ import { AdminPinDialog } from '@/components/admin-pin-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { getMemberProfile, setMemberOpeningData, updateMemberType } from '@/lib/api/members'
 import { useSettings } from '@/lib/settings-context'
-import { getMemberLoans } from '@/lib/api/loans'
+import { getMemberLoans, getMemberLoanPassbook, type MemberLoanPassbook } from '@/lib/api/loans'
+import { guarantorLabel } from '@/lib/api/guarantors'
+import { printLoanLedger } from '@/lib/reports'
+import { Spinner } from '@/components/ui/spinner'
 import { invoke } from '@tauri-apps/api/core'
 import { formatCurrency, formatPhone, formatDate, loanRef } from '@/lib/format'
 import { useToast } from '@/hooks/use-toast'
@@ -38,7 +41,7 @@ export default function MemberDetailPage() {
   const id = params?.id || searchParams?.get('id') || ''
   const router = useRouter()
   const { toast } = useToast()
-  const { pastDataLocked } = useSettings()
+  const { pastDataLocked, settings } = useSettings()
   const [profile, setProfile] = useState<MemberProfile | null>(null)
   const [loans, setLoans] = useState<Loan[]>([])
   const [chitGroups, setChitGroups] = useState<any[]>([])
@@ -535,7 +538,7 @@ export default function MemberDetailPage() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="loans"><LoanList loans={loans} /></TabsContent>
+          <TabsContent value="loans"><LoanLedger memberId={id} shgName={settings?.general?.groupName} /></TabsContent>
           <TabsContent value="transactions"><TransactionList txns={profile.recentTransactions} /></TabsContent>
           <TabsContent value="chits"><ChitList chitGroups={chitGroups} /></TabsContent>
         </Tabs>
@@ -555,7 +558,7 @@ export default function MemberDetailPage() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="loans"><LoanList loans={loans} /></TabsContent>
+          <TabsContent value="loans"><LoanLedger memberId={id} shgName={settings?.general?.groupName} /></TabsContent>
           <TabsContent value="transactions"><TransactionList txns={profile.recentTransactions} /></TabsContent>
         </Tabs>
       )}
@@ -568,45 +571,115 @@ export default function MemberDetailPage() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function LoanList({ loans }: { loans: Loan[] }) {
+function LoanLedger({ memberId, shgName }: { memberId: string; shgName?: string }) {
+  const [book, setBook] = useState<MemberLoanPassbook | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    getMemberLoanPassbook(memberId)
+      .then(res => { if (res.success && res.data) setBook(res.data) })
+      .finally(() => setLoading(false))
+  }, [memberId])
+
+  const fmtDr = (x: number) => (x > 0.005 ? `${formatCurrency(x)} Dr` : 'NIL')
+
+  if (loading) {
+    return <Card><CardContent className="py-10 flex justify-center"><Spinner className="h-6 w-6" /></CardContent></Card>
+  }
+  if (!book || book.loans.length === 0) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Loan Ledger</CardTitle></CardHeader>
+        <CardContent><p className="text-muted-foreground text-center py-8">No loan history</p></CardContent>
+      </Card>
+    )
+  }
+
+  const printLoan = (loan: MemberLoanPassbook['loans'][number]) => {
+    printLoanLedger({
+      memberName: book.memberName,
+      memberCode: book.memberCode,
+      loanRef: loanRef(loan.loanId),
+      amount: loan.amount,
+      status: loan.status,
+      issuedAt: loan.issuedAt,
+      loanType: loan.loanType,
+      outstanding: loan.outstanding,
+      totalPrincipalPaid: loan.totalPrincipalPaid,
+      totalInterestPaid: loan.totalInterestPaid,
+      guarantors: loan.guarantors,
+      rows: loan.entries.map(e => ({
+        date: e.date, particulars: e.particulars,
+        debit: e.debit, credit: e.credit, runningOutstanding: e.runningOutstanding,
+      })),
+    }, { shgName })
+  }
+
   return (
-    <Card>
-      <CardHeader><CardTitle>Loan History</CardTitle></CardHeader>
-      <CardContent>
-        {loans.length === 0 ? (
-          <p className="text-muted-foreground text-center py-8">No loan history</p>
-        ) : (
-          <div className="space-y-4">
-            {loans.map(loan => (
-              <div key={loan.id} className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs text-muted-foreground">{loanRef(loan.id)}</span>
-                    <p className="font-medium">{formatCurrency(loan.amount)}</p>
-                    <Badge
-                      variant={loan.status === 'active' ? 'default' : 'secondary'}
-                      className={cn(loan.status === 'paid' && 'bg-success/10 text-success')}
-                    >
-                      {loan.status}
-                    </Badge>
-                  </div>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Issued {formatDate(loan.issuedAt)} · {loan.paymentMethod.toUpperCase()}
-                  </p>
-                  {loan.note && <p className="text-sm text-muted-foreground mt-1">{loan.note}</p>}
+    <div className="space-y-4">
+      {book.loans.map(loan => (
+        <Card key={loan.loanId}>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-2 flex-wrap">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-muted-foreground">{loanRef(loan.loanId)}</span>
+                  <CardTitle className="text-base">{formatCurrency(loan.amount)}</CardTitle>
+                  <Badge
+                    variant={loan.status === 'active' ? 'default' : 'secondary'}
+                    className={cn(loan.status === 'paid' && 'bg-success/10 text-success')}
+                  >
+                    {loan.status}
+                  </Badge>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm text-muted-foreground">Outstanding</p>
-                  <p className={cn('font-medium', loan.outstandingAmount > 0 && 'text-warning-foreground')}>
-                    {formatCurrency(loan.outstandingAmount)}
-                  </p>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  Issued {formatDate(loan.issuedAt)} · {loan.loanType} · Interest paid {formatCurrency(loan.totalInterestPaid)}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Guaranteed by: {loan.guarantors.length > 0 ? loan.guarantors.map(guarantorLabel).join(', ') : '—'}
+                </p>
               </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+              <Button size="sm" variant="outline" onClick={() => printLoan(loan)}>
+                <Printer className="mr-1 h-4 w-4" />Print
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-muted">
+                  <tr className="text-left">
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Particulars</th>
+                    <th className="px-3 py-2 text-right">Debit</th>
+                    <th className="px-3 py-2 text-right">Credit</th>
+                    <th className="px-3 py-2 text-right">Outstanding</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loan.entries.map((e, i) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-3 py-2 whitespace-nowrap">{formatDate(e.date)}</td>
+                      <td className="px-3 py-2">{e.particulars}</td>
+                      <td className="px-3 py-2 text-right text-amber-700">{e.debit ? formatCurrency(e.debit) : ''}</td>
+                      <td className="px-3 py-2 text-right text-success">{e.credit ? formatCurrency(e.credit) : ''}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtDr(e.runningOutstanding)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="border-t bg-muted/50 font-medium">
+                  <tr>
+                    <td className="px-3 py-2 text-right" colSpan={4}>Outstanding</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtDr(loan.outstanding)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
   )
 }
 
