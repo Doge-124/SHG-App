@@ -135,29 +135,9 @@ pub fn ensure_no_duplicate_member(
         )));
     }
 
-    // Phone collision (only when a phone was given).
-    if let Some(p) = phone {
-        let p = p.trim();
-        if !p.is_empty() {
-            let phone_match: Option<(String, String, String)> = conn
-                .query_row(
-                    "SELECT member_code, member_type, name FROM members
-                     WHERE is_active = 1
-                       AND phone IS NOT NULL
-                       AND TRIM(phone) = TRIM(?1)
-                       AND member_code <> ?2
-                     LIMIT 1",
-                    (p, exclude),
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            if let Some((code, mtype, ename)) = phone_match {
-                return Err(AppError::business(format!(
-                    "Phone number {p} is already registered to {ename} ({mtype} member #{code}). Each person can only be added once across SHG, Loan, and Chit."
-                )));
-            }
-        }
-    }
+    // Phone numbers are intentionally allowed to be shared (e.g. a family using
+    // one number), so no phone-collision check here. Names still must be unique.
+    let _ = phone;
 
     Ok(())
 }

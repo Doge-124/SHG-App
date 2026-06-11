@@ -39,6 +39,7 @@ import {
   emptyPaymentSplit, type PaymentSplit,
 } from '@/components/forms/payment-method-fields'
 import { GuarantorFields } from '@/components/forms/guarantor-fields'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import type { GuarantorInput } from '@/lib/api/guarantors'
 import type { Member, LoanFormData } from '@/lib/types'
 
@@ -140,7 +141,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                     </FormControl>
                     <SelectContent>
                       {members.map(m => (
-                        <SelectItem key={m.id} value={m.id}>{m.name} ({m.code})</SelectItem>
+                        <SelectItem key={m.id} value={m.id}>{m.name} ({m.code})<MemberTypeTag type={m.memberType} /></SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -257,7 +258,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
             <GuarantorFields
               value={guarantors}
               onChange={setGuarantors}
-              members={members.map(m => ({ id: m.id, name: m.name, code: m.code }))}
+              members={members.map(m => ({ id: m.id, name: m.name, code: m.code, memberType: m.memberType }))}
               selfMemberId={form.watch('memberId')}
             />
 

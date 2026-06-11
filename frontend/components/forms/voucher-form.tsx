@@ -30,6 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { invoke } from '@tauri-apps/api/core'
 import { getMembers } from '@/lib/api/members'
 import { formatCurrency } from '@/lib/format'
@@ -188,7 +189,7 @@ export function VoucherForm({
                       ) : (
                         members.map((member) => (
                           <SelectItem key={member.id} value={member.id}>
-                            {member.name} ({member.code})
+                            {member.name} ({member.code})<MemberTypeTag type={member.memberType} />
                           </SelectItem>
                         ))
                       )}

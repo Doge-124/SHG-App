@@ -37,6 +37,7 @@ import {
 } from '@/components/forms/payment-method-fields'
 import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
 import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { cn } from '@/lib/utils'
 
 type BankRefType = 'transfer' | 'cheque'
@@ -155,6 +156,7 @@ export function ChitManualCycleForm({
     const pb = members.find(m => m.memberId === memberId)?.passbookNumber
     return pb ? ` (Passbook: ${pb})` : ''
   }
+  const memberTypeOf = (memberId: string) => members.find(m => m.memberId === memberId)?.memberType
 
   useEffect(() => {
     if (open) loadData()
@@ -693,7 +695,7 @@ export function ChitManualCycleForm({
                       <SelectContent>
                         {unpaidMembers.map(m => (
                           <SelectItem key={m.memberId} value={m.memberId}>
-                            {m.memberName}{passbookSuffix(m.memberId)}
+                            {m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}
                             {m.isEligibleForDiscount
                               ? ` (${formatCurrency(m.payableAmount)})`
                               : ` (${formatCurrency(m.payableAmount)} — no discount)`}
@@ -763,7 +765,7 @@ export function ChitManualCycleForm({
                         <SelectContent>
                           {eligibleMembersWithoutWin
                             .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
-                            .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>)}
+                            .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </div>
@@ -820,7 +822,7 @@ export function ChitManualCycleForm({
                                 {eligibleMembersWithoutWin
                                   .filter(m => m.memberId !== fixedWinnerId &&
                                     !auctionWinners.find((w, j) => j !== i && w.memberId === m.memberId))
-                                  .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>)}
+                                  .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
                               </SelectContent>
                             </Select>
                           </div>

@@ -15,6 +15,7 @@ import { getChitMembers, getChitMigrationStatus } from '@/lib/api/chits'
 import { useSettings } from '@/lib/settings-context'
 import type { ChitMember, ChitMigrationStatus } from '@/lib/types'
 import { formatCurrency } from '@/lib/format'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { cn } from '@/lib/utils'
 
 interface AuctionWinnerEntry {
@@ -301,7 +302,7 @@ export function ChitBulkPastEntryForm({
                                 <span className="text-muted-foreground">— no winner yet —</span>
                               </SelectItem>
                               {availableForSlot(rowIdx, row.fixedWinnerId, allSlotsInRow).map(m => (
-                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>
+                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={m.memberType} /></SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
@@ -344,7 +345,7 @@ export function ChitBulkPastEntryForm({
                                     <span className="text-muted-foreground">— no winner yet —</span>
                                   </SelectItem>
                                   {availableForSlot(rowIdx, aw.memberId, allSlotsInRow).map(m => (
-                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}</SelectItem>
+                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={m.memberType} /></SelectItem>
                                   ))}
                                 </SelectContent>
                               </Select>

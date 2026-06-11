@@ -133,6 +133,7 @@ pub struct ChitMemberResponse {
     pub chit_group_id: String,
     pub member_id: String,
     pub member_name: String,
+    pub member_type: String,
     pub joined_at: String,
     pub is_winner: bool,
     pub passbook_number: Option<String>,
@@ -149,7 +150,7 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
     let mut stmt = conn.prepare(
         "SELECT cm.id, cm.chit_id, cm.member_id, cm.joined_at, m.name,
                 CASE WHEN ccw.member_id IS NOT NULL THEN 1 ELSE 0 END as is_winner,
-                cm.passbook_number
+                cm.passbook_number, m.member_type
          FROM chit_members cm
          JOIN members m ON cm.member_id = m.id
          LEFT JOIN (SELECT DISTINCT chit_id, member_id FROM chit_cycle_winners) ccw
@@ -164,6 +165,7 @@ pub fn get_chit_members(state: State<Mutex<AppState>>, chit_id: i64) -> Result<V
             chit_group_id: row.get::<_, i64>(1)?.to_string(),
             member_id: row.get::<_, i64>(2)?.to_string(),
             member_name: row.get(4)?,
+            member_type: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
             joined_at: row.get(3)?,
             is_winner: row.get::<_, i64>(5)? != 0,
             passbook_number: row.get::<_, Option<String>>(6)?,
@@ -308,6 +310,7 @@ pub fn add_member_to_chit(
         chit_group_id: chit_id.to_string(),
         member_id: member_id.to_string(),
         member_name: member.name,
+        member_type: member.member_type.to_string(),
         joined_at,
         is_winner: false,
         passbook_number: None,

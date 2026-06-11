@@ -7,12 +7,13 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { Plus, X, ShieldCheck } from 'lucide-react'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import type { GuarantorInput, GuarantorType } from '@/lib/api/guarantors'
 
 interface Props {
   value: GuarantorInput[]
   onChange: (v: GuarantorInput[]) => void
-  members: { id: string; name: string; code?: string }[]
+  members: { id: string; name: string; code?: string; memberType?: string }[]
   /** Member this guarantor is for (excluded from the "SHG member" dropdown). */
   selfMemberId?: string
   max?: number
@@ -68,7 +69,7 @@ export function GuarantorFields({ value, onChange, members, selfMemberId, max = 
               <SelectTrigger className="h-8"><SelectValue placeholder="Select member" /></SelectTrigger>
               <SelectContent>
                 {memberOptions.map(m => (
-                  <SelectItem key={m.id} value={m.id}>{m.name}{m.code ? ` (${m.code})` : ''}</SelectItem>
+                  <SelectItem key={m.id} value={m.id}>{m.name}{m.code ? ` (${m.code})` : ''}<MemberTypeTag type={m.memberType} /></SelectItem>
                 ))}
               </SelectContent>
             </Select>

@@ -17,6 +17,7 @@ import { recordPastChitCycle, getMemberPaymentStatus, getChitCyclesWithDetails, 
 import { useSettings } from '@/lib/settings-context'
 import type { ChitMember, MemberPaymentStatus, ChitCycleDetail, ChitMigrationStatus } from '@/lib/types'
 import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { cn } from '@/lib/utils'
 
 interface ChitPastDataFormProps {
@@ -369,7 +370,7 @@ export function ChitPastDataForm({
                             {nonWinnerMembers
                               .filter(m => !selectedWinnerIds.has(m.memberId) || m.memberId === fixedWinnerId)
                               .map(m => (
-                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>
+                                <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={m.memberType} />{passbookSuffix(m.memberId)}</SelectItem>
                               ))}
                           </SelectContent>
                         </Select>
@@ -413,7 +414,7 @@ export function ChitPastDataForm({
                                 {nonWinnerMembers
                                   .filter(m => !selectedWinnerIds.has(m.memberId) || m.memberId === row.memberId)
                                   .map(m => (
-                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}{passbookSuffix(m.memberId)}</SelectItem>
+                                    <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={m.memberType} />{passbookSuffix(m.memberId)}</SelectItem>
                                   ))}
                               </SelectContent>
                             </Select>

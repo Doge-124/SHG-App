@@ -194,6 +194,7 @@ export interface ChitMember {
   isWinner: boolean
   winCycle?: number
   passbookNumber?: string | null
+  memberType?: string
 }
 
 export interface ChitCycleWinner {

@@ -23,7 +23,7 @@ interface Props {
 
 export function LoanGuarantorsDialog({ loanId, borrowerMemberId, borrowerName, open, onOpenChange, onSaved }: Props) {
   const [guarantors, setGuarantors] = useState<GuarantorInput[]>([])
-  const [members, setMembers] = useState<{ id: string; name: string; code?: string }[]>([])
+  const [members, setMembers] = useState<{ id: string; name: string; code?: string; memberType?: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -33,7 +33,7 @@ export function LoanGuarantorsDialog({ loanId, borrowerMemberId, borrowerName, o
     Promise.all([getLoanGuarantors(loanId), getMembers()]).then(([gRes, mRes]) => {
       if (gRes.success && gRes.data) setGuarantors(toGuarantorInputs(gRes.data))
       else setGuarantors([])
-      if (mRes.success && mRes.data) setMembers(mRes.data.map(m => ({ id: m.id, name: m.name, code: m.code })))
+      if (mRes.success && mRes.data) setMembers(mRes.data.map(m => ({ id: m.id, name: m.name, code: m.code, memberType: m.memberType })))
     }).finally(() => setLoading(false))
   }, [open, loanId])
 

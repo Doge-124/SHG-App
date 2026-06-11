@@ -137,6 +137,7 @@ export async function getChitMembers(chitGroupId: string): Promise<ApiResponse<C
       joinedAt: member.joined_at,
       isWinner: member.is_winner,
       passbookNumber: member.passbook_number ?? null,
+      memberType: member.member_type ?? undefined,
     })).sort((a, b) => new Date(b.joinedAt).getTime() - new Date(a.joinedAt).getTime())
     
     if (frontendChitMembers.length > 0) {

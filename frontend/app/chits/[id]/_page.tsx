@@ -48,6 +48,7 @@ import { ChitBulkPastEntryForm } from '@/components/forms/chit-bulk-past-entry-f
 import { ChitManualCycleForm } from '@/components/forms/chit-manual-cycle-form'
 import { ChitMemberLedgerDialog } from '@/components/forms/chit-member-ledger-dialog'
 import { ChitMemberGuarantorsDialog } from '@/components/forms/chit-member-guarantors-dialog'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { printChitCycles, type ChitCycleReportRow } from '@/lib/reports'
 import { useSettings } from '@/lib/settings-context'
@@ -617,7 +618,7 @@ export default function ChitDetailPage() {
                         }}
                       />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium">{m.name}</p>
+                        <p className="text-sm font-medium">{m.name}<MemberTypeTag type={m.memberType} /></p>
                         <p className="text-xs text-muted-foreground">{m.code}</p>
                       </div>
                     </label>

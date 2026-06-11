@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { MemberTypeTag } from '@/components/member-type-tag'
 import { Spinner } from '@/components/ui/spinner'
 import { recordWeeklyContribution } from '@/lib/api/receipts'
 import { getMembers } from '@/lib/api/members'
@@ -146,7 +147,7 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
               <SelectContent>
                 {members.map((member) => (
                   <SelectItem key={member.id} value={member.id.toString()}>
-                    {member.name} ({member.code})
+                    {member.name} ({member.code})<MemberTypeTag type={member.memberType} />
                   </SelectItem>
                 ))}
               </SelectContent>

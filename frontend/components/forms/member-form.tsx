@@ -39,7 +39,7 @@ const memberSchema = z.object({
     .min(10, 'Phone number must be 10 digits')
     .max(10, 'Phone number must be 10 digits')
     .regex(/^\d+$/, 'Phone number must contain only digits'),
-  address: z.string().optional(),
+  address: z.string().trim().min(1, 'Address is required'),
   memberType: z.enum(['SHG', 'CHIT', 'LOAN']),
 })
 
@@ -143,7 +143,7 @@ export function MemberForm({
               name="address"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Address (Optional)</FormLabel>
+                  <FormLabel>Address</FormLabel>
                   <FormControl>
                     <Textarea
                       placeholder="Enter address"
