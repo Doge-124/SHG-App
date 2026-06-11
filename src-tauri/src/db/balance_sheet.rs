@@ -223,7 +223,11 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
 
     let total_income = shg_seed + interest_earned + chit_commission + donations_grants + other_income;
 
-    // Other expenses = all vouchers not related to loans or chit payouts
+    // Other expenses = all vouchers that are genuine expenses — NOT loan
+    // disbursements, chit payouts, or savings payouts. A savings payout
+    // (SAVINGS_WITHDRAWAL) returns a member their own savings: it reduces both
+    // cash (asset) and member savings (liability), so counting it as an expense
+    // would understate surplus and break the two-way surplus reconciliation.
     let total_vouchers: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER'
@@ -248,7 +252,16 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
-    let other_expenses = (total_vouchers - loans_disbursed_txn - chit_payouts_txn).max(0.0);
+    let savings_payouts_txn: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+         WHERE txn_type = 'VOUCHER' AND reference_type = 'SAVINGS_WITHDRAWAL'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at <= ?1",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    let other_expenses =
+        (total_vouchers - loans_disbursed_txn - chit_payouts_txn - savings_payouts_txn).max(0.0);
 
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:

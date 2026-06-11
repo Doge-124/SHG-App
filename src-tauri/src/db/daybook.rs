@@ -64,8 +64,10 @@ fn categorize_transaction(reference_type: Option<&str>, reason: &str) -> String 
     match reference_type {
         Some("WEEKLY_CONTRIBUTION") => "Savings Collection".to_string(),
         Some("MEMBER_RECEIPT") => "Member Receipt".to_string(),
-        Some("LOAN_DISBURSEMENT") => "Loan Disbursement".to_string(),
+        Some("SAVINGS_WITHDRAWAL") => "Savings Payout".to_string(),
+        Some("LOAN_DISBURSEMENT") | Some("MEMBER_LOAN") => "Loan Disbursement".to_string(),
         Some("CHIT_PAYOUT") => "Chit Fund Payout".to_string(),
+        Some("CHIT_COMMISSION") => "Chit Commission".to_string(),
         Some("EXPENSE") => "Expense".to_string(),
         Some("DONATION") => "Donation".to_string(),
         Some("OPENING") => "Opening Balance".to_string(),

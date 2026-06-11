@@ -158,14 +158,17 @@ pub fn get_income_expenditure(
     let total_income = interest_on_loans + chit_commission + donations_grants + other_income;
 
     // ── Operational expenses ──────────────────────────────────────────────
-    // Vouchers that are genuine expenses — NOT loan disbursements, NOT chit payouts.
-    // Cancelled (voided) originals and reversal vouchers are excluded so a
-    // reversed transaction isn't counted as an expense.
+    // Vouchers that are genuine expenses — NOT loan disbursements, NOT chit
+    // payouts, and NOT savings payouts. A savings payout (SAVINGS_WITHDRAWAL)
+    // returns a member their own deposited savings: it reduces a liability, it
+    // is not an income-statement expense. Cancelled (voided) originals and
+    // reversal vouchers are excluded so a reversed transaction isn't counted.
     let operational_expenses: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER'
          AND voided_at IS NULL AND reversal_of_id IS NULL
-         AND (reference_type IS NULL OR reference_type NOT IN ('MEMBER_LOAN', 'CHIT_PAYOUT'))
+         AND (reference_type IS NULL OR reference_type NOT IN
+              ('MEMBER_LOAN', 'CHIT_PAYOUT', 'SAVINGS_WITHDRAWAL'))
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],
         |r| r.get(0),
