@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS members (
     opening_balance_set_at TEXT DEFAULT NULL,
     past_installments INTEGER NOT NULL DEFAULT 0,
     current_installments INTEGER NOT NULL DEFAULT 0,
-    member_type TEXT NOT NULL DEFAULT 'SHG' CHECK(member_type IN ('SHG', 'CHIT', 'LOAN'))
+    -- Comma-separated role set (e.g. "SHG" or "CHIT,LOAN"); validated in code.
+    member_type TEXT NOT NULL DEFAULT 'SHG'
 );
 
 -- (Legacy minimal loans/payments/receipts tables removed — superseded by the
@@ -155,6 +156,7 @@ CREATE TABLE IF NOT EXISTS loan_payments (
     payment_method TEXT NOT NULL CHECK (payment_method IN ('CASH', 'BANK', 'MIXED')),
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    is_past_entry INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (loan_id) REFERENCES loans(id),
     FOREIGN KEY (member_id) REFERENCES members(id)
 );
@@ -183,6 +185,14 @@ use crate::error::AppError;
 /// This is required because `SCHEMA_SQL` only runs on first database creation.
 /// Production databases must be migrated forward without data loss.
 pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
+    // Pre-transaction repairs (parent-table surgery needs foreign_keys OFF, which
+    // is a no-op inside a transaction, so these run before the main tx):
+    // 1) Repair any child foreign keys left dangling at `members_old` by an
+    //    earlier interrupted rebuild.
+    repair_members_old_refs(conn)?;
+    // 2) Drop the legacy single-role CHECK on members.member_type if present.
+    drop_member_type_check_pre_tx(conn)?;
+
     let tx = conn.transaction()?;
 
     // 1) Add member opening data columns if missing.
@@ -204,9 +214,12 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     rebuild_shg_transactions_if_needed(&tx)?;
     rebuild_member_transactions_if_needed(&tx)?;
 
-    // 4) Add member_type column to members table
-    add_column_if_missing(&tx, "members", "member_type", "TEXT NOT NULL DEFAULT 'SHG' CHECK(member_type IN ('SHG', 'CHIT', 'LOAN'))")?;
-    
+    // 4) Add member_type column to members table. member_type is now a
+    // comma-separated ROLE SET (e.g. "CHIT,LOAN"), validated in code — no CHECK.
+    add_column_if_missing(&tx, "members", "member_type", "TEXT NOT NULL DEFAULT 'SHG'")?;
+    // (The legacy single-role CHECK, if any, was already dropped pre-transaction
+    // by drop_member_type_check_pre_tx above.)
+
     // 5) Drop member_roles table if it exists (replaced by member_type column)
     tx.execute_batch("DROP TABLE IF EXISTS member_roles;")?;
 
@@ -451,6 +464,17 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     rebuild_loan_payments_if_needed(&tx)?;
     rebuild_chit_payments_if_needed(&tx)?;
 
+    // Flag loan_payments rows that belong to past-data (reference-only) entries so
+    // their interest is never counted as SHG income. Added AFTER the rebuild above
+    // (which recreates loan_payments with a fixed column set) so it isn't dropped.
+    add_column_if_missing(&tx, "loan_payments", "is_past_entry", "INTEGER NOT NULL DEFAULT 0")?;
+    // Backfill: existing past-loan payment rows (loans.is_past_entry = 1) are
+    // reference data — mark their payments so historical interest stops leaking.
+    tx.execute_batch(
+        "UPDATE loan_payments SET is_past_entry = 1
+         WHERE loan_id IN (SELECT id FROM loans WHERE COALESCE(is_past_entry, 0) = 1);"
+    )?;
+
     // 13) Loan unpaid-interest balance — tracks interest that has accrued
     // but not been paid yet (e.g. when the borrower made a partial payment
     // that didn't cover all due interest). The next payment will eat into
@@ -532,6 +556,96 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     )?;
 
     tx.commit()?;
+    Ok(())
+}
+
+/// Repair child foreign-key references left dangling at `members_old` by an
+/// earlier interrupted members rebuild (which renamed members → members_old,
+/// rewriting child FKs, then dropped members_old). Rewrites the stored schema
+/// text back to `members` in one shot via writable_schema. No-op when clean.
+fn repair_members_old_refs(conn: &Connection) -> Result<(), AppError> {
+    let cnt: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%members_old%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if cnt == 0 {
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    conn.execute_batch("PRAGMA writable_schema=ON;")?;
+    let res = conn.execute_batch(
+        "UPDATE sqlite_master SET sql = replace(sql, 'members_old', 'members') \
+         WHERE sql LIKE '%members_old%';",
+    );
+    // Reload the corrected schema into memory.
+    let _ = conn.execute_batch("PRAGMA writable_schema=RESET;");
+    conn.execute_batch("PRAGMA writable_schema=OFF;")?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    res?;
+    Ok(())
+}
+
+/// Drop the legacy single-role CHECK on `members.member_type` so it can hold a
+/// comma-separated ROLE SET (e.g. "CHIT,LOAN"). Idempotent: skips when the CHECK
+/// is already gone. `members` is a parent table referenced by foreign keys, so the
+/// rebuild must run with foreign-key enforcement OFF (otherwise the RENAME/DROP
+/// fail). foreign_keys can only be toggled outside a transaction, so this runs in
+/// its own explicit transaction before the main migration tx. All columns and the
+/// member_code index are preserved; rows (and ids) are copied verbatim.
+fn drop_member_type_check_pre_tx(conn: &Connection) -> Result<(), AppError> {
+    let sql: String = match conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='members'",
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // members table doesn't exist yet (fresh DB)
+    };
+    if !sql.contains("member_type IN ('SHG', 'CHIT', 'LOAN')") {
+        return Ok(());
+    }
+
+    let new_create = sql
+        .replace(" CHECK(member_type IN ('SHG', 'CHIT', 'LOAN'))", "")
+        .replace("CHECK(member_type IN ('SHG', 'CHIT', 'LOAN'))", "");
+
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+        let v = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        v
+    };
+    let col_list = cols.join(", ");
+
+    // foreign_keys OFF: allow renaming/dropping a table other tables reference.
+    // legacy_alter_table ON: stop the RENAME from rewriting those child tables'
+    // foreign-key references to point at members_old (which would dangle once it's
+    // dropped). Together they let us rebuild the parent table cleanly; children
+    // keep referencing "members", which we recreate with the same ids.
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    conn.execute_batch("PRAGMA legacy_alter_table=ON;")?;
+    let res = conn.execute_batch(&format!(
+        "BEGIN;\n\
+         ALTER TABLE members RENAME TO members_old;\n\
+         {new_create};\n\
+         INSERT INTO members ({col_list}) SELECT {col_list} FROM members_old;\n\
+         DROP TABLE members_old;\n\
+         CREATE INDEX IF NOT EXISTS idx_member_code ON members(member_code);\n\
+         COMMIT;"
+    ));
+    if res.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    // Restore defaults for the rest of the session.
+    conn.execute_batch("PRAGMA legacy_alter_table=OFF;")?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    res?;
     Ok(())
 }
 

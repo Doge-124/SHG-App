@@ -334,7 +334,7 @@ export async function getMembersByType(memberType: MemberType): Promise<ApiRespo
 /**
  * Update a member's type
  */
-export async function updateMemberType(memberId: number, memberType: MemberType): Promise<ApiResponse<void>> {
+export async function updateMemberType(memberId: number, memberType: string): Promise<ApiResponse<void>> {
   try {
     await invoke('update_member_type', { memberId, memberType })
     return { success: true }

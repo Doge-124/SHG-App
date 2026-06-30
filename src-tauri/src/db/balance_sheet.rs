@@ -118,13 +118,19 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     ).unwrap_or(0);
 
     // ── Chit funds held ───────────────────────────────────────────────────
-    // = installments collected through chit_payments
+    // = live installments collected through chit_payments
     // − payouts disbursed via CHIT_PAYOUT vouchers.
-    // Voided rows are excluded so cancellations don't double-count.
+    // PAST-DATA cycles are reference-only: they create no real cash receipts and
+    // no payout vouchers, and the SHG's historical position is already captured
+    // in the opening balance. Counting their installments here would inflate the
+    // liability with money the SHG doesn't actually hold, throwing the surplus
+    // wildly negative — so exclude past cycles. Voided rows are excluded too.
     let chit_installments_collected: f64 = conn.query_row(
         "SELECT COALESCE(SUM(cp.amount), 0)
          FROM chit_payments cp
-         WHERE cp.paid_at <= ?1",
+         JOIN chit_cycles cc ON cc.id = cp.cycle_id
+         WHERE COALESCE(cc.is_past_entry, 0) = 0
+           AND cp.paid_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -170,8 +176,11 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // This is now stored explicitly per row (see loans.rs); we no longer derive
     // it from the difference between outstanding and disbursed, which was
     // tautologically zero under the old gross-payment formula.
+    // Past-data (reference-only) repayments are excluded — their interest was
+    // earned before the app and must not count as SHG income.
     let interest_earned: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(interest_amount), 0) FROM loan_payments WHERE created_at <= ?1",
+        "SELECT COALESCE(SUM(interest_amount), 0) FROM loan_payments
+         WHERE COALESCE(is_past_entry, 0) = 0 AND created_at <= ?1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 

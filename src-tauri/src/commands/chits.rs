@@ -294,7 +294,7 @@ pub fn add_member_to_chit(
                 opening_balance_set_at: row.get(9)?,
                 past_installments: row.get(10)?,
                 current_installments: row.get(11)?,
-                member_type: mt.parse::<db::members::MemberType>().unwrap_or(db::members::MemberType::SHG),
+                member_type: mt,
             })
         },
     )

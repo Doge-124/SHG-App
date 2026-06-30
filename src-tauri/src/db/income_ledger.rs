@@ -62,6 +62,7 @@ fn interest_entries(conn: &Connection, from: &str, to: &str) -> Result<Vec<Ledge
          FROM loan_payments lp
          LEFT JOIN members m ON m.id = lp.member_id
          WHERE lp.interest_amount > 0.005
+           AND COALESCE(lp.is_past_entry, 0) = 0
            AND lp.created_at >= ?1 AND lp.created_at <= ?2
          ORDER BY lp.created_at ASC, lp.id ASC",
     )?;

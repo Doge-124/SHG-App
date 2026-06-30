@@ -16,6 +16,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { PageHeader } from '@/components/page-header'
 import { toast } from 'sonner'
 import { formatCurrency, formatDate, loanRef } from '@/lib/format'
+import { canMemberSavings, canMemberLoan, canMemberChit } from '@/lib/roles'
 import { BookOpen, RefreshCw, Printer, User, Banknote, Coins } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -167,7 +168,7 @@ export default function PassbookPage() {
     [members, selectedMemberId],
   )
   const selectedType = selectedMember?.memberType ?? ''
-  const isSavings = selectedType === 'SHG'
+  const isSavings = canMemberSavings(selectedType)
   const hasData = !!savings || !!loanBook || !!chitBook
 
   // Load all members
@@ -186,28 +187,30 @@ export default function PassbookPage() {
 
   const clearBooks = () => { setSavings(null); setLoanBook(null); setChitBook(null) }
 
-  const loadPassbook = async (memberId: string, type: string, from: string, to: string) => {
+  const loadPassbook = async (memberId: string, _type: string, from: string, to: string) => {
     if (!memberId) { toast.error('Select a member first'); return }
+    const mt = members.find(x => x.id === memberId)?.memberType ?? ''
     setIsLoading(true)
     clearBooks()
     try {
-      if (type === 'LOAN') {
+      // A member may hold several roles — load every passbook their roles allow.
+      if (canMemberSavings(mt)) {
+        const result = await invoke<MemberPassbook>('get_member_passbook', {
+          memberId: parseInt(memberId), fromDate: from, toDate: to,
+        })
+        setSavings(result)
+      }
+      if (canMemberLoan(mt)) {
         const result = await invoke<MemberLoanPassbook>('get_member_loan_passbook', {
           memberId: parseInt(memberId),
         })
         setLoanBook(result)
-      } else if (type === 'CHIT') {
+      }
+      if (canMemberChit(mt)) {
         const result = await invoke<MemberChitPassbook>('get_member_chit_passbook', {
           memberId: parseInt(memberId),
         })
         setChitBook(result)
-      } else {
-        const result = await invoke<MemberPassbook>('get_member_passbook', {
-          memberId: parseInt(memberId),
-          fromDate: from,
-          toDate: to,
-        })
-        setSavings(result)
       }
     } catch (err: any) {
       toast.error(err?.toString() || 'Failed to load passbook')

@@ -23,8 +23,12 @@ export default function PinScreen({ onUnlocked, onForgotPin }: Props) {
     try {
       await invoke('unlock_db', { pin })
       onUnlocked()
-    } catch {
-      setError('Invalid PIN')
+    } catch (e) {
+      // A wrong PIN fails to decrypt; anything else (e.g. a migration error)
+      // surfaces its real message so it isn't misdiagnosed as a bad PIN.
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? ''
+      const looksLikeBadKey = /not a database|decrypt|HMAC|file is encrypted|malformed/i.test(msg)
+      setError(!msg || looksLikeBadKey ? 'Invalid PIN' : msg)
       setPin('')
     } finally {
       setLoading(false)

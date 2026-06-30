@@ -670,7 +670,7 @@ export function ChitManualCycleForm({
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <Label>Auction Discount (per member)</Label>
-                      <Input type="number" min={0} step="0.01" value={auctionDiscount}
+                      <Input type="number" min={0} step="0.01" value={auctionDiscount || ''}
                         onChange={e => setAuctionDiscount(parseFloat(e.target.value) || 0)} />
                       <p className="text-xs text-muted-foreground">From previous cycle's bid discounts distributed to eligible members</p>
                     </div>

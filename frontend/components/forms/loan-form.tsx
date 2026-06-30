@@ -40,6 +40,7 @@ import {
 } from '@/components/forms/payment-method-fields'
 import { GuarantorFields } from '@/components/forms/guarantor-fields'
 import { MemberTypeTag } from '@/components/member-type-tag'
+import { canMemberLoan } from '@/lib/roles'
 import type { GuarantorInput } from '@/lib/api/guarantors'
 import type { Member, LoanFormData } from '@/lib/types'
 
@@ -92,7 +93,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
     getMembers().then(res => {
       if (res.success && res.data) {
         setMembers(res.data.filter(m =>
-          m.status === 'active' && (m.memberType === 'SHG' || m.memberType === 'LOAN')
+          m.status === 'active' && canMemberLoan(m.memberType)
         ))
       }
     }).finally(() => setLoadingMembers(false))

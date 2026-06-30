@@ -47,6 +47,46 @@ impl std::fmt::Display for MemberType {
     }
 }
 
+/// A member's `member_type` is a comma-separated SET of roles (e.g. "SHG" or
+/// "CHIT,LOAN"). These helpers parse and validate that set. SHG grants every
+/// privilege; CHIT grants chit; LOAN grants loans — privileges are the union.
+pub fn role_set(member_type: &str) -> std::collections::HashSet<String> {
+    member_type
+        .split(',')
+        .map(|r| r.trim().to_uppercase())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// Validate a role string and return it normalized (de-duped, canonical order).
+pub fn validate_member_roles(member_type: &str) -> Result<String, AppError> {
+    let mut roles: Vec<String> = Vec::new();
+    for r in member_type.split(',').map(|r| r.trim().to_uppercase()).filter(|r| !r.is_empty()) {
+        match r.as_str() {
+            "SHG" | "CHIT" | "LOAN" => { if !roles.contains(&r) { roles.push(r); } }
+            other => return Err(AppError::validation(&format!("Invalid member role: {other}"))),
+        }
+    }
+    if roles.is_empty() {
+        return Err(AppError::validation("A member must have at least one role (SHG, CHIT, or LOAN)"));
+    }
+    let order = ["SHG", "CHIT", "LOAN"];
+    roles.sort_by_key(|r| order.iter().position(|o| o == r).unwrap_or(99));
+    Ok(roles.join(","))
+}
+
+/// True if the role set grants loan privileges (SHG or LOAN).
+pub fn roles_allow_loan(member_type: &str) -> bool {
+    let s = role_set(member_type);
+    s.contains("SHG") || s.contains("LOAN")
+}
+
+/// True if the role set grants chit privileges (SHG or CHIT).
+pub fn roles_allow_chit(member_type: &str) -> bool {
+    let s = role_set(member_type);
+    s.contains("SHG") || s.contains("CHIT")
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
@@ -62,7 +102,8 @@ pub struct Member {
     pub opening_balance_set_at: Option<String>,
     pub past_installments: i64,
     pub current_installments: i64,
-    pub member_type: MemberType,
+    /// Comma-separated set of roles, e.g. "SHG" or "CHIT,LOAN".
+    pub member_type: String,
 }
 
 #[derive(Serialize)]
@@ -155,8 +196,8 @@ pub fn add_member_auto_code(
     joined_at: &str,
     member_type: &str,
 ) -> Result<(i64, String), AppError> {
-    let _mt = member_type.parse::<MemberType>()
-        .map_err(|e| AppError::validation(&e))?;
+    let member_type = validate_member_roles(member_type)?;
+    let member_type = member_type.as_str();
 
     let tx = conn.transaction()?;
 
@@ -208,9 +249,8 @@ pub fn add_member(
 ) -> Result<i64, AppError> {
     validation::validate_member_code(code)?;
 
-    // Validate member_type
-    let _mt = member_type.parse::<MemberType>()
-        .map_err(|e| AppError::validation(&e))?;
+    let member_type = validate_member_roles(member_type)?;
+    let member_type = member_type.as_str();
 
     let tx = conn.transaction()?;
 
@@ -262,7 +302,7 @@ pub fn get_member_by_code(conn: &Connection, code: &str) -> Result<Member, AppEr
                 opening_balance_set_at: row.get(9)?,
                 past_installments: row.get(10)?,
                 current_installments: row.get(11)?,
-                member_type: mt.parse::<MemberType>().unwrap_or(MemberType::SHG),
+                member_type: mt,
             })
         },
     )?;
@@ -276,7 +316,7 @@ pub fn list_members(conn: &Connection) -> Result<Vec<Member>, AppError> {
         "SELECT id, member_code, name, phone, address, joined_at, is_active,
                 opening_balance, opening_balance_method, opening_balance_set_at, past_installments, current_installments, member_type
          FROM members
-         ORDER BY name",
+         ORDER BY name COLLATE NOCASE",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -294,7 +334,7 @@ pub fn list_members(conn: &Connection) -> Result<Vec<Member>, AppError> {
             opening_balance_set_at: row.get(9)?,
             past_installments: row.get(10)?,
             current_installments: row.get(11)?,
-            member_type: mt.parse::<MemberType>().unwrap_or(MemberType::SHG),
+            member_type: mt,
         })
     })?;
 
@@ -549,7 +589,7 @@ pub fn get_member_profile(conn: &Connection, member_id: i64) -> Result<MemberPro
                 opening_balance_set_at: row.get(9)?,
                 past_installments: row.get(10)?,
                 current_installments: row.get(11)?,
-                member_type: mt.parse::<MemberType>().unwrap_or(MemberType::SHG),
+                member_type: mt,
             })
         },
     )?;
@@ -620,13 +660,16 @@ pub fn list_members_by_type(
     conn: &Connection,
     member_type: MemberType,
 ) -> Result<Vec<Member>, AppError> {
+    // member_type is a comma-separated role set; match the requested role as a
+    // distinct token so a "CHIT,LOAN" member shows in both the Chit and Loan tabs.
     let mut stmt = conn.prepare(
         "SELECT id, member_code, name, phone, address, joined_at, is_active,
                 opening_balance, opening_balance_method, opening_balance_set_at,
                 past_installments, current_installments, member_type
          FROM members
-         WHERE member_type = ?1 AND is_active = 1
-         ORDER BY name",
+         WHERE (',' || UPPER(member_type) || ',') LIKE ('%,' || ?1 || ',%')
+           AND is_active = 1
+         ORDER BY name COLLATE NOCASE",
     )?;
 
     let rows = stmt.query_map([member_type.to_string()], |row| {
@@ -644,7 +687,7 @@ pub fn list_members_by_type(
             opening_balance_set_at: row.get(9)?,
             past_installments: row.get(10)?,
             current_installments: row.get(11)?,
-            member_type: mt.parse::<MemberType>().unwrap_or(MemberType::SHG),
+            member_type: mt,
         })
     })?;
 
@@ -1201,5 +1244,6 @@ pub fn is_member_type(conn: &Connection, member_id: i64, member_type: MemberType
         [member_id],
         |row| row.get(0),
     )?;
-    Ok(mt == member_type.to_string())
+    // Role-set membership (a member may hold several roles).
+    Ok(role_set(&mt).contains(&member_type.to_string()))
 }

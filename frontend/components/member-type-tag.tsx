@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { memberRoles } from '@/lib/roles'
 
 const COLORS: Record<string, string> = {
   SHG: 'bg-blue-100 text-blue-700',
@@ -7,21 +8,27 @@ const COLORS: Record<string, string> = {
 }
 
 /**
- * Small inline badge showing a member's type (SHG / CHIT / LOAN). Use after a
- * member name wherever members are picked from a list so the type is obvious.
+ * Small inline badge(s) showing a member's role(s). `type` is the member's role
+ * set ("SHG" or "CHIT,LOAN"); one badge is rendered per role. Use after a member
+ * name wherever members are picked from a list so the role(s) are obvious.
  */
 export function MemberTypeTag({ type, className }: { type?: string | null; className?: string }) {
-  if (!type) return null
-  const t = type.toUpperCase()
+  const roles = memberRoles(type)
+  if (roles.length === 0) return null
   return (
-    <span
-      className={cn(
-        'ml-1.5 inline-block rounded px-1 py-0.5 text-[10px] font-semibold leading-none align-middle',
-        COLORS[t] ?? 'bg-muted text-muted-foreground',
-        className,
-      )}
-    >
-      {t}
-    </span>
+    <>
+      {roles.map(t => (
+        <span
+          key={t}
+          className={cn(
+            'ml-1.5 inline-block rounded px-1 py-0.5 text-[10px] font-semibold leading-none align-middle',
+            COLORS[t] ?? 'bg-muted text-muted-foreground',
+            className,
+          )}
+        >
+          {t}
+        </span>
+      ))}
+    </>
   )
 }

@@ -318,22 +318,25 @@ pub fn update_member_type(
     member_id: i64,
     member_type: String,
 ) -> Result<(), String> {
-    use std::str::FromStr;
-    
-    let mt = MemberType::from_str(&member_type)
-        .map_err(|e| format!("Invalid member type: {}", e))?;
-    
+    // member_type is a comma-separated role set (e.g. "SHG" or "CHIT,LOAN").
+    // Switching roles is always allowed and never deletes a member's existing
+    // loans or chits — only their privileges change going forward.
+    let normalized = db::members::validate_member_roles(&member_type)
+        .map_err(|e: AppError| e.to_string())?;
+
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard
         .db
         .as_mut()
         .ok_or_else(|| "DB not unlocked".to_string())?;
-    
+
     conn.execute(
         "UPDATE members SET member_type = ?1 WHERE id = ?2",
-        (mt.to_string(), member_id),
+        (&normalized, member_id),
     ).map_err(|e| e.to_string())?;
 
+    db::audit::log_audit(conn, "MEMBER_TYPE_CHANGED", "member", Some(member_id),
+        &format!("Roles set to {normalized}"));
     Ok(())
 }
 

@@ -184,6 +184,9 @@ export default function VouchersPage() {
               To: {voucher.memberName}
             </span>
           )}
+          {voucher.referenceType === 'GENERAL_VOUCHER' && (
+            <span className="text-xs text-muted-foreground block">External voucher</span>
+          )}
           {voucher.paymentMethod === 'mixed' && (
             <span className="text-xs text-muted-foreground block">
               Cash {formatCurrency(voucher.cashAmount ?? 0)} + Bank {formatCurrency(voucher.bankAmount ?? 0)}

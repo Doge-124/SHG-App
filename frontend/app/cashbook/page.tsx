@@ -7,7 +7,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import { Separator } from '@/components/ui/separator'
 import {
   Table,
   TableBody,
@@ -22,14 +21,19 @@ import { StatCard } from '@/components/stat-card'
 import { toast } from 'sonner'
 import { formatCurrency } from '@/lib/format'
 import { calculateRunningBalances, formatDate, formatTime } from '@/lib/api/daybook'
-import type { DayBookSummary, DayBookEntry } from '@/lib/types/daybook'
+import type { DayBookSummary } from '@/lib/types/daybook'
 import { BookOpen, ArrowUpRight, ArrowDownRight, RefreshCw, Banknote } from 'lucide-react'
 
 function friendlyReason(referenceType: string | undefined | null, raw: string): string {
   switch (referenceType) {
     case 'WEEKLY_CONTRIBUTION':
     case 'MEMBER_CONTRIBUTION': return 'Savings Contribution'
-    case 'MEMBER_PAYMENT':      return 'Loan Repayment'
+    case 'MEMBER_PAYMENT': {
+      const reason = raw.toLowerCase()
+      if (reason.includes('upfront')) return 'Upfront Interest'
+      if (reason.includes('interest')) return 'Interest Payment'
+      return 'Loan Repayment'
+    }
     case 'CHIT_PAYMENT':        return 'Chit Installment'
     case 'CHIT_COMMISSION':     return 'Chit Commission'
     case 'CHIT_PAYOUT':         return 'Chit Payout'
@@ -55,8 +59,8 @@ export default function CashBookPage() {
     try {
       const result = await invoke<DayBookSummary>('get_cash_book', { startDate, endDate })
       setSummary(result)
-    } catch (err: any) {
-      toast.error(err?.toString() || 'Failed to load cash book')
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : String(err || 'Failed to load cash book'))
     } finally {
       setIsLoading(false)
     }

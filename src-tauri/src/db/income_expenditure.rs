@@ -110,9 +110,12 @@ pub fn get_income_expenditure(
     // Use the explicit column rather than the L_start+D−L_end residual, which
     // tautologically equalled total_repayments under the old gross-payment
     // formula and produced Rs 0 interest income.
+    // Past-data (reference-only) repayments are excluded — interest earned before
+    // the app must not be counted as income.
     let interest_on_loans: f64 = conn.query_row(
         "SELECT COALESCE(SUM(interest_amount), 0) FROM loan_payments
-         WHERE created_at >= ?1 AND created_at <= ?2",
+         WHERE COALESCE(is_past_entry, 0) = 0
+         AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],
         |r| r.get(0),
     ).unwrap_or(0.0);

@@ -1,4 +1,5 @@
-// Member Type - determines what a member can participate in
+// A single member role. A member's `memberType` is a comma-separated SET of
+// these (e.g. "SHG" or "CHIT,LOAN") — see lib/roles.ts for helpers.
 export type MemberType = 'SHG' | 'CHIT' | 'LOAN'
 
 // Member Types
@@ -11,7 +12,7 @@ export interface Member {
   joinDate: string
   status: 'active' | 'inactive'
   balance: number
-  memberType: MemberType  // SHG = savings, CHIT = chit fund, LOAN = loan
+  memberType: string  // comma-separated role set, e.g. "SHG" or "CHIT,LOAN"
   createdAt: string
   updatedAt: string
 }
@@ -20,7 +21,7 @@ export interface MemberFormData {
   name: string
   phone: string
   address?: string
-  memberType: MemberType
+  memberType: string  // comma-separated role set
 }
 
 export interface OpeningDataInput {
@@ -146,6 +147,11 @@ export interface Voucher {
 
 export interface VoucherFormData {
   memberId: string
+  // External (general) voucher: paid to an outside entity/vendor for an SHG
+  // purchase, not tied to a member. When true, `payee` carries the recipient
+  // and `memberId` is empty.
+  isExternal?: boolean
+  payee?: string
   amount: number
   reasonType: string
   customReason?: string

@@ -422,7 +422,7 @@ export function ChitPastDataForm({
                           <div className="space-y-1">
                             <Label className="text-xs text-muted-foreground">Bid Discount</Label>
                             <Input type="number" min={0} step="0.01"
-                              value={row.bidDiscount}
+                              value={row.bidDiscount || ''}
                               onChange={e => updateAuctionWinner(idx, 'bidDiscount', parseFloat(e.target.value) || 0)} />
                           </div>
                           <div className="space-y-1">
@@ -502,7 +502,7 @@ export function ChitPastDataForm({
                         <div className="flex items-center gap-2 flex-shrink-0">
                           <Input
                             type="number"
-                            value={payment.amount}
+                            value={payment.amount || ''}
                             onChange={e => updatePayment(payment.memberId, 'amount', parseFloat(e.target.value) || 0)}
                             disabled={!payment.hasPaid}
                             className="w-24"

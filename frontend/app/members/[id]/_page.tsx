@@ -27,6 +27,10 @@ import { getMemberLoans, getMemberLoanPassbook, type MemberLoanPassbook } from '
 import { guarantorLabel } from '@/lib/api/guarantors'
 import { printLoanLedger } from '@/lib/reports'
 import { Spinner } from '@/components/ui/spinner'
+import { Checkbox } from '@/components/ui/checkbox'
+import { MemberTypeTag } from '@/components/member-type-tag'
+import { memberRoles, canMemberLoan, canMemberChit, canMemberSavings, MEMBER_ROLES } from '@/lib/roles'
+import type { MemberType } from '@/lib/types'
 import { invoke } from '@tauri-apps/api/core'
 import { formatCurrency, formatPhone, formatDate, loanRef } from '@/lib/format'
 import { useToast } from '@/hooks/use-toast'
@@ -69,12 +73,12 @@ export default function MemberDetailPage() {
 
         const memberType = profileData.member.memberType
 
-        if (memberType === 'SHG' || memberType === 'LOAN') {
+        if (canMemberLoan(memberType)) {
           const loansRes = await getMemberLoans(id)
           if (loansRes.success && loansRes.data) setLoans(loansRes.data)
         }
 
-        if (memberType === 'SHG' || memberType === 'CHIT') {
+        if (canMemberChit(memberType)) {
           const groups = await invoke('get_member_chit_groups', { memberId: parseInt(id) }) as any[]
           setChitGroups(groups)
         }
@@ -147,9 +151,9 @@ export default function MemberDetailPage() {
   }
 
   const memberType = profile.member.memberType
-  const isSHG  = memberType === 'SHG'
-  const isLOAN = memberType === 'LOAN'
-  const isCHIT = memberType === 'CHIT'
+  const isSHG  = canMemberSavings(memberType)   // savings + past data
+  const canLoan = canMemberLoan(memberType)     // SHG or LOAN
+  const canChit = canMemberChit(memberType)     // SHG or CHIT
 
   const activeLoans = loans.filter(l => l.status === 'active')
   const totalOutstanding = activeLoans.reduce((sum, l) => sum + l.outstandingAmount, 0)
@@ -173,19 +177,7 @@ export default function MemberDetailPage() {
           >
             {profile.member.status}
           </Badge>
-          <Badge
-            variant="outline"
-            className={cn(
-              'text-sm',
-              isSHG  && 'bg-blue-50 text-blue-700 border-blue-200',
-              isCHIT && 'bg-purple-50 text-purple-700 border-purple-200',
-              isLOAN && 'bg-orange-50 text-orange-700 border-orange-200',
-            )}
-          >
-            {isSHG  && 'Savings Member'}
-            {isCHIT && 'Chit Member'}
-            {isLOAN && 'Loan Member'}
-          </Badge>
+          <span className="inline-flex items-center"><MemberTypeTag type={memberType} /></span>
         </PageHeader>
       </div>
 
@@ -240,7 +232,7 @@ export default function MemberDetailPage() {
         )}
 
         {/* Outstanding loans — SHG and LOAN */}
-        {(isSHG || isLOAN) && (
+        {canLoan && (
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center gap-3">
@@ -257,7 +249,7 @@ export default function MemberDetailPage() {
         )}
 
         {/* Active chits — CHIT only */}
-        {isCHIT && (
+        {canChit && (
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center gap-3">
@@ -303,55 +295,60 @@ export default function MemberDetailPage() {
         </Card>
       )}
 
-      {/* Member Type selector — always shown */}
+      {/* Member roles — multi-select; switching never deletes loans/chits */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <CircleDollarSign className="h-5 w-5" />
-            Member Type
+            Member Roles
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="text-sm text-muted-foreground">
-            SHG members have full access (Savings, Loans &amp; Chit). CHIT members can only do chit funds. LOAN members can only take loans.
+            Tick any combination. <strong>SHG</strong> = full access (savings, loans &amp; chit).
+            <strong> Chit</strong> = can join chits. <strong>Loan</strong> = can take loans.
+            Changing roles never affects existing loans or chits.
           </div>
-          <Select
-            value={profile.member.memberType}
-            onValueChange={async (type: 'SHG' | 'CHIT' | 'LOAN') => {
+          {(() => {
+            const ROLE_META: { role: MemberType; label: string; dot: string }[] = [
+              { role: 'SHG', label: 'Savings (SHG) — full access', dot: 'bg-blue-500' },
+              { role: 'CHIT', label: 'Chit Fund', dot: 'bg-purple-500' },
+              { role: 'LOAN', label: 'Loan', dot: 'bg-orange-500' },
+            ]
+            const current = memberRoles(profile.member.memberType)
+            const toggleRole = async (role: MemberType, checked: boolean) => {
+              const next = checked
+                ? [...current, role]
+                : current.filter(r => r !== role)
+              if (next.length === 0) {
+                toast({ title: 'At least one role required', variant: 'destructive' })
+                return
+              }
+              const ordered = MEMBER_ROLES.filter(r => next.includes(r))
               try {
-                await updateMemberType(parseInt(profile.member.id), type)
-                toast({ title: 'Member type updated', description: `Changed to ${type} member` })
+                await updateMemberType(parseInt(profile.member.id), ordered.join(','))
+                toast({ title: 'Roles updated', description: ordered.join(', ') })
                 const updatedProfile = await getMemberProfile(parseInt(id))
                 setProfile(updatedProfile)
               } catch (error) {
-                toast({ title: 'Error', description: typeof error === 'string' ? error : 'Failed to update member type', variant: 'destructive' })
+                toast({ title: 'Error', description: typeof error === 'string' ? error : 'Failed to update roles', variant: 'destructive' })
               }
-            }}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="Select member type" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="SHG">
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-blue-500" />
-                  Savings (SHG)
-                </div>
-              </SelectItem>
-              <SelectItem value="CHIT">
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-purple-500" />
-                  Chit Fund
-                </div>
-              </SelectItem>
-              <SelectItem value="LOAN">
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-orange-500" />
-                  Loan
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+            }
+            return (
+              <div className="space-y-2">
+                {ROLE_META.map(({ role, label, dot }) => (
+                  <label key={role} className="flex items-center gap-3 rounded-md border p-3 cursor-pointer hover:bg-muted">
+                    <Checkbox
+                      checked={current.includes(role)}
+                      onCheckedChange={(c) => toggleRole(role, !!c)}
+                    />
+                    <span className={cn('h-2 w-2 rounded-full', dot)} />
+                    <span className="text-sm">{label}</span>
+                  </label>
+                ))}
+              </div>
+            )
+          })()}
         </CardContent>
       </Card>
 
@@ -520,51 +517,35 @@ export default function MemberDetailPage() {
         </Card>
       )}
 
-      {/* ── SHG: full tabs ───────────────────────────────────────────────── */}
-      {isSHG && (
-        <Tabs defaultValue="loans" className="space-y-4">
-          <TabsList>
+      {/* ── Detail tabs — shown per the member's capabilities ────────────── */}
+      <Tabs defaultValue={canLoan ? 'loans' : canChit ? 'chits' : 'transactions'} className="space-y-4">
+        <TabsList>
+          {canLoan && (
             <TabsTrigger value="loans" className="gap-2">
               <Wallet className="h-4 w-4" />
               Loans ({loans.length})
             </TabsTrigger>
-            <TabsTrigger value="transactions" className="gap-2">
-              <History className="h-4 w-4" />
-              Transactions ({profile.recentTransactions.length})
-            </TabsTrigger>
+          )}
+          <TabsTrigger value="transactions" className="gap-2">
+            <History className="h-4 w-4" />
+            Transactions ({profile.recentTransactions.length})
+          </TabsTrigger>
+          {canChit && (
             <TabsTrigger value="chits" className="gap-2">
               <CircleDollarSign className="h-4 w-4" />
               Chits ({chitGroups.length})
             </TabsTrigger>
-          </TabsList>
+          )}
+        </TabsList>
 
+        {canLoan && (
           <TabsContent value="loans"><LoanLedger memberId={id} shgName={settings?.general?.groupName} /></TabsContent>
-          <TabsContent value="transactions"><TransactionList txns={profile.recentTransactions} /></TabsContent>
+        )}
+        <TabsContent value="transactions"><TransactionList txns={profile.recentTransactions} /></TabsContent>
+        {canChit && (
           <TabsContent value="chits"><ChitList chitGroups={chitGroups} /></TabsContent>
-        </Tabs>
-      )}
-
-      {/* ── LOAN: loans + transactions ───────────────────────────────────── */}
-      {isLOAN && (
-        <Tabs defaultValue="loans" className="space-y-4">
-          <TabsList>
-            <TabsTrigger value="loans" className="gap-2">
-              <Wallet className="h-4 w-4" />
-              Loans ({loans.length})
-            </TabsTrigger>
-            <TabsTrigger value="transactions" className="gap-2">
-              <History className="h-4 w-4" />
-              Transactions ({profile.recentTransactions.length})
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="loans"><LoanLedger memberId={id} shgName={settings?.general?.groupName} /></TabsContent>
-          <TabsContent value="transactions"><TransactionList txns={profile.recentTransactions} /></TabsContent>
-        </Tabs>
-      )}
-
-      {/* ── CHIT: chit memberships only ──────────────────────────────────── */}
-      {isCHIT && <ChitList chitGroups={chitGroups} />}
+        )}
+      </Tabs>
     </div>
   )
 }

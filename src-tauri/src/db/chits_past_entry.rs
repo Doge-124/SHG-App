@@ -311,7 +311,8 @@ pub fn get_member_payment_status(
         "SELECT cm.member_id, m.name 
          FROM chit_members cm
          JOIN members m ON cm.member_id = m.id
-         WHERE cm.chit_id = ?1"
+         WHERE cm.chit_id = ?1
+         ORDER BY m.name COLLATE NOCASE"
     )?;
 
     let members: Vec<(i64, String)> = members_stmt

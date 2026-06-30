@@ -266,6 +266,102 @@ pub fn payout_member_savings(
     Ok(voucher_id)
 }
 
+/// Record a PAST savings payout (reference-only). A member received some of their
+/// savings before the app was in use, so their current savings should be lower
+/// while their installment count stays intact. This reduces the member's savings
+/// balance and adds a dated history row, but creates NO SHG voucher/receipt and
+/// does NOT touch the SHG ledger — the SHG opening balance already accounts for
+/// historical cash that left.
+pub fn record_past_member_payout(
+    conn: &mut Connection,
+    member_id: i64,
+    amount: f64,
+    paid_at: &str,
+    note: &str,
+) -> Result<i64, AppError> {
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err(AppError::validation("amount must be > 0"));
+    }
+
+    let member_name: String = conn
+        .query_row("SELECT name FROM members WHERE id = ?1", [member_id], |r| r.get(0))
+        .map_err(|_| AppError::business("Member not found"))?;
+
+    let balance: f64 = conn
+        .query_row(
+            "SELECT COALESCE(balance, 0.0) FROM member_balances WHERE member_id = ?1",
+            [member_id], |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+
+    if amount > balance + 0.005 {
+        return Err(AppError::business(format!(
+            "Cannot record a past payout of ₹{amount:.2}: {member_name} only has ₹{balance:.2} in savings. \
+             Enter their opening/contributions first."
+        )));
+    }
+
+    let reason = if note.trim().is_empty() {
+        "Savings Payout (Past)".to_string()
+    } else {
+        format!("Savings Payout (Past) — {}", note.trim())
+    };
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO member_transactions (member_id, amount, txn_type, reason, created_at)
+         VALUES (?1, ?2, 'CONTRIBUTION', ?3, ?4)",
+        (member_id, -amount, &reason, paid_at),
+    )?;
+    let txn_id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE member_balances SET balance = balance - ?1 WHERE member_id = ?2",
+        (amount, member_id),
+    )?;
+    tx.commit()?;
+    Ok(txn_id)
+}
+
+/// A single savings payout (live or past) for the history view.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavingsPayout {
+    pub id: i64,
+    pub member_id: i64,
+    pub member_name: String,
+    pub member_code: String,
+    pub amount: f64,
+    pub date: String,
+    pub is_past: bool,
+}
+
+/// Every savings payout across members — live (with a voucher) and past-data
+/// (reference-only) — newest first. Payouts are the negative CONTRIBUTION rows.
+pub fn get_savings_payout_history(conn: &Connection) -> Result<Vec<SavingsPayout>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT mt.id, mt.member_id, m.name, m.member_code, -mt.amount, mt.created_at, mt.reason
+         FROM member_transactions mt
+         JOIN members m ON m.id = mt.member_id
+         WHERE mt.txn_type = 'CONTRIBUTION' AND mt.amount < 0
+         ORDER BY mt.created_at DESC, mt.id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let reason: String = r.get(6)?;
+        Ok(SavingsPayout {
+            id: r.get(0)?,
+            member_id: r.get(1)?,
+            member_name: r.get(2)?,
+            member_code: r.get(3)?,
+            amount: r.get(4)?,
+            date: r.get(5)?,
+            is_past: reason.to_lowercase().contains("past"),
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
 // ─── Weekly status query ──────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
@@ -341,7 +437,7 @@ pub fn get_weekly_contribution_status(
          ) c ON c.member_id = m.id
          LEFT JOIN member_balances mb ON mb.member_id = m.id
          WHERE m.is_active = 1 AND m.member_type = 'SHG'
-         ORDER BY c.last_paid_at DESC NULLS LAST, m.name ASC",
+         ORDER BY m.name COLLATE NOCASE ASC",
     )?;
 
     // Expected installment number as of today (auto-increments weekly).

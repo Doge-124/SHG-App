@@ -49,6 +49,7 @@ import { ChitManualCycleForm } from '@/components/forms/chit-manual-cycle-form'
 import { ChitMemberLedgerDialog } from '@/components/forms/chit-member-ledger-dialog'
 import { ChitMemberGuarantorsDialog } from '@/components/forms/chit-member-guarantors-dialog'
 import { MemberTypeTag } from '@/components/member-type-tag'
+import { canMemberChit } from '@/lib/roles'
 import { formatCurrency, formatDate } from '@/lib/format'
 import { printChitCycles, type ChitCycleReportRow } from '@/lib/reports'
 import { useSettings } from '@/lib/settings-context'
@@ -126,7 +127,7 @@ export default function ChitDetailPage() {
         const existingMemberIds = members.map(m => m.memberId)
         const available = membersRes.data.filter(member =>
           !existingMemberIds.includes(member.id) &&
-          (member.memberType === 'SHG' || member.memberType === 'CHIT')
+          canMemberChit(member.memberType)
         )
         setAvailableMembers(available)
         setShowAddMemberDialog(true)

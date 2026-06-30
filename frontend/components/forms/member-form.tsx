@@ -40,7 +40,9 @@ const memberSchema = z.object({
     .max(10, 'Phone number must be 10 digits')
     .regex(/^\d+$/, 'Phone number must contain only digits'),
   address: z.string().trim().min(1, 'Address is required'),
-  memberType: z.enum(['SHG', 'CHIT', 'LOAN']),
+  // Role set is assigned by context (the tab you add from) and managed afterwards
+  // on the member's profile, so the form doesn't show a role picker.
+  memberType: z.string().min(1).default('SHG'),
 })
 
 interface MemberFormProps {
@@ -157,43 +159,9 @@ export function MemberForm({
               )}
             />
 
-            <FormField
-              control={form.control}
-              name="memberType"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Member Type</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select member type" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="SHG">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-blue-500" />
-                          Savings (SHG) - Full access: Savings, Loans & Chit
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="CHIT">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-purple-500" />
-                          Chit Fund - Chit groups only
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="LOAN">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-orange-500" />
-                          Loan - Loans only
-                        </div>
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            <p className="text-xs text-muted-foreground">
+              Roles (SHG / Chit / Loan) can be adjusted any time from the member&apos;s profile.
+            </p>
 
             <div className="flex justify-end gap-3 pt-4">
               <Button

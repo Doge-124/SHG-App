@@ -39,7 +39,14 @@ function periodRange(period: Period): [string, string] {
     case 'day': break
     case 'week': from.setDate(from.getDate() - 6); break
     case 'month': from.setMonth(from.getMonth() - 1); from.setDate(from.getDate() + 1); break
-    case 'year': from.setFullYear(from.getFullYear() - 1); from.setDate(from.getDate() + 1); break
+    // "This Year" = the Indian financial year (Apr 1 → Mar 31) that contains
+    // today, from its start up to today. Months before April belong to the FY
+    // that began the previous calendar year.
+    case 'year': {
+      const fyStartYear = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1
+      from.setFullYear(fyStartYear, 3, 1) // April 1
+      break
+    }
     default: break
   }
   return [isoDate(from), to]

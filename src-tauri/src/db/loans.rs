@@ -17,8 +17,8 @@ fn can_take_loans(conn: &Connection, member_id: i64) -> Result<bool, AppError> {
         [member_id],
         |row| row.get(0),
     )?;
-    // SHG members can do everything, LOAN members can do loans
-    Ok(mt == "SHG" || mt == "LOAN")
+    // member_type is a role set; SHG or LOAN grants loan privileges.
+    Ok(crate::db::members::roles_allow_loan(&mt))
 }
 
 /// Represents a single repayment recorded against a loan.
@@ -112,6 +112,10 @@ pub fn create_loan(
         "MIXED" => if cash_part.unwrap_or(0.0) >= bank_part.unwrap_or(0.0) { "CASH" } else { "BANK" },
         other => other,
     };
+    // For a MIXED disbursement the upfront interest (income) is always collected
+    // in CASH, not split with the bank portion. Single-method loans book it under
+    // that same method.
+    let income_method: &str = if payment_method == "MIXED" { "CASH" } else { loan_method };
 
     let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
@@ -177,13 +181,12 @@ pub fn create_loan(
     // inflated balance and the net-outflow check is atomic.
     if upfront_interest > 0.0 {
         let upfront_note = "Upfront Interest";
-        // Upfront interest is collected as a single inflow under the indicative
-        // method (the larger half for a mixed disbursement).
+        // Upfront interest is collected in cash for mixed disbursements (income_method).
         ledger::record_receipt(
             &mut tx,
             upfront_interest,
             upfront_note,
-            loan_method,
+            income_method,
             Some("MEMBER_PAYMENT"),
             Some(member_id),
             created_at,
@@ -194,7 +197,7 @@ pub fn create_loan(
                (loan_id, member_id, amount, principal_amount, interest_amount,
                 payment_method, note, created_at)
              VALUES (?1, ?2, ?3, 0, ?3, ?4, ?5, ?6)",
-            (loan_id, member_id, upfront_interest, loan_method, upfront_note, created_at),
+            (loan_id, member_id, upfront_interest, income_method, upfront_note, created_at),
         )?;
     }
 
@@ -356,8 +359,8 @@ pub fn record_past_loan(
         tx.execute(
             "INSERT INTO loan_payments
                (loan_id, member_id, amount, principal_amount, interest_amount,
-                payment_method, note, created_at)
-             VALUES (?1, ?2, ?3, 0, ?3, ?4, 'Upfront Interest', ?5)",
+                payment_method, note, created_at, is_past_entry)
+             VALUES (?1, ?2, ?3, 0, ?3, ?4, 'Upfront Interest', ?5, 1)",
             (loan_id, member_id, upfront_interest, payment_method, issued_at),
         )?;
     }
@@ -399,8 +402,8 @@ pub fn record_past_loan(
         tx.execute(
             "INSERT INTO loan_payments
                (loan_id, member_id, amount, principal_amount, interest_amount,
-                payment_method, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Loan Repayment', ?7)",
+                payment_method, note, created_at, is_past_entry)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Loan Repayment', ?7, 1)",
             (loan_id, member_id, rep_amount, principal_paid, interest_paid, rep_method, rep_date),
         )?;
         // No member_balances / member_transactions writes — past repayments

@@ -47,6 +47,16 @@ interface Summary {
   members: MemberStatus[]
 }
 
+interface SavingsPayoutRow {
+  id: number
+  memberId: number
+  memberName: string
+  memberCode: string
+  amount: number
+  date: string
+  isPast: boolean
+}
+
 // Return Monday of the week containing the given date
 function weekStart(d: Date): Date {
   const day = d.getDay() // 0=Sun
@@ -88,6 +98,16 @@ export default function ContributionsPage() {
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState<'CASH' | 'BANK'>('CASH')
   const [isPaying, setIsPaying] = useState(false)
+
+  // Savings payouts (history + past-data entry)
+  const [showPayouts, setShowPayouts] = useState(false)
+  const [payoutHistory, setPayoutHistory] = useState<SavingsPayoutRow[]>([])
+  const [loadingPayouts, setLoadingPayouts] = useState(false)
+  const [ppMember, setPpMember] = useState('')
+  const [ppAmount, setPpAmount] = useState('')
+  const [ppDate, setPpDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [ppNote, setPpNote] = useState('')
+  const [savingPp, setSavingPp] = useState(false)
 
   const fromDate = toISO(weekOf)
   const toDate = toISO(addDays(weekOf, 6))
@@ -177,6 +197,44 @@ export default function ContributionsPage() {
     setPayMethod('CASH')
   }
 
+  const loadPayouts = useCallback(async () => {
+    setLoadingPayouts(true)
+    try {
+      const rows = await invoke<SavingsPayoutRow[]>('get_savings_payout_history_cmd')
+      setPayoutHistory(rows)
+    } catch {
+      /* ignore */
+    } finally {
+      setLoadingPayouts(false)
+    }
+  }, [])
+
+  const openPayouts = () => { setShowPayouts(true); loadPayouts() }
+
+  const handleRecordPastPayout = async () => {
+    if (!ppMember) { toast.error('Select a member'); return }
+    const amt = parseFloat(ppAmount)
+    if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return }
+    if (!ppDate) { toast.error('Select a date'); return }
+    setSavingPp(true)
+    try {
+      await invoke('record_past_member_payout_cmd', {
+        memberId: parseInt(ppMember),
+        amount: amt,
+        paidAt: new Date(ppDate).toISOString(),
+        note: ppNote.trim() || null,
+      })
+      toast.success('Past savings payout recorded')
+      setPpMember(''); setPpAmount(''); setPpNote('')
+      await loadPayouts()
+      load(fromDate, toDate)
+    } catch (e: any) {
+      toast.error(typeof e === 'string' ? e : 'Failed to record payout')
+    } finally {
+      setSavingPp(false)
+    }
+  }
+
   const paidPct = summary ? Math.round((summary.paidCount / summary.totalMembers) * 100) : 0
 
   return (
@@ -185,6 +243,10 @@ export default function ContributionsPage() {
         title="Weekly Contributions"
         description="Track who has paid their savings contribution for the week"
       >
+        <Button variant="outline" onClick={openPayouts}>
+          <Banknote className="mr-2 h-4 w-4" />
+          Savings Payouts
+        </Button>
         <Button variant="outline" onClick={() => load(fromDate, toDate)} disabled={isLoading}>
           {isLoading ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
           Refresh
@@ -529,6 +591,79 @@ export default function ContributionsPage() {
               {isSavingNumber ? <Spinner className="mr-2 h-4 w-4" /> : null}
               Save
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Savings payouts: history + past-data entry */}
+      <Dialog open={showPayouts} onOpenChange={setShowPayouts}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Savings Payouts</DialogTitle>
+          </DialogHeader>
+
+          {/* Record a past payout (reference-only) */}
+          <div className="rounded-md border p-3 space-y-2 bg-muted/30">
+            <p className="text-sm font-medium">Record a past payout</p>
+            <p className="text-xs text-muted-foreground">
+              For savings paid out to a member before the app was in use. Reduces their savings balance;
+              creates no voucher/receipt and does not affect the SHG ledger.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <Select value={ppMember} onValueChange={setPpMember}>
+                <SelectTrigger><SelectValue placeholder="Select member" /></SelectTrigger>
+                <SelectContent>
+                  {summary?.members.map(m => (
+                    <SelectItem key={m.memberId} value={m.memberId.toString()}>
+                      {m.memberName} ({m.memberCode})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Input type="number" min="0" step="0.01" placeholder="Amount (₹)"
+                value={ppAmount} onChange={e => setPpAmount(e.target.value)} />
+              <Input type="date" value={ppDate} onChange={e => setPpDate(e.target.value)} />
+              <Input placeholder="Note (optional)" value={ppNote} onChange={e => setPpNote(e.target.value)} />
+            </div>
+            <Button size="sm" onClick={handleRecordPastPayout} disabled={savingPp}>
+              {savingPp && <Spinner className="mr-2 h-4 w-4" />}Record Past Payout
+            </Button>
+          </div>
+
+          {/* History */}
+          <div className="max-h-[45vh] overflow-y-auto rounded-md border">
+            <table className="w-full text-sm">
+              <thead className="bg-muted sticky top-0">
+                <tr className="text-left">
+                  <th className="px-3 py-2">Date</th>
+                  <th className="px-3 py-2">Member</th>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingPayouts ? (
+                  <tr><td colSpan={4} className="px-3 py-6 text-center"><Spinner className="h-5 w-5 inline" /></td></tr>
+                ) : payoutHistory.length === 0 ? (
+                  <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground">No savings payouts yet</td></tr>
+                ) : payoutHistory.map(p => (
+                  <tr key={p.id} className="border-t">
+                    <td className="px-3 py-2 whitespace-nowrap">{formatDate(p.date)}</td>
+                    <td className="px-3 py-2">{p.memberName} <span className="text-muted-foreground">({p.memberCode})</span></td>
+                    <td className="px-3 py-2">
+                      {p.isPast
+                        ? <Badge variant="outline">Past</Badge>
+                        : <Badge className="bg-success/10 text-success">Live</Badge>}
+                    </td>
+                    <td className="px-3 py-2 text-right text-destructive">{formatCurrency(p.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPayouts(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

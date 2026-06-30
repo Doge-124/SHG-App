@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { MemberTypeTag } from '@/components/member-type-tag'
+import { canMemberSavings } from '@/lib/roles'
 import { Spinner } from '@/components/ui/spinner'
 import { recordWeeklyContribution } from '@/lib/api/receipts'
 import { getMembers } from '@/lib/api/members'
@@ -57,7 +58,7 @@ export function WeeklyContributionForm({ isOpen, onClose, onSuccess }: WeeklyCon
       const response = await getMembers()
       if (response.success && response.data) {
         // Filter only active members
-        setMembers(response.data.filter(m => m.status === 'active' && m.memberType === 'SHG'))
+        setMembers(response.data.filter(m => m.status === 'active' && canMemberSavings(m.memberType)))
       }
     } catch (error) {
       toast.error('Failed to load members')

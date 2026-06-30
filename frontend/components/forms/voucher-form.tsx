@@ -46,11 +46,21 @@ export const SAVINGS_PAYOUT_REASON = 'Member savings payout'
 // Payment method is handled by the PaymentMethodFields component (cash/bank/
 // mixed) outside RHF, so it's not in this schema.
 const voucherSchema = z.object({
-  memberId: z.string().min(1, 'Please select a member'),
+  isExternal: z.boolean().default(false),
+  memberId: z.string().optional(),
+  payee: z.string().optional(),
   amount: z.coerce.number().min(1, 'Amount must be at least Rs. 1'),
   reasonType: z.string().min(2, 'Reason is required'),
   customReason: z.string().optional(),
   reference: z.string().optional(),
+}).superRefine((data, ctx) => {
+  if (data.isExternal) {
+    if (!data.payee || data.payee.trim().length < 2) {
+      ctx.addIssue({ path: ['payee'], code: z.ZodIssueCode.custom, message: 'Enter who the voucher is paid to' })
+    }
+  } else if (!data.memberId) {
+    ctx.addIssue({ path: ['memberId'], code: z.ZodIssueCode.custom, message: 'Please select a member' })
+  }
 })
 
 // Preset reasons for vouchers
@@ -115,7 +125,9 @@ export function VoucherForm({
   const form = useForm<VoucherFormData>({
     resolver: zodResolver(voucherSchema),
     defaultValues: {
+      isExternal: false,
       memberId: '',
+      payee: '',
       amount: 0,
       reasonType: '',
       customReason: '',
@@ -125,7 +137,13 @@ export function VoucherForm({
 
   const amount = Number(form.watch('amount')) || 0
   const memberId = form.watch('memberId')
-  const isPayout = selectedReason === SAVINGS_PAYOUT_REASON
+  const isExternal = form.watch('isExternal')
+  // Savings payout only applies to members; never for an external voucher.
+  const isPayout = !isExternal && selectedReason === SAVINGS_PAYOUT_REASON
+  // External vouchers can't pay out a member's savings, so hide that reason.
+  const reasonOptions = isExternal
+    ? voucherReasons.filter((r) => r !== SAVINGS_PAYOUT_REASON)
+    : voucherReasons
 
   // When paying out savings, look up the member's available balance.
   useEffect(() => {
@@ -145,6 +163,9 @@ export function VoucherForm({
     const pay = paymentInvokeArgs(paySplit)
     const finalData: VoucherFormData = {
       ...data,
+      // For an external voucher there's no member; clear it so the backend
+      // records a member-less GENERAL_VOUCHER.
+      memberId: data.isExternal ? '' : (data.memberId ?? ''),
       paymentMethod: paySplit.method,
       cashAmount: paySplit.method === 'mixed' ? paySplit.cashAmount : undefined,
       bankAmount: paySplit.method === 'mixed' ? paySplit.bankAmount : undefined,
@@ -163,42 +184,100 @@ export function VoucherForm({
         <DialogHeader>
           <DialogTitle>Create Voucher</DialogTitle>
           <DialogDescription>
-            Record money paid to a member or spent on behalf of a member.
+            Record money paid to a member, or an external (general) voucher for an
+            SHG purchase paid to an outside vendor.
           </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
           <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
+            {/* Voucher type: member vs external/general. */}
             <FormField
               control={form.control}
-              name="memberId"
+              name="isExternal"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Member</FormLabel>
-                  <Select onValueChange={field.onChange} defaultValue={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select a member" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {loadingMembers ? (
-                        <SelectItem value="loading" disabled>Loading members...</SelectItem>
-                      ) : members.length === 0 ? (
-                        <SelectItem value="none" disabled>No active members found</SelectItem>
-                      ) : (
-                        members.map((member) => (
-                          <SelectItem key={member.id} value={member.id}>
-                            {member.name} ({member.code})<MemberTypeTag type={member.memberType} />
-                          </SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
+                  <FormLabel>Voucher Type</FormLabel>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      type="button"
+                      variant={!field.value ? 'default' : 'outline'}
+                      onClick={() => {
+                        field.onChange(false)
+                        // Clear external-only state and any payout reason.
+                        form.setValue('payee', '')
+                        form.clearErrors(['payee', 'memberId'])
+                      }}
+                    >
+                      Member
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={field.value ? 'default' : 'outline'}
+                      onClick={() => {
+                        field.onChange(true)
+                        form.setValue('memberId', '')
+                        if (selectedReason === SAVINGS_PAYOUT_REASON) {
+                          setSelectedReason('')
+                          form.setValue('reasonType', '')
+                        }
+                        setSavings(null)
+                        form.clearErrors(['payee', 'memberId'])
+                      }}
+                    >
+                      External / General
+                    </Button>
+                  </div>
                 </FormItem>
               )}
             />
+
+            {isExternal ? (
+              <FormField
+                control={form.control}
+                name="payee"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Paid To (vendor / entity)</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g. ABC Stationers" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ) : (
+              <FormField
+                control={form.control}
+                name="memberId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Member</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select a member" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {loadingMembers ? (
+                          <SelectItem value="loading" disabled>Loading members...</SelectItem>
+                        ) : members.length === 0 ? (
+                          <SelectItem value="none" disabled>No active members found</SelectItem>
+                        ) : (
+                          members.map((member) => (
+                            <SelectItem key={member.id} value={member.id}>
+                              {member.name} ({member.code})<MemberTypeTag type={member.memberType} />
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             <FormField
               control={form.control}
@@ -252,7 +331,7 @@ export function VoucherForm({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {voucherReasons.map((reason) => (
+                      {reasonOptions.map((reason) => (
                         <SelectItem key={reason} value={reason}>
                           {reason}
                         </SelectItem>

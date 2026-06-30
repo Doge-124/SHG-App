@@ -81,6 +81,8 @@ fn main() {
             commands::members::get_active_chit_groups,
             commands::contributions::record_weekly_contribution_cmd,
             commands::contributions::payout_member_savings_cmd,
+            commands::contributions::record_past_member_payout_cmd,
+            commands::contributions::get_savings_payout_history_cmd,
             commands::contributions::get_installment_status_cmd,
             commands::contributions::set_installment_number_cmd,
             commands::contributions::get_weekly_contribution_status_cmd,

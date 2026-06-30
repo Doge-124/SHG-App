@@ -6,7 +6,10 @@ use tauri::State;
 use crate::db::contributions::{
     record_weekly_contribution as db_record_weekly_contribution,
     payout_member_savings as db_payout_member_savings,
+    record_past_member_payout as db_record_past_member_payout,
+    get_savings_payout_history as db_get_savings_payout_history,
     get_weekly_contribution_status, WeeklyContributionInput, WeeklyContributionSummary,
+    SavingsPayout,
 };
 use crate::db::audit;
 use crate::db::settings::{get_installment_status, set_installment_number, InstallmentStatus};
@@ -69,6 +72,37 @@ pub fn payout_member_savings_cmd(
     audit::log_audit(conn, "SAVINGS_PAYOUT", "contribution", Some(voucher_id),
         &format!("₹{amount} savings payout to member {member_id}"));
     Ok(voucher_id)
+}
+
+/// Record a PAST savings payout (reference-only): reduces the member's savings
+/// balance without any SHG voucher/receipt or ledger impact.
+#[tauri::command]
+pub fn record_past_member_payout_cmd(
+    state: State<Mutex<AppState>>,
+    member_id: i64,
+    amount: f64,
+    paid_at: String,
+    note: Option<String>,
+) -> Result<i64, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let txn_id = db_record_past_member_payout(conn, member_id, amount, &paid_at, note.as_deref().unwrap_or(""))
+        .map_err(|e: AppError| e.to_string())?;
+
+    audit::log_audit(conn, "SAVINGS_PAYOUT_PAST", "contribution", Some(txn_id),
+        &format!("₹{amount} past savings payout to member {member_id}"));
+    Ok(txn_id)
+}
+
+/// List every savings payout (live + past) across members, newest first.
+#[tauri::command]
+pub fn get_savings_payout_history_cmd(
+    state: State<Mutex<AppState>>,
+) -> Result<Vec<SavingsPayout>, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
+    db_get_savings_payout_history(conn).map_err(|e: AppError| e.to_string())
 }
 
 /// Get the current expected installment number (auto-increments weekly).

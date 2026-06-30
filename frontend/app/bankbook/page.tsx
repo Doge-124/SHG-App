@@ -30,7 +30,12 @@ function friendlyReason(referenceType: string | undefined | null, raw: string): 
   switch (referenceType) {
     case 'WEEKLY_CONTRIBUTION':
     case 'MEMBER_CONTRIBUTION': return 'Savings Contribution'
-    case 'MEMBER_PAYMENT':      return 'Loan Repayment'
+    case 'MEMBER_PAYMENT': {
+      const reason = raw.toLowerCase()
+      if (reason.includes('upfront')) return 'Upfront Interest'
+      if (reason.includes('interest')) return 'Interest Payment'
+      return 'Loan Repayment'
+    }
     case 'CHIT_PAYMENT':        return 'Chit Installment'
     case 'CHIT_COMMISSION':     return 'Chit Commission'
     case 'CHIT_PAYOUT':         return 'Chit Payout'
@@ -58,8 +63,8 @@ export default function BankBookPage() {
     try {
       const result = await invoke<DayBookSummary>('get_bank_book', { startDate, endDate })
       setSummary(result)
-    } catch (err: any) {
-      toast.error(err?.toString() || 'Failed to load bank book')
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : String(err || 'Failed to load bank book'))
     } finally {
       setIsLoading(false)
     }
@@ -86,8 +91,8 @@ export default function BankBookPage() {
         fromDate: startDate,
         toDate: endDate,
       })
-    } catch (err: any) {
-      toast.error(err?.toString() || 'Failed to print transaction IDs')
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : String(err || 'Failed to print transaction IDs'))
     } finally {
       setIsPrintingIds(false)
     }

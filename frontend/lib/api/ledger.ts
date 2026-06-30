@@ -81,16 +81,20 @@ export async function recordVoucher(data: VoucherFormData): Promise<ApiResponse<
     const createdAt = new Date().toISOString()
     
     // Combine reasonType and customReason into a single reason
-    const reason = data.reasonType === 'Other' ? (data.customReason || 'Other expense') : data.reasonType
-    
-    
+    const purpose = data.reasonType === 'Other' ? (data.customReason || 'Other expense') : data.reasonType
+    // External (general) vouchers aren't tied to a member: record the payee in
+    // the reason (there's no member name to show) and tag them GENERAL_VOUCHER.
+    const reason = data.isExternal && data.payee?.trim()
+      ? `${purpose} — ${data.payee.trim()}`
+      : purpose
+
     const isMixed = data.paymentMethod === 'mixed'
     await withAutoPrint(() => invoke('record_voucher', {
       amount: data.amount,
       reason: reason,
       paymentMethod: data.paymentMethod.toUpperCase(),
-      referenceType: 'MEMBER_VOUCHER',
-      referenceId: data.memberId ? parseInt(data.memberId) : null,
+      referenceType: data.isExternal ? 'GENERAL_VOUCHER' : 'MEMBER_VOUCHER',
+      referenceId: data.isExternal ? null : (data.memberId ? parseInt(data.memberId) : null),
       createdAt: createdAt,
       bankTxnId: data.bankTxnId ?? null,
       cashAmount: isMixed ? (data.cashAmount ?? null) : null,

@@ -95,8 +95,8 @@ fn can_participate_in_chit(conn: &Connection, member_id: i64) -> Result<bool, Ap
         [member_id],
         |row| row.get(0),
     )?;
-    // SHG members can do everything, CHIT members can do chit
-    Ok(mt == "SHG" || mt == "CHIT")
+    // member_type is a role set; SHG or CHIT grants chit privileges.
+    Ok(crate::db::members::roles_allow_chit(&mt))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -358,7 +358,7 @@ pub fn get_cycle_eligibility(
          FROM chit_member_eligibility e
          JOIN members m ON e.member_id = m.id
          WHERE e.chit_id = ?1 AND e.cycle_id = ?2
-         ORDER BY m.name"
+         ORDER BY m.name COLLATE NOCASE"
     )?;
 
     let rows = stmt.query_map((chit_id, cycle_id), |row| {
@@ -859,7 +859,7 @@ pub fn get_chit_pending_dues(
                SELECT 1 FROM chit_payments cp
                WHERE cp.cycle_id = cc.id AND cp.member_id = cm.member_id
            )
-         ORDER BY cc.cycle_no ASC, m.name ASC",
+         ORDER BY cc.cycle_no ASC, m.name COLLATE NOCASE ASC",
     )?;
 
     let rows = stmt.query_map([chit_id], |row| {
@@ -1137,7 +1137,7 @@ pub fn get_chit_closing_info(conn: &Connection, chit_id: i64) -> Result<ClosingI
                SELECT 1 FROM chit_cycle_winners w
                WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
            )
-         ORDER BY m.name ASC",
+         ORDER BY m.name COLLATE NOCASE ASC",
     )?;
     let rows = stmt.query_map([chit_id], |r| {
         Ok(ClosingMember { member_id: r.get(0)?, member_name: r.get(1)? })
@@ -1531,7 +1531,7 @@ pub fn get_cycle_payment_summary(
          FROM chit_members cm
          JOIN members m ON cm.member_id = m.id
          WHERE cm.chit_id = ?1
-         ORDER BY m.name"
+         ORDER BY m.name COLLATE NOCASE"
     )?;
 
     let members: Vec<(i64, String)> = stmt

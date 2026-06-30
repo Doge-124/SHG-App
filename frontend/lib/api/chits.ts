@@ -138,8 +138,8 @@ export async function getChitMembers(chitGroupId: string): Promise<ApiResponse<C
       isWinner: member.is_winner,
       passbookNumber: member.passbook_number ?? null,
       memberType: member.member_type ?? undefined,
-    })).sort((a, b) => new Date(b.joinedAt).getTime() - new Date(a.joinedAt).getTime())
-    
+    })).sort((a, b) => a.memberName.localeCompare(b.memberName, undefined, { sensitivity: 'base' }))
+
     if (frontendChitMembers.length > 0) {
     }
     

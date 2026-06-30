@@ -29,6 +29,7 @@ import { addMember, updateMember, deactivateMember, reactivateMember } from '@/l
 import { formatCurrency, formatPhone } from '@/lib/format'
 import { track } from '@/lib/track'
 import type { Member, MemberFormData, MemberType } from '@/lib/types'
+import { memberHasRole } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 
 const TYPE_META: Record<MemberType, {
@@ -78,7 +79,7 @@ export function MembersByTypeView({ type }: { type: MemberType }) {
   const meta = TYPE_META[type]
 
   const visibleMembers = members
-    .filter((m) => m.memberType === type)
+    .filter((m) => memberHasRole(m.memberType, type))
     .filter((m) => statusFilter === 'all' ? true : m.status === statusFilter)
 
   const handleAddMember = async (data: MemberFormData) => {
