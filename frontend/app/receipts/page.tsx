@@ -19,7 +19,6 @@ import { DataTable, type Column } from '@/components/data-table'
 import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
 import { ReceiptForm } from '@/components/forms/receipt-form'
-import { WeeklyContributionForm } from '@/components/forms/weekly-contribution-form'
 import { getReceipts, createReceipt } from '@/lib/api/ledger'
 import { useSettings } from '@/lib/settings-context'
 import { getReceipts as getReceiptsList } from '@/lib/api/receipts'
@@ -27,7 +26,7 @@ import { generateReceiptPDF, generateMultipleReceiptsPDF } from '@/lib/pdf'
 import { PrintPreview } from '@/components/print-preview'
 import { formatCurrency, formatDateTime } from '@/lib/format'
 import type { Receipt, ReceiptFormData } from '@/lib/types'
-import type { ReceiptWithMember, WeeklyContributionInput } from '@/lib/types/receipts'
+import type { ReceiptWithMember } from '@/lib/types/receipts'
 
 function friendlyReason(referenceType: string | undefined, rawReason: string): string {
   // MEMBER_PAYMENT covers loan repayments, upfront interest, and monthly
@@ -58,7 +57,6 @@ export default function ReceiptsPage() {
   const [receipts, setReceipts] = useState<ReceiptWithMember[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isFormOpen, setIsFormOpen] = useState(false)
-  const [isWeeklyContributionOpen, setIsWeeklyContributionOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'cash' | 'bank'>('all')
   const [printPreview, setPrintPreview] = useState<{
@@ -84,10 +82,6 @@ export default function ReceiptsPage() {
     } finally {
       setIsLoading(false)
     }
-  }
-
-  function handleWeeklyContributionSuccess() {
-    loadReceipts() // Refresh the receipts list
   }
 
   const filteredReceipts = paymentFilter === 'all'
@@ -265,10 +259,6 @@ export default function ReceiptsPage() {
             <Download className="mr-2 h-4 w-4" />
             Print All
           </Button>
-          <Button onClick={() => setIsWeeklyContributionOpen(true)} className="bg-primary hover:bg-primary/90">
-            <Plus className="mr-2 h-4 w-4" />
-            Weekly Contribution
-          </Button>
           <Button onClick={() => setIsFormOpen(true)} className="bg-success hover:bg-success/90 text-success-foreground">
             <Plus className="mr-2 h-4 w-4" />
             Create Receipt
@@ -330,12 +320,6 @@ export default function ReceiptsPage() {
         onOpenChange={setIsFormOpen}
         onSubmit={handleCreateReceipt}
         isLoading={isSubmitting}
-      />
-      
-      <WeeklyContributionForm
-        isOpen={isWeeklyContributionOpen}
-        onClose={() => setIsWeeklyContributionOpen(false)}
-        onSuccess={handleWeeklyContributionSuccess}
       />
       
       <PrintPreview

@@ -331,6 +331,18 @@ export interface AppearanceSettings {
   language: 'english' | 'hindi' | 'tamil'
 }
 
+export interface CloudBackupSettings {
+  enabled: boolean
+  smtpHost: string
+  smtpPort: number
+  username: string
+  appPassword: string
+  fromEmail: string
+  recipient: string
+  frequency: 'daily' | 'weekly' | 'monthly'
+  lastBackupAt?: string | null
+}
+
 export interface AppSettings {
   general: GeneralSettings
   notifications: NotificationSettings
@@ -344,6 +356,45 @@ export interface BackupInfo {
   fileSize: number
   createdAt: string
   type: 'manual' | 'automatic'
+}
+
+// Fixed-asset register
+export interface Asset {
+  id: number
+  name: string
+  category: string
+  purchaseDate: string
+  cost: number
+  supplier?: string | null
+  location?: string | null
+  referenceNo?: string | null
+  note?: string | null
+  fundingMethod: 'CASH' | 'BANK' | 'OPENING'
+  isOpening: boolean
+  status: 'ACTIVE' | 'DISPOSED'
+  disposedAt?: string | null
+  disposalAmount?: number | null
+  disposalMethod?: string | null
+  createdAt: string
+}
+
+export interface NewAssetInput {
+  name: string
+  category: string
+  purchaseDate: string
+  cost: number
+  supplier?: string | null
+  location?: string | null
+  referenceNo?: string | null
+  note?: string | null
+  fundingMethod: 'CASH' | 'BANK' | 'OPENING'
+  bankTxnId?: string | null
+}
+
+export interface AssetSummary {
+  activeCount: number
+  totalCost: number
+  byCategory: { category: string; count: number; cost: number }[]
 }
 
 // API Response Types

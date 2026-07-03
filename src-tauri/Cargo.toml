@@ -40,6 +40,9 @@ sentry = { version = "0.34", default-features = false, features = ["backtrace", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 regex = "1"
+# Blocking SMTP client (rustls, no native OpenSSL needed) for emailing encrypted
+# database backups to the user's own mailbox.
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "rustls-tls", "pool"] }
 
 # Windows-only: silent printing via the shell print verb (ShellExecuteW).
 [target.'cfg(windows)'.dependencies]

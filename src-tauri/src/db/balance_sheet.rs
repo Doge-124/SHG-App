@@ -21,6 +21,8 @@ pub struct BalanceSheet {
     pub cash_in_hand: f64,
     pub cash_at_bank: f64,
     pub loans_to_members: f64,
+    pub fixed_assets: f64,         // fixed-asset register, at cost (active assets)
+    pub chit_advances: f64,        // net amount fronted to chit winners ahead of collections
     pub total_assets: f64,
 
     // ── Liabilities: Member Savings ───────────────────────────────────────
@@ -99,7 +101,19 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
-    let total_assets = cash_in_hand + cash_at_bank + loans_to_members;
+    // ── Fixed assets (register, at cost) as of date ───────────────────────
+    // An asset counts as held on `date` if acquired by then and not yet disposed
+    // by then. This mirrors cash/loans converting into a fixed asset: a cash/bank
+    // purchase reduces cash (ASSET_PURCHASE voucher) and adds here, net zero.
+    let fixed_assets: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost), 0) FROM assets
+         WHERE purchase_date <= ?1
+           AND (status = 'ACTIVE' OR disposed_at > ?1)",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    // total_assets is finalised after the chit position below (an ongoing chit can
+    // be a net asset when the SHG has fronted early winners more than it collected).
 
     // ── Member Savings ────────────────────────────────────────────────────
     // member_transactions type='CONTRIBUTION' = savings paid in.
@@ -142,7 +156,17 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
-    let chit_funds_held = (chit_installments_collected - chit_payouts_disbursed).max(0.0);
+    // Net chit position. Positive = the SHG is holding pooled installments it still
+    // owes the chit (a LIABILITY). Negative = it has paid early winners more than it
+    // has collected, so members' future installments will repay it (an ASSET). We do
+    // NOT clamp: clamping the negative case to zero hid ongoing chits and broke the
+    // Assets = Liabilities + Capital reconciliation.
+    let chit_net = chit_installments_collected - chit_payouts_disbursed;
+    let chit_funds_held = chit_net.max(0.0);      // liability side
+    let chit_advances = (-chit_net).max(0.0);     // asset side (receivable from the chit)
+
+    let total_assets =
+        cash_in_hand + cash_at_bank + loans_to_members + fixed_assets + chit_advances;
 
     // ── Surplus breakdown ─────────────────────────────────────────────────
     // SHG seed (OPENING type in shg_transactions — set via Settings)
@@ -227,8 +251,20 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
+    // Opening assets (already owned before the app) add to the SHG's capital: they
+    // increase fixed_assets with no offsetting cash movement, so mirror their cost
+    // on the income/capital side to keep the sheet balanced. Folded into other_income
+    // so the surplus breakdown still sums to total_income.
+    let opening_asset_capital: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost), 0) FROM assets
+         WHERE is_opening = 1 AND purchase_date <= ?1
+           AND (status = 'ACTIVE' OR disposed_at > ?1)",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
     let pass_through = member_savings_receipts + chit_installments + loan_repayment_receipts;
-    let other_income = (total_receipts - shg_seed - pass_through - chit_commission - donations_grants).max(0.0);
+    let other_income = (total_receipts - shg_seed - pass_through - chit_commission - donations_grants).max(0.0)
+        + opening_asset_capital;
 
     let total_income = shg_seed + interest_earned + chit_commission + donations_grants + other_income;
 
@@ -269,8 +305,30 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
+    // Asset purchases are capital expenditure (cash → fixed asset), NOT an
+    // income-statement expense, so exclude them from other_expenses.
+    let asset_purchase_txn: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
+         WHERE txn_type = 'VOUCHER' AND reference_type = 'ASSET_PURCHASE'
+         AND voided_at IS NULL AND reversal_of_id IS NULL
+         AND created_at <= ?1",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    // When a PURCHASED asset is disposed, its cost leaves the asset side while the
+    // sale proceeds arrive as income. Recognise the written-off cost as a loss so
+    // the net P&L impact is the gain/loss (proceeds − cost). Opening assets need no
+    // such correction — their capital term simply drops when they go inactive.
+    let disposed_asset_cost: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost), 0) FROM assets
+         WHERE status = 'DISPOSED' AND is_opening = 0 AND disposed_at <= ?1",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
     let other_expenses =
-        (total_vouchers - loans_disbursed_txn - chit_payouts_txn - savings_payouts_txn).max(0.0);
+        (total_vouchers - loans_disbursed_txn - chit_payouts_txn - savings_payouts_txn
+            - asset_purchase_txn).max(0.0)
+        + disposed_asset_cost;
 
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:
@@ -290,6 +348,8 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         cash_in_hand,
         cash_at_bank,
         loans_to_members,
+        fixed_assets,
+        chit_advances,
         total_assets,
         member_savings,
         total_members_with_savings,

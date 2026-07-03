@@ -171,7 +171,7 @@ pub fn get_income_expenditure(
          WHERE txn_type = 'VOUCHER'
          AND voided_at IS NULL AND reversal_of_id IS NULL
          AND (reference_type IS NULL OR reference_type NOT IN
-              ('MEMBER_LOAN', 'CHIT_PAYOUT', 'SAVINGS_WITHDRAWAL'))
+              ('MEMBER_LOAN', 'CHIT_PAYOUT', 'SAVINGS_WITHDRAWAL', 'ASSET_PURCHASE'))
          AND created_at >= ?1 AND created_at <= ?2",
         [&from_date, &to_dt],
         |r| r.get(0),

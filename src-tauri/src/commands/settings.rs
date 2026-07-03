@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use crate::state::AppState;
 use crate::db::{self, settings, backup};
 use crate::security::{key, store};
-use crate::types::{GeneralSettings, NotificationSettings, DataSettings, AppearanceSettings};
+use crate::types::{GeneralSettings, NotificationSettings, DataSettings, AppearanceSettings, CloudBackupSettings};
+use crate::cloud_backup;
 
 #[tauri::command]
 pub fn get_general_settings(state: State<Mutex<AppState>>) -> Result<GeneralSettings, String> {
@@ -222,6 +223,95 @@ pub fn change_database_password(
     Err("Database password change not yet implemented".to_string())
 }
 
+// ── Cloud backup (email) ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_cloud_backup_settings(state: State<Mutex<AppState>>) -> Result<CloudBackupSettings, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    settings::get_cloud_backup_settings(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_cloud_backup_settings(
+    state: State<Mutex<AppState>>,
+    settings: CloudBackupSettings,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    // last_backup_at is server-managed; preserve the stored value, ignore client.
+    let existing = crate::db::settings::get_cloud_backup_settings(conn).map_err(|e| e.to_string())?;
+    let mut to_save = settings;
+    to_save.last_backup_at = existing.last_backup_at;
+    crate::db::settings::save_cloud_backup_settings(conn, &to_save).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn send_cloud_test_email(state: State<Mutex<AppState>>) -> Result<(), String> {
+    let cfg = {
+        let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+        let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+        settings::get_cloud_backup_settings(conn).map_err(|e| e.to_string())?
+    };
+    cloud_backup::send_test_email(&cfg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn run_cloud_backup_now(state: State<Mutex<AppState>>) -> Result<String, String> {
+    do_cloud_backup(&state)
+}
+
+/// Runs a cloud backup only if one is due per the configured frequency. Safe to
+/// call on every launch — returns a status string and never errors when not due
+/// or when the DB is locked.
+#[tauri::command]
+pub fn run_cloud_backup_if_due(state: State<Mutex<AppState>>) -> Result<String, String> {
+    let due = {
+        let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+        match guard.db.as_mut() {
+            Some(conn) => match settings::get_cloud_backup_settings(conn) {
+                Ok(cfg) => cloud_backup::is_due(&cfg, chrono::Utc::now()),
+                Err(_) => false,
+            },
+            None => return Ok("locked".to_string()),
+        }
+    };
+    if !due {
+        return Ok("not_due".to_string());
+    }
+    do_cloud_backup(&state)
+}
+
+/// Create a `cloud` backup, email it as an attachment, then stamp last_backup_at.
+/// The (slow) network send happens with the DB lock released.
+fn do_cloud_backup(state: &State<Mutex<AppState>>) -> Result<String, String> {
+    // Phase 1 (locked): read config, create backup file, read its bytes.
+    let (cfg, file_name, bytes) = {
+        let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+        let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+        let cfg = settings::get_cloud_backup_settings(conn).map_err(|e| e.to_string())?;
+        cloud_backup::validate(&cfg).map_err(|e| e.to_string())?;
+        let info = backup::create_backup(conn, "cloud").map_err(|e| e.to_string())?;
+        let path = backup::backup_path(&info.file_name).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read backup file: {e}"))?;
+        (cfg, info.file_name, bytes)
+    };
+
+    // Phase 2 (unlocked): send over the network.
+    cloud_backup::send_backup_email(&cfg, &file_name, bytes).map_err(|e| e.to_string())?;
+
+    // Phase 3 (locked): record success.
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+        if let Some(conn) = guard.db.as_mut() {
+            let _ = settings::update_cloud_backup_timestamp(conn, &now);
+            crate::db::audit::log_audit(conn, "CLOUD_BACKUP", "backup", None, &format!("Emailed {file_name}"));
+        }
+    }
+    Ok(format!("Backup emailed: {file_name}"))
+}
+
 #[tauri::command]
 pub fn create_backup(state: State<Mutex<AppState>>) -> Result<backup::BackupInfo, String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
@@ -296,33 +386,6 @@ pub fn get_backup_list(state: State<Mutex<AppState>>) -> Result<Vec<backup::Back
         .ok_or_else(|| "DB not unlocked".to_string())?;
     
     backup::get_backup_list(conn)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn export_all_data(state: State<Mutex<AppState>>) -> Result<String, String> {
-    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
-    let conn = guard
-        .db
-        .as_mut()
-        .ok_or_else(|| "DB not unlocked".to_string())?;
-    
-    backup::export_all_data(conn)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn import_all_data(
-    state: State<Mutex<AppState>>,
-    json_data: String,
-) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
-    let conn = guard
-        .db
-        .as_mut()
-        .ok_or_else(|| "DB not unlocked".to_string())?;
-    
-    backup::import_all_data(conn, &json_data)
         .map_err(|e| e.to_string())
 }
 

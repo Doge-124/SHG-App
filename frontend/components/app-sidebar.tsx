@@ -22,6 +22,7 @@ import {
   CalendarCheck,
   PiggyBank,
   Coins,
+  Package,
 } from 'lucide-react'
 import {
   Sidebar,
@@ -67,6 +68,7 @@ const mainNavItems = [
   { title: 'Trial Balance',       href: '/trial-balance',       icon: Scale       },
   { title: 'Income & Expenditure', href: '/income-expenditure', icon: TrendingUp  },
   { title: 'Balance Sheet',       href: '/balance-sheet',       icon: PieChart    },
+  { title: 'Asset Ledger',        href: '/assets',              icon: Package     },
 ]
 
 const chitNavItems = [

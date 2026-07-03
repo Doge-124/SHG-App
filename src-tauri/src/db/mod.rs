@@ -44,6 +44,7 @@ pub mod integrity;
 pub mod past_edit;
 pub mod cancel;
 pub mod guarantors;
+pub mod assets;
 
 /// Open or create the encrypted SQLCipher database using a PIN-derived key.
 ///

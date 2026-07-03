@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cloud_backup;
 mod commands;
 mod crash_reporting;
 mod db;
@@ -164,8 +165,16 @@ fn main() {
             commands::settings::create_backup,
             commands::settings::restore_backup,
             commands::settings::get_backup_list,
-            commands::settings::export_all_data,
-            commands::settings::import_all_data,
+            commands::assets::list_assets,
+            commands::assets::get_asset_summary,
+            commands::assets::add_asset,
+            commands::assets::update_asset,
+            commands::assets::dispose_asset,
+            commands::settings::get_cloud_backup_settings,
+            commands::settings::save_cloud_backup_settings,
+            commands::settings::send_cloud_test_email,
+            commands::settings::run_cloud_backup_now,
+            commands::settings::run_cloud_backup_if_due,
             commands::settings::clear_all_data,
             commands::settings::clear_data_keep_members,
             commands::settings::get_past_data_lock_status,

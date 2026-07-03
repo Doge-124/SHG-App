@@ -35,7 +35,19 @@ export default function AuthLayout({ children }: Props) {
     // this install (admin-queued diagnostics, integrity checks). DB is
     // unlocked at this point so commands that need it can run.
     invoke('run_support_inbox').catch(() => {})
+    // Run an automatic cloud backup if one is due per the user's schedule.
+    invoke('run_cloud_backup_if_due').catch(() => {})
   }
+
+  // While the app stays open, re-check whether a scheduled cloud backup is due
+  // (covers long-running sessions that cross a day/week boundary).
+  useEffect(() => {
+    if (mode !== 'app') return
+    const id = setInterval(() => {
+      invoke('run_cloud_backup_if_due').catch(() => {})
+    }, 6 * 60 * 60 * 1000) // every 6 hours
+    return () => clearInterval(id)
+  }, [mode])
 
   if (mode === 'checking') {
     return (

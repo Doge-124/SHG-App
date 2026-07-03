@@ -19,6 +19,8 @@ interface BalanceSheet {
   cash_in_hand: number
   cash_at_bank: number
   loans_to_members: number
+  fixed_assets: number
+  chit_advances: number
   total_assets: number
   member_savings: number
   total_members_with_savings: number
@@ -243,6 +245,14 @@ export default function BalanceSheetPage() {
                 <Row label="Cash in Hand" value={data.cash_in_hand} />
                 <Row label="Cash at Bank" value={data.cash_at_bank} />
                 <Row label="Loans to Members (Outstanding)" value={data.loans_to_members} />
+                {data.fixed_assets > 0 && (
+                  <Row label="Fixed Assets (at cost)" value={data.fixed_assets} />
+                )}
+                {data.chit_advances > 0 && (
+                  <Row label="Chit Advances (receivable)"
+                    note="paid to winners ahead of collections"
+                    value={data.chit_advances} />
+                )}
 
                 <Separator className="my-4" />
                 <Row label="Total Assets" value={data.total_assets} bold />

@@ -6,7 +6,7 @@
 use rusqlite::{Connection, params};
 use serde::{Serialize, Deserialize};
 use crate::error::AppError;
-use crate::types::{GeneralSettings, NotificationSettings, DataSettings, AppearanceSettings};
+use crate::types::{GeneralSettings, NotificationSettings, DataSettings, AppearanceSettings, CloudBackupSettings};
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,7 +33,8 @@ pub fn init_settings_table(conn: &mut Connection) -> Result<(), AppError> {
             shg_opening_bank REAL NOT NULL DEFAULT 0,
             shg_opening_locked INTEGER NOT NULL DEFAULT 0,
             installment_anchor_number INTEGER NOT NULL DEFAULT 0,
-            installment_anchor_date TEXT
+            installment_anchor_date TEXT,
+            cloud_backup_settings TEXT
         )",
         [],
     )?;
@@ -307,6 +308,51 @@ pub fn save_data_settings(conn: &mut Connection, settings: &DataSettings) -> Res
     )?;
 
     Ok(())
+}
+
+// ── Cloud backup (email) settings ──────────────────────────────────────────
+
+/// Read the cloud-backup config. Returns defaults when the column is NULL/absent
+/// (e.g. never configured) so callers always get a usable struct.
+pub fn get_cloud_backup_settings(conn: &Connection) -> Result<CloudBackupSettings, AppError> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT cloud_backup_settings FROM settings WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+
+    match json {
+        Some(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| AppError::database(format!("Failed to parse cloud backup settings: {}", e))),
+        _ => Ok(CloudBackupSettings::default()),
+    }
+}
+
+/// Persist the cloud-backup config. `last_backup_at` is managed by the backend
+/// (see `update_cloud_backup_timestamp`) and preserved here from the incoming
+/// value, so callers should pass the existing timestamp through unchanged.
+pub fn save_cloud_backup_settings(
+    conn: &mut Connection,
+    settings: &CloudBackupSettings,
+) -> Result<(), AppError> {
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| AppError::database(format!("Failed to serialize cloud backup settings: {}", e)))?;
+
+    conn.execute(
+        "UPDATE settings SET cloud_backup_settings = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        params![json],
+    )?;
+    Ok(())
+}
+
+/// Stamp the last successful cloud backup time (RFC3339), leaving all other
+/// fields untouched.
+pub fn update_cloud_backup_timestamp(conn: &mut Connection, when: &str) -> Result<(), AppError> {
+    let mut cfg = get_cloud_backup_settings(conn)?;
+    cfg.last_backup_at = Some(when.to_string());
+    save_cloud_backup_settings(conn, &cfg)
 }
 
 /// Return an error if past data entry is locked. Call this at the top of

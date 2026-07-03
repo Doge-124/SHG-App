@@ -3,10 +3,11 @@ import type {
   AppSettings, 
   GeneralSettings, 
   NotificationSettings, 
-  DataSettings, 
+  DataSettings,
   AppearanceSettings,
+  CloudBackupSettings,
   BackupInfo,
-  ApiResponse 
+  ApiResponse
 } from '@/lib/types'
 
 // General Settings
@@ -69,6 +70,57 @@ export async function saveDataSettings(settings: DataSettings): Promise<ApiRespo
   } catch (error) {
     console.error('Failed to save data settings:', error)
     return { success: false, error: 'Failed to save data settings' }
+  }
+}
+
+// Cloud Backup (Email) Settings
+export async function getCloudBackupSettings(): Promise<ApiResponse<CloudBackupSettings>> {
+  try {
+    const settings = await invoke('get_cloud_backup_settings') as CloudBackupSettings
+    return { success: true, data: settings }
+  } catch (error) {
+    console.error('Failed to get cloud backup settings:', error)
+    return { success: false, error: 'Failed to load cloud backup settings' }
+  }
+}
+
+export async function saveCloudBackupSettings(settings: CloudBackupSettings): Promise<ApiResponse<void>> {
+  try {
+    await invoke('save_cloud_backup_settings', { settings })
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to save cloud backup settings:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to save cloud backup settings' }
+  }
+}
+
+/** Send a test email to verify SMTP credentials. */
+export async function sendCloudTestEmail(): Promise<ApiResponse<void>> {
+  try {
+    await invoke('send_cloud_test_email')
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to send test email' }
+  }
+}
+
+/** Create a backup and email it now. */
+export async function runCloudBackupNow(): Promise<ApiResponse<string>> {
+  try {
+    const status = await invoke('run_cloud_backup_now') as string
+    return { success: true, data: status }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to email backup' }
+  }
+}
+
+/** Run a cloud backup only if one is due (safe to call on launch). */
+export async function runCloudBackupIfDue(): Promise<ApiResponse<string>> {
+  try {
+    const status = await invoke('run_cloud_backup_if_due') as string
+    return { success: true, data: status }
+  } catch (error) {
+    return { success: false, error: typeof error === 'string' ? error : 'Cloud backup check failed' }
   }
 }
 
@@ -157,27 +209,6 @@ export async function getBackupList(): Promise<ApiResponse<BackupInfo[]>> {
   } catch (error) {
     console.error('Failed to get backup list:', error)
     return { success: false, error: 'Failed to get backup list' }
-  }
-}
-
-// Data Export/Import
-export async function exportAllData(): Promise<ApiResponse<string>> {
-  try {
-    const exportData = await invoke('export_all_data') as string
-    return { success: true, data: exportData }
-  } catch (error) {
-    console.error('Failed to export data:', error)
-    return { success: false, error: 'Failed to export data' }
-  }
-}
-
-export async function importAllData(jsonData: string): Promise<ApiResponse<void>> {
-  try {
-    await invoke('import_all_data', { jsonData })
-    return { success: true }
-  } catch (error) {
-    console.error('Failed to import data:', error)
-    return { success: false, error: 'Failed to import data' }
   }
 }
 

@@ -161,6 +161,29 @@ CREATE TABLE IF NOT EXISTS loan_payments (
     FOREIGN KEY (member_id) REFERENCES members(id)
 );
 
+-- Fixed-asset register (office, computer, furniture, etc.). funding_method
+-- 'OPENING' = already owned before using the app (no cash movement). Purchases
+-- (CASH/BANK) create an ASSET_PURCHASE voucher recorded in voucher_ref_id.
+CREATE TABLE IF NOT EXISTS assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'Other',
+    purchase_date TEXT NOT NULL,
+    cost REAL NOT NULL,
+    supplier TEXT,
+    location TEXT,
+    reference_no TEXT,
+    note TEXT,
+    funding_method TEXT NOT NULL DEFAULT 'OPENING' CHECK (funding_method IN ('CASH','BANK','OPENING')),
+    is_opening INTEGER NOT NULL DEFAULT 0,
+    voucher_ref_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','DISPOSED')),
+    disposed_at TEXT,
+    disposal_amount REAL,
+    disposal_method TEXT,
+    created_at TEXT NOT NULL
+);
+
 -- Indexes to support common access patterns
 -- Fast lookup of a member by their code (login / search).
 CREATE INDEX IF NOT EXISTS idx_member_code ON members(member_code);
@@ -321,6 +344,8 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         // per week without any scheduled job. 0 = not configured.
         add_column_if_missing(&tx, "settings", "installment_anchor_number", "INTEGER NOT NULL DEFAULT 0")?;
         add_column_if_missing(&tx, "settings", "installment_anchor_date", "TEXT")?;
+        // Automatic cloud backup (email) config — JSON blob, NULL until set up.
+        add_column_if_missing(&tx, "settings", "cloud_backup_settings", "TEXT")?;
     }
 
     // 9) Daily interest rate and upfront interest for new loan logic.
@@ -542,6 +567,32 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
             UNIQUE (scope, ref_id, slot)
         );
         CREATE INDEX IF NOT EXISTS idx_guarantors_ref ON guarantors(scope, ref_id);
+        "#,
+    )?;
+
+    // Fixed-asset register (see SCHEMA_SQL for column docs).
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'Other',
+            purchase_date TEXT NOT NULL,
+            cost REAL NOT NULL,
+            supplier TEXT,
+            location TEXT,
+            reference_no TEXT,
+            note TEXT,
+            funding_method TEXT NOT NULL DEFAULT 'OPENING' CHECK (funding_method IN ('CASH','BANK','OPENING')),
+            is_opening INTEGER NOT NULL DEFAULT 0,
+            voucher_ref_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','DISPOSED')),
+            disposed_at TEXT,
+            disposal_amount REAL,
+            disposal_method TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
         "#,
     )?;
 

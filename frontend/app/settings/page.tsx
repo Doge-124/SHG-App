@@ -39,8 +39,6 @@ import {
   saveAllSettings,
   createBackup,
   restoreBackup,
-  exportAllData,
-  importAllData,
   clearAllData,
   clearDataKeepMembers,
   changeDatabasePassword,
@@ -49,11 +47,27 @@ import {
   getPastDataLockStatus,
   lockPastDataEntry,
   unlockPastDataEntry,
+  getCloudBackupSettings,
+  saveCloudBackupSettings,
+  sendCloudTestEmail,
+  runCloudBackupNow,
 } from '@/lib/api/settings'
 import { useAppearance } from '@/lib/appearance-context'
 import { useSettings } from '@/lib/settings-context'
 import { isAutoPrintEnabled, setAutoPrintEnabled, isSilentPrintEnabled, setSilentPrintEnabled } from '@/lib/auto-print'
-import type { AppSettings, BackupInfo } from '@/lib/types'
+import type { AppSettings, BackupInfo, CloudBackupSettings } from '@/lib/types'
+
+const DEFAULT_CLOUD_BACKUP: CloudBackupSettings = {
+  enabled: false,
+  smtpHost: 'smtp.gmail.com',
+  smtpPort: 587,
+  username: '',
+  appPassword: '',
+  fromEmail: '',
+  recipient: '',
+  frequency: 'daily',
+  lastBackupAt: null,
+}
 
 export default function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false)
@@ -93,6 +107,10 @@ export default function SettingsPage() {
   const [isTogglingLock, setIsTogglingLock] = useState(false)
   const [autoPrintDocs, setAutoPrintDocs] = useState(false)
   const [silentPrint, setSilentPrint] = useState(false)
+  const [cloud, setCloud] = useState<CloudBackupSettings>(DEFAULT_CLOUD_BACKUP)
+  const [isSavingCloud, setIsSavingCloud] = useState(false)
+  const [isTestingEmail, setIsTestingEmail] = useState(false)
+  const [isCloudBackingUp, setIsCloudBackingUp] = useState(false)
 
   const { settings: globalSettings, updateSettings, refreshSettings, pastDataLocked: globalLocked, refreshPastDataLock } = useSettings()
   const appearance = useAppearance()
@@ -165,6 +183,56 @@ export default function SettingsPage() {
     setAutoPrintDocs(isAutoPrintEnabled())
     setSilentPrint(isSilentPrintEnabled())
   }, [])
+
+  // Load cloud-backup (email) settings from the encrypted DB on mount.
+  useEffect(() => {
+    getCloudBackupSettings().then((r) => {
+      if (r.success && r.data) setCloud({ ...DEFAULT_CLOUD_BACKUP, ...r.data })
+    })
+  }, [])
+
+  const handleSaveCloudBackup = async () => {
+    setIsSavingCloud(true)
+    try {
+      const res = await saveCloudBackupSettings(cloud)
+      if (res.success) toast.success('Cloud backup settings saved')
+      else toast.error(res.error || 'Failed to save')
+    } finally {
+      setIsSavingCloud(false)
+    }
+  }
+
+  const handleTestEmail = async () => {
+    setIsTestingEmail(true)
+    try {
+      // Persist first so the test uses exactly what's on screen.
+      const saved = await saveCloudBackupSettings(cloud)
+      if (!saved.success) { toast.error(saved.error || 'Failed to save settings'); return }
+      const res = await sendCloudTestEmail()
+      if (res.success) toast.success('Test email sent — check the recipient inbox')
+      else toast.error(res.error || 'Failed to send test email')
+    } finally {
+      setIsTestingEmail(false)
+    }
+  }
+
+  const handleCloudBackupNow = async () => {
+    setIsCloudBackingUp(true)
+    try {
+      const saved = await saveCloudBackupSettings(cloud)
+      if (!saved.success) { toast.error(saved.error || 'Failed to save settings'); return }
+      const res = await runCloudBackupNow()
+      if (res.success) {
+        toast.success('Backup emailed successfully')
+        const r = await getCloudBackupSettings()
+        if (r.success && r.data) setCloud({ ...DEFAULT_CLOUD_BACKUP, ...r.data })
+      } else {
+        toast.error(res.error || 'Failed to email backup')
+      }
+    } finally {
+      setIsCloudBackingUp(false)
+    }
+  }
 
   const handleToggleAutoPrint = (checked: boolean) => {
     setAutoPrintEnabled(checked)
@@ -332,72 +400,6 @@ export default function SettingsPage() {
       console.error('Failed to create backup:', error)
       toast.error('An error occurred while creating backup')
     }
-  }
-
-  const handleExport = async () => {
-    if (!confirm(
-      'The exported file will contain all your SHG data in plain text (JSON) format and is NOT encrypted.\n\n' +
-      'Store it in a secure location. Do you want to continue?'
-    )) return
-
-    try {
-      const response = await exportAllData()
-      if (response.success && response.data) {
-        const blob = new Blob([response.data], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `shg-export-${new Date().toISOString().split('T')[0]}.json`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-        toast.success('Data exported successfully — keep the file secure')
-      } else {
-        toast.error(response.error || 'Failed to export data')
-      }
-    } catch (error) {
-      console.error('Failed to export data:', error)
-      toast.error('An error occurred while exporting data')
-    }
-  }
-
-  const handleImport = async () => {
-    // Create a file input element
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.json'
-    
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0]
-      if (!file) return
-      
-      if (confirm('Are you sure you want to import this data? This will replace all current data with the imported data. This action cannot be undone.')) {
-        try {
-          const reader = new FileReader()
-          reader.onload = async (event) => {
-            const jsonData = event.target?.result as string
-            if (!jsonData) {
-              toast.error('Failed to read file')
-              return
-            }
-            
-            const response = await importAllData(jsonData)
-            if (response.success) {
-              toast.success('Data imported successfully. Please refresh the page.')
-            } else {
-              toast.error(response.error || 'Failed to import data')
-            }
-          }
-          reader.readAsText(file)
-        } catch (error) {
-          console.error('Failed to import data:', error)
-          toast.error('An error occurred while importing data')
-        }
-      }
-    }
-    
-    input.click()
   }
 
   const handleClearData = (mode: 'all' | 'keep' = 'all') => {
@@ -961,6 +963,118 @@ export default function SettingsPage() {
 
               <Separator />
 
+              {/* Automatic Cloud Backup (Email) */}
+              <div className="space-y-4 rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label className="flex items-center gap-2">
+                      <Database className="h-4 w-4" />
+                      Automatic Cloud Backup (Email)
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      Email an encrypted backup to yourself on a schedule using your own
+                      email account.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={cloud.enabled}
+                    onCheckedChange={(checked) => setCloud((c) => ({ ...c, enabled: checked }))}
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="smtpHost">SMTP Host</Label>
+                    <Input
+                      id="smtpHost"
+                      value={cloud.smtpHost}
+                      placeholder="smtp.gmail.com"
+                      onChange={(e) => setCloud((c) => ({ ...c, smtpHost: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="smtpPort">SMTP Port</Label>
+                    <Input
+                      id="smtpPort"
+                      type="number"
+                      value={cloud.smtpPort === 0 ? '' : cloud.smtpPort}
+                      placeholder="587"
+                      onChange={(e) => setCloud((c) => ({ ...c, smtpPort: parseInt(e.target.value) || 0 }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="smtpUser">Sender Email</Label>
+                    <Input
+                      id="smtpUser"
+                      type="email"
+                      value={cloud.username}
+                      placeholder="you@gmail.com"
+                      onChange={(e) => setCloud((c) => ({ ...c, username: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="smtpPass">App Password</Label>
+                    <Input
+                      id="smtpPass"
+                      type="password"
+                      value={cloud.appPassword}
+                      placeholder="App password (not your login password)"
+                      onChange={(e) => setCloud((c) => ({ ...c, appPassword: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="cloudRecipient">Send Backup To</Label>
+                    <Input
+                      id="cloudRecipient"
+                      type="email"
+                      value={cloud.recipient}
+                      placeholder={cloud.username || 'recipient@example.com'}
+                      onChange={(e) => setCloud((c) => ({ ...c, recipient: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="cloudFrequency">Frequency</Label>
+                    <select
+                      id="cloudFrequency"
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      value={cloud.frequency}
+                      onChange={(e) => setCloud((c) => ({ ...c, frequency: e.target.value as CloudBackupSettings['frequency'] }))}
+                    >
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  For Gmail, enable 2-Step Verification and create an{' '}
+                  <span className="font-medium">App Password</span> — use that here, not your
+                  normal password. The emailed database is encrypted; restoring it needs this
+                  app and your PIN. Last cloud backup:{' '}
+                  <span className="font-medium">
+                    {cloud.lastBackupAt ? new Date(cloud.lastBackupAt).toLocaleString() : 'never'}
+                  </span>
+                </p>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={handleSaveCloudBackup} disabled={isSavingCloud}>
+                    {isSavingCloud ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
+                    Save
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleTestEmail} disabled={isTestingEmail}>
+                    {isTestingEmail ? <Spinner className="mr-2 h-4 w-4" /> : <Bell className="mr-2 h-4 w-4" />}
+                    Send test email
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleCloudBackupNow} disabled={isCloudBackingUp}>
+                    {isCloudBackingUp ? <Spinner className="mr-2 h-4 w-4" /> : <Database className="mr-2 h-4 w-4" />}
+                    Back up &amp; email now
+                  </Button>
+                </div>
+              </div>
+
+              <Separator />
+
               {/* SHG Opening Balance */}
               <div className={`p-4 rounded-lg border ${shgOpeningLocked ? 'border-green-500 bg-green-50 dark:bg-green-950/20' : 'border-blue-400 bg-blue-50 dark:bg-blue-950/20'}`}>
                 <div className="space-y-3">
@@ -1065,14 +1179,6 @@ export default function SettingsPage() {
                   These actions are irreversible. Please be careful.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" onClick={handleExport}>
-                    <Database className="mr-2 h-4 w-4" />
-                    Export Data
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={handleImport}>
-                    <Database className="mr-2 h-4 w-4" />
-                    Import Data
-                  </Button>
                   <Button variant="outline" size="sm" className="border-amber-400 text-amber-700 hover:bg-amber-50" onClick={() => handleClearData('keep')}>
                     <Users className="mr-2 h-4 w-4" />
                     Clear Data (Keep Members)

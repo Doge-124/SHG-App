@@ -16,3 +16,4 @@ pub mod support_inbox;
 pub mod past_edit;
 pub mod printing;
 pub mod guarantors;
+pub mod assets;
