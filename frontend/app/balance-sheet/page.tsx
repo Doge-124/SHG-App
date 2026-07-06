@@ -25,6 +25,7 @@ interface BalanceSheet {
   member_savings: number
   total_members_with_savings: number
   chit_funds_held: number
+  chit_installments_receivable: number
   surplus: number
   shg_seed: number
   interest_earned: number
@@ -193,7 +194,7 @@ export default function BalanceSheetPage() {
 
                 {data.chit_funds_held > 0 && (
                   <Row
-                    label="Chit Funds Held"
+                    label="Chit funds to pay out (held for winners)"
                     note="installments collected, not yet paid out"
                     value={data.chit_funds_held}
                   />
@@ -249,13 +250,18 @@ export default function BalanceSheetPage() {
                   <Row label="Fixed Assets (at cost)" value={data.fixed_assets} />
                 )}
                 {data.chit_advances > 0 && (
-                  <Row label="Chit Advances (receivable)"
+                  <Row label="Chit installments to receive"
                     note="paid to winners ahead of collections"
                     value={data.chit_advances} />
                 )}
-
                 <Separator className="my-4" />
                 <Row label="Total Assets" value={data.total_assets} bold />
+                {data.chit_installments_receivable > 0 && (
+                  <Row label="Chit installments receivable (arrears)"
+                    note="memo — already reflected in the net chit position above"
+                    value={data.chit_installments_receivable}
+                    muted />
+                )}
 
                 {/* Mini breakdown */}
                 <Separator className="my-4" />

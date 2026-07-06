@@ -230,15 +230,20 @@ export interface PrepayResult {
   newPaidThrough: string   // YYYY-MM-DD
 }
 
-/** Preview a one-month interest prepayment (clears arrears + 30 days ahead). */
+/**
+ * Preview a one-month interest prepayment.
+ * `includeAccrued` true → settle accrued arrears + 30 days ahead; false → flat 30 days only.
+ */
 export async function previewPrepayInterest(
   loanId: string,
+  includeAccrued: boolean,
   paidAt: string = new Date().toISOString(),
 ): Promise<ApiResponse<PrepayResult>> {
   try {
     const data = await invoke<PrepayResult>('preview_prepay_interest', {
       loanId: parseInt(loanId),
       paidAt,
+      includeAccrued,
     })
     return { success: true, data }
   } catch (error) {
@@ -249,7 +254,7 @@ export async function previewPrepayInterest(
 /** Record a one-month interest prepayment. */
 export async function prepayLoanInterest(
   loanId: string,
-  opts: { paymentMethod: string; cashAmount?: number | null; bankAmount?: number | null; bankTxnId?: string | null },
+  opts: { paymentMethod: string; includeAccrued: boolean; cashAmount?: number | null; bankAmount?: number | null; bankTxnId?: string | null },
 ): Promise<ApiResponse<PrepayResult>> {
   try {
     const data = await withAutoPrint(() => invoke<PrepayResult>('prepay_loan_interest', {
@@ -259,6 +264,7 @@ export async function prepayLoanInterest(
       cashAmount: opts.cashAmount ?? null,
       bankAmount: opts.bankAmount ?? null,
       bankTxnId: opts.bankTxnId ?? null,
+      includeAccrued: opts.includeAccrued,
     }))
     return { success: true, data }
   } catch (error) {

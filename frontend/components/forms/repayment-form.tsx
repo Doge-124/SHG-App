@@ -62,6 +62,8 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
   // Prepay state
   const [prepay, setPrepay] = useState<PrepayResult | null>(null)
   const [prepayBusy, setPrepayBusy] = useState(false)
+  // false → pay a flat 30 days only; true → also settle accrued interest to date.
+  const [includeAccrued, setIncludeAccrued] = useState(false)
 
   const form = useForm<{ amount: number }>({
     resolver: zodResolver(repaymentSchema),
@@ -90,6 +92,7 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
     setSplit(emptyPaymentSplit)
     setMode('repay')
     setPrepay(null)
+    setIncludeAccrued(false)
     ;(async () => {
       const r = await previewRepayment(loan.id, 0.01)
       const seed = r.success && r.data
@@ -99,16 +102,17 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
     })()
   }, [open, loan?.id])
 
-  // When switching to prepay mode, fetch the previewed prepayment.
+  // When switching to prepay mode (or toggling the accrued option), fetch the
+  // previewed prepayment for the chosen mode.
   useEffect(() => {
     if (mode !== 'prepay' || !loan) return
     setSplit(emptyPaymentSplit)
     ;(async () => {
-      const r = await previewPrepayInterest(loan.id)
+      const r = await previewPrepayInterest(loan.id, includeAccrued)
       if (r.success && r.data) { setPrepay(r.data); setPreviewError(null) }
       else { setPrepay(null); setPreviewError(r.error ?? 'Could not compute prepayment') }
     })()
-  }, [mode, loan?.id])
+  }, [mode, loan?.id, includeAccrued])
 
   const handleSubmit = async (data: { amount: number }) => {
     if (!loan) return
@@ -137,6 +141,7 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
       const args = paymentInvokeArgs(split)
       const r = await prepayLoanInterest(loan.id, {
         paymentMethod: args.paymentMethod,
+        includeAccrued,
         cashAmount: args.cashAmount,
         bankAmount: args.bankAmount,
         bankTxnId: args.bankTxnId,
@@ -208,6 +213,26 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
 
         {mode === 'prepay' ? (
           <div className="space-y-4">
+            {/* Choose whether to also settle accrued interest — only matters when
+                some has actually built up. */}
+            {prepay && prepay.arrearsCleared > 0.005 && (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  {formatCurrency(prepay.arrearsCleared)} of interest has accrued so far. What should this cover?
+                </p>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant={!includeAccrued ? 'default' : 'outline'}
+                    className="flex-1" onClick={() => setIncludeAccrued(false)}>
+                    30 days only
+                  </Button>
+                  <Button type="button" size="sm" variant={includeAccrued ? 'default' : 'outline'}
+                    className="flex-1" onClick={() => setIncludeAccrued(true)}>
+                    Accrued + 30 days
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {!prepay ? (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Spinner className="h-3 w-3" /> Calculating…
@@ -215,13 +240,15 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
             ) : (
               <div className="rounded-lg border p-3 space-y-1.5 text-sm">
                 {prepay.arrearsCleared > 0.005 && (
-                  <div className="flex justify-between text-orange-600">
-                    <span>Interest accrued so far</span>
-                    <span className="font-semibold">{formatCurrency(prepay.arrearsCleared)}</span>
+                  <div className={`flex justify-between ${includeAccrued ? 'text-orange-600' : 'text-muted-foreground'}`}>
+                    <span>Interest accrued so far{includeAccrued ? '' : ' (stays owed)'}</span>
+                    <span className={includeAccrued ? 'font-semibold' : 'line-through'}>
+                      {formatCurrency(prepay.arrearsCleared)}
+                    </span>
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">+ 30 days interest (advance)</span>
+                  <span className="text-muted-foreground">30 days interest (advance)</span>
                   <span className="font-medium">{formatCurrency(prepay.monthInterest)}</span>
                 </div>
                 <Separator />
@@ -234,7 +261,9 @@ export function RepaymentForm({ open, onOpenChange, onSubmit, loan, isLoading = 
                   <span className="font-medium">{formatDate(prepay.newPaidThrough)}</span>
                 </div>
                 <p className="text-[11px] text-muted-foreground pt-1">
-                  No further interest accrues until that date. Principal is unchanged.
+                  {includeAccrued
+                    ? 'Accrued interest is settled and the next 30 days prepaid. Principal is unchanged.'
+                    : 'A flat 30 days of interest is paid; any accrued interest stays owed. Principal is unchanged.'}
                 </p>
               </div>
             )}

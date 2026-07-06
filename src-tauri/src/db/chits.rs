@@ -879,6 +879,37 @@ pub fn get_chit_pending_dues(
     Ok(out)
 }
 
+/// Total chit installments still receivable (arrears) across all LIVE (non-past)
+/// drawn regular cycles — the SHG's "amount still to be received" from members.
+/// Uses the same per-installment due formula as `get_chit_pending_dues`
+/// (monthly contribution reduced by the previous cycle's carried-forward auction
+/// discount). Past-data cycles are excluded so this stays consistent with the
+/// balance sheet's live-only chit position.
+pub fn get_total_chit_receivable(conn: &Connection) -> Result<f64, AppError> {
+    let total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                        MAX(cg.monthly_contribution - COALESCE(
+                            (SELECT prev.auction_discount_per_member FROM chit_cycles prev
+                             WHERE prev.chit_id = cc.chit_id AND prev.cycle_no = cc.cycle_no - 1), 0), 0)
+                     ), 0)
+             FROM chit_cycles cc
+             JOIN chit_groups cg ON cg.id = cc.chit_id
+             JOIN chit_members cm ON cm.chit_id = cc.chit_id
+             WHERE cc.winning_member_id IS NOT NULL
+               AND cc.cycle_no <= cg.months
+               AND COALESCE(cc.is_past_entry, 0) = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM chit_payments cp
+                   WHERE cp.cycle_id = cc.id AND cp.member_id = cm.member_id
+               )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+    Ok(total)
+}
+
 /// One line of a member's detailed chit ledger.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

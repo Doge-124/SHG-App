@@ -320,6 +320,7 @@ pub fn prepay_loan_interest(
     cash_amount: Option<f64>,
     bank_amount: Option<f64>,
     bank_txn_id: Option<String>,
+    include_accrued: bool,
 ) -> Result<PrepayResult, String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
@@ -332,6 +333,7 @@ pub fn prepay_loan_interest(
         cash_amount,
         bank_amount,
         bank_txn_id.as_deref(),
+        include_accrued,
     ).map_err(|e: AppError| e.to_string())?;
 
     db::audit::log_audit(conn, "LOAN_INTEREST_PREPAID", "loan", Some(loan_id),
@@ -353,6 +355,7 @@ pub fn preview_prepay_interest(
     state: State<Mutex<AppState>>,
     loan_id: i64,
     paid_at: String,
+    include_accrued: bool,
 ) -> Result<PrepayResult, String> {
     let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
@@ -365,7 +368,7 @@ pub fn preview_prepay_interest(
     };
 
     let (arrears, month_interest, total, new_through) =
-        db::loans::preview_prepay_interest(conn, loan_id, paid_date)
+        db::loans::preview_prepay_interest(conn, loan_id, paid_date, include_accrued)
             .map_err(|e: AppError| e.to_string())?;
 
     Ok(PrepayResult {

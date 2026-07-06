@@ -710,6 +710,9 @@ pub fn prepay_loan_interest(
     cash_amount: Option<f64>,
     bank_amount: Option<f64>,
     bank_txn_id: Option<&str>,
+    // true  → settle accrued interest to date AND prepay 30 more days (old behaviour).
+    // false → pay only a flat 30 days; any accrued arrears stay owed.
+    include_accrued: bool,
 ) -> Result<PrepayResult, AppError> {
     let paid_date = parse_iso_date(created_at)
         .ok_or_else(|| AppError::validation("Invalid created_at date"))?;
@@ -742,7 +745,17 @@ pub fn prepay_loan_interest(
     // One flat month of interest on the outstanding principal.
     let month_interest = (outstanding * daily_rate / 100.0 * 30.0 * 100.0).round() / 100.0;
 
-    let total = ((arrears + month_interest) * 100.0).round() / 100.0;
+    // Two modes:
+    //  - include_accrued: settle everything accrued to today, then add 30 days beyond
+    //    today (paid-through = later of today/floor + 30); arrears are cleared.
+    //  - 30-days-only: advance the settled-through date by exactly 30 days from the
+    //    current floor and charge just one flat month; accrued arrears stay owed.
+    let (total, new_paid_through) = if include_accrued {
+        let t = ((arrears + month_interest) * 100.0).round() / 100.0;
+        (t, paid_date.max(floor) + chrono::Duration::days(30))
+    } else {
+        (month_interest, floor + chrono::Duration::days(30))
+    };
     validation::validate_money_amount(total)?;
 
     // Validate the cash/bank split if MIXED.
@@ -764,18 +777,23 @@ pub fn prepay_loan_interest(
         _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
     };
 
-    // New paid-through: 30 days past the later of today and the current floor.
-    // (If they're already prepaid into the future, this stacks another month on.)
-    let base = paid_date.max(floor);
-    let new_paid_through = base + chrono::Duration::days(30);
-
-    // Arrears are now settled and the future month is prepaid → no carry-over.
-    tx.execute(
-        "UPDATE loans
-         SET unpaid_interest_balance = 0, interest_paid_through = ?1
-         WHERE id = ?2",
-        (new_paid_through.to_string(), loan_id),
-    )?;
+    // Advance the paid-through marker. In the accrued mode arrears are settled so the
+    // carry-over clears; in the 30-days-only mode any accrued arrears stay owed.
+    if include_accrued {
+        tx.execute(
+            "UPDATE loans
+             SET unpaid_interest_balance = 0, interest_paid_through = ?1
+             WHERE id = ?2",
+            (new_paid_through.to_string(), loan_id),
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE loans
+             SET interest_paid_through = ?1
+             WHERE id = ?2",
+            (new_paid_through.to_string(), loan_id),
+        )?;
+    }
 
     let note = "Interest Payment";
     tx.execute(
@@ -815,7 +833,7 @@ pub fn prepay_loan_interest(
     tx.commit()?;
 
     Ok(PrepayResult {
-        arrears_cleared: arrears,
+        arrears_cleared: if include_accrued { arrears } else { 0.0 },
         month_interest,
         total_paid: total,
         new_paid_through: new_paid_through.to_string(),
@@ -824,10 +842,12 @@ pub fn prepay_loan_interest(
 
 /// Preview a one-month interest prepayment. Returns
 /// (arrears, month_interest, total, new_paid_through). Read-only.
+/// `include_accrued` mirrors `prepay_loan_interest`.
 pub fn preview_prepay_interest(
     conn: &Connection,
     loan_id: i64,
     as_of: chrono::NaiveDate,
+    include_accrued: bool,
 ) -> Result<(f64, f64, f64, String), AppError> {
     let (outstanding, unpaid_balance, daily_rate, issued_at_str, loan_type, status, paid_through):
         (f64, f64, f64, String, String, String, Option<String>) =
@@ -849,9 +869,12 @@ pub fn preview_prepay_interest(
 
     let arrears = interest_due_for(outstanding, unpaid_balance, daily_rate, floor, as_of);
     let month_interest = (outstanding * daily_rate / 100.0 * 30.0 * 100.0).round() / 100.0;
-    let total = ((arrears + month_interest) * 100.0).round() / 100.0;
-    let base = as_of.max(floor);
-    let new_through = (base + chrono::Duration::days(30)).to_string();
+    let (total, new_through) = if include_accrued {
+        let t = ((arrears + month_interest) * 100.0).round() / 100.0;
+        (t, (as_of.max(floor) + chrono::Duration::days(30)).to_string())
+    } else {
+        (month_interest, (floor + chrono::Duration::days(30)).to_string())
+    };
 
     Ok((arrears, month_interest, total, new_through))
 }

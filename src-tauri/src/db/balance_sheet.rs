@@ -37,6 +37,11 @@ pub struct BalanceSheet {
     // has been recognised as income.
     pub chit_funds_held: f64,
 
+    // Memo (informational, NOT added into totals — the net chit position above
+    // already captures it): gross installments still owed by members for live
+    // drawn cycles ("amount to be received").
+    pub chit_installments_receivable: f64,
+
     // ── Capital: SHG Surplus (= Total Assets − Member Savings) ───────────
     pub surplus: f64,
 
@@ -167,6 +172,11 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
 
     let total_assets =
         cash_in_hand + cash_at_bank + loans_to_members + fixed_assets + chit_advances;
+
+    // Gross arrears (memo only — do NOT add to total_assets; the net chit position
+    // above already reflects it): installments members still owe for live drawn cycles.
+    let chit_installments_receivable =
+        crate::db::chits::get_total_chit_receivable(conn).unwrap_or(0.0);
 
     // ── Surplus breakdown ─────────────────────────────────────────────────
     // SHG seed (OPENING type in shg_transactions — set via Settings)
@@ -354,6 +364,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         member_savings,
         total_members_with_savings,
         chit_funds_held,
+        chit_installments_receivable,
         surplus: surplus_derived,
         shg_seed,
         interest_earned,
