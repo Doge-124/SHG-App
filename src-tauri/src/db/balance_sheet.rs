@@ -42,6 +42,10 @@ pub struct BalanceSheet {
     // drawn cycles ("amount to be received").
     pub chit_installments_receivable: f64,
 
+    // Memo (informational): estimated prize money still to be paid to members of
+    // active chits who have not won yet ("money owed to people yet to win").
+    pub chit_rewards_payable: f64,
+
     // ── Capital: SHG Surplus (= Total Assets − Member Savings) ───────────
     pub surplus: f64,
 
@@ -57,6 +61,49 @@ pub struct BalanceSheet {
     // ── Verification ──────────────────────────────────────────────────────
     pub total_liabilities_capital: f64,
     pub is_balanced: bool,         // total_assets == total_liabilities_capital
+
+    // Component-level reconciliation breakdown (diagnostic).
+    pub recon: ReconDebug,
+}
+
+/// Every raw figure that feeds the two-way surplus reconciliation, so an
+/// imbalance can be traced to the exact component. Surfaced in the UI when the
+/// sheet doesn't reconcile.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconDebug {
+    pub cash_in_hand: f64,
+    pub cash_at_bank: f64,
+    pub loans_to_members: f64,
+    pub past_loans_capital: f64,
+    pub fixed_assets: f64,
+    pub chit_advances: f64,
+    pub total_assets: f64,
+    pub member_savings: f64,
+    pub member_savings_receipts: f64,
+    pub loan_repayment_receipts: f64,
+    pub chit_installments_receipts: f64,     // CHIT_PAYMENT shg receipts (cash in)
+    pub chit_installments_collected: f64,    // chit_payments table (live cycles) — should match
+    pub savings_payouts_txn: f64,
+    pub opening_member_liability: f64,
+    pub chit_funds_held: f64,
+    pub shg_seed_raw: f64,
+    pub shg_capital: f64,
+    pub interest_earned: f64,
+    pub chit_commission: f64,
+    pub donations_grants: f64,
+    pub opening_asset_capital: f64,
+    pub other_income: f64,
+    pub total_income: f64,
+    pub total_vouchers: f64,
+    pub loans_disbursed_txn: f64,
+    pub chit_payouts_txn: f64,
+    pub asset_purchase_txn: f64,
+    pub disposed_asset_cost: f64,
+    pub other_expenses: f64,
+    pub total_receipts: f64,
+    pub surplus_derived: f64,
+    pub surplus_independent: f64,
 }
 
 /// Compute the balance sheet as of a given date (ISO "YYYY-MM-DD").
@@ -103,6 +150,31 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
              WHERE l.issued_at <= ?1
          ) sub
          WHERE outstanding > 0.005",
+        [&date_end], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    // ORIGINAL principal of PAST-DATA (reference-only) loans. These loans were
+    // disbursed before the app, so the cash going out never hit the SHG ledger — it
+    // is baked into the opening seed. The full original principal is therefore part
+    // of the SHG's opening net worth (an opening receivable), and must be added to
+    // opening capital on the income side to keep the two-way reconciliation intact.
+    // We use the OPENING receivable — original principal minus any principal that was
+    // already repaid via reference-data (is_past_entry) payments before the app — not
+    // the current outstanding. As the past loan is repaid LIVE the receivable simply
+    // converts to cash (net worth unchanged), so this must stay constant; the live
+    // interest is recognised separately as income. Using the current outstanding would
+    // drop the capital as it's repaid while the recovered cash stays in assets.
+    let past_loans_capital: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(l.amount), 0)
+                - COALESCE((
+                    SELECT SUM(lp.principal_amount) FROM loan_payments lp
+                    JOIN loans l2 ON l2.id = lp.loan_id
+                    WHERE COALESCE(l2.is_past_entry, 0) = 1
+                      AND COALESCE(lp.is_past_entry, 0) = 1
+                      AND lp.created_at <= ?1
+                ), 0)
+         FROM loans l
+         WHERE l.issued_at <= ?1 AND COALESCE(l.is_past_entry, 0) = 1",
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -177,6 +249,8 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // above already reflects it): installments members still owe for live drawn cycles.
     let chit_installments_receivable =
         crate::db::chits::get_total_chit_receivable(conn).unwrap_or(0.0);
+    let chit_rewards_payable =
+        crate::db::chits::get_total_chit_rewards_payable(conn).unwrap_or(0.0);
 
     // ── Surplus breakdown ─────────────────────────────────────────────────
     // SHG seed (OPENING type in shg_transactions — set via Settings)
@@ -276,8 +350,6 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let other_income = (total_receipts - shg_seed - pass_through - chit_commission - donations_grants).max(0.0)
         + opening_asset_capital;
 
-    let total_income = shg_seed + interest_earned + chit_commission + donations_grants + other_income;
-
     // Other expenses = all vouchers that are genuine expenses — NOT loan
     // disbursements, chit payouts, or savings payouts. A savings payout
     // (SAVINGS_WITHDRAWAL) returns a member their own savings: it reduces both
@@ -340,6 +412,20 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
             - asset_purchase_txn).max(0.0)
         + disposed_asset_cost;
 
+    // ── SHG opening capital (income/capital side) ─────────────────────────
+    // The opening seed is opening CASH. But the SHG's true opening net worth also
+    // includes past-data positions that never touched the cash ledger:
+    //   + past loans outstanding (a receivable, cash lent out before the app)
+    //   − members' opening savings still owed (a liability inside the seed cash)
+    // Member savings owed from before the app = member_savings minus the LIVE member
+    // cash flows (contributions received − live payouts made). Computing it this way
+    // (rather than from the raw OPENING sum) automatically nets out past member
+    // payouts, so the reconciliation holds for every past-data combination.
+    let opening_member_liability =
+        member_savings - member_savings_receipts + savings_payouts_txn;
+    let shg_capital = shg_seed - opening_member_liability + past_loans_capital;
+    let total_income = shg_capital + interest_earned + chit_commission + donations_grants + other_income;
+
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:
     //   1. Derived = total_assets − member_savings − chit_funds_held
@@ -365,8 +451,9 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         total_members_with_savings,
         chit_funds_held,
         chit_installments_receivable,
+        chit_rewards_payable,
         surplus: surplus_derived,
-        shg_seed,
+        shg_seed: shg_capital,
         interest_earned,
         chit_commission,
         donations_grants,
@@ -375,5 +462,39 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         other_expenses,
         total_liabilities_capital,
         is_balanced,
+        recon: ReconDebug {
+            cash_in_hand,
+            cash_at_bank,
+            loans_to_members,
+            past_loans_capital,
+            fixed_assets,
+            chit_advances,
+            total_assets,
+            member_savings,
+            member_savings_receipts,
+            loan_repayment_receipts,
+            chit_installments_receipts: chit_installments,
+            chit_installments_collected,
+            savings_payouts_txn,
+            opening_member_liability,
+            chit_funds_held,
+            shg_seed_raw: shg_seed,
+            shg_capital,
+            interest_earned,
+            chit_commission,
+            donations_grants,
+            opening_asset_capital,
+            other_income,
+            total_income,
+            total_vouchers,
+            loans_disbursed_txn,
+            chit_payouts_txn,
+            asset_purchase_txn,
+            disposed_asset_cost,
+            total_receipts,
+            other_expenses,
+            surplus_derived,
+            surplus_independent,
+        },
     })
 }

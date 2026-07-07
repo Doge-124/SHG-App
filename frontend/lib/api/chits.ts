@@ -527,7 +527,9 @@ export interface ChitPendingDue {
   cycleNo: number
   memberId: string
   memberName: string
-  amountOwed: number
+  amountOwed: number   // after this cycle's bid discount
+  fullAmount: number   // full monthly contribution (before bid discount)
+  discount: number     // the bid discount for this cycle
 }
 
 /** Overdue installments for already-completed cycles in a chit. */
@@ -540,6 +542,8 @@ export async function getChitPendingDues(chitGroupId: string): Promise<ApiRespon
       memberId: r.memberId.toString(),
       memberName: r.memberName,
       amountOwed: r.amountOwed,
+      fullAmount: r.fullAmount ?? r.amountOwed,
+      discount: r.discount ?? 0,
     }))
     return { success: true, data: dues }
   } catch (error) {

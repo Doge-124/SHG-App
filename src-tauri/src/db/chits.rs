@@ -828,7 +828,9 @@ pub struct PendingDue {
     pub cycle_no: i64,
     pub member_id: i64,
     pub member_name: String,
-    pub amount_owed: f64,
+    pub amount_owed: f64,      // monthly contribution minus that cycle's bid discount
+    pub full_amount: f64,      // the full monthly contribution (before any bid discount)
+    pub discount: f64,         // the bid discount applied to this cycle
 }
 
 /// List overdue installments for a chit: every member who hasn't paid a
@@ -871,6 +873,8 @@ pub fn get_chit_pending_dues(
             member_id: row.get(2)?,
             member_name: row.get(3)?,
             amount_owed: round_to_5((monthly - prev_discount).max(0.0)),
+            full_amount: round_to_5(monthly.max(0.0)),
+            discount: round_to_5(prev_discount.max(0.0)),
         })
     })?;
 
@@ -902,6 +906,31 @@ pub fn get_total_chit_receivable(conn: &Connection) -> Result<f64, AppError> {
                AND NOT EXISTS (
                    SELECT 1 FROM chit_payments cp
                    WHERE cp.cycle_id = cc.id AND cp.member_id = cm.member_id
+               )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+    Ok(total)
+}
+
+/// Total chit prize money still to be paid out to members of ACTIVE chits who
+/// have not won yet — the SHG's future prize obligation ("money owed to people in
+/// a chit who are yet to win"). Estimated as (net prize = gross prize − commission)
+/// per not-yet-won member. Future bid discounts aren't known, so this is an
+/// informational estimate.
+pub fn get_total_chit_rewards_payable(conn: &Connection) -> Result<f64, AppError> {
+    let total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                        MAX(COALESCE(cg.fixed_prize_amount, cg.total_amount) - cg.commission_per_winner, 0)
+                     ), 0)
+             FROM chit_members cm
+             JOIN chit_groups cg ON cg.id = cm.chit_id
+             WHERE cg.status = 'ACTIVE'
+               AND NOT EXISTS (
+                   SELECT 1 FROM chit_cycle_winners w
+                   WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
                )",
             [],
             |r| r.get(0),

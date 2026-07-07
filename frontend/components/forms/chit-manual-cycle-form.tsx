@@ -139,6 +139,9 @@ export function ChitManualCycleForm({
   const [pendingDues, setPendingDues] = useState<ChitPendingDue[]>([])
   const [collectDue, setCollectDue] = useState<ChitPendingDue | null>(null)
   const [collectSplit, setCollectSplit] = useState<PaymentSplit>(emptyPaymentSplit)
+  // false → collect the amount after this cycle's bid discount; true → collect the
+  // full monthly contribution (SHG's discretion for late payers).
+  const [collectFull, setCollectFull] = useState(false)
 
   // Closing cycle / final settlement
   const [closingInfo, setClosingInfo] = useState<ChitClosingInfo | null>(null)
@@ -225,18 +228,24 @@ export function ChitManualCycleForm({
   const openCollectDue = (due: ChitPendingDue) => {
     setCollectDue(due)
     setCollectSplit(emptyPaymentSplit)
+    setCollectFull(false)
   }
+
+  // The amount to collect for the open due, per the full/discounted choice.
+  const collectAmount = collectDue
+    ? (collectFull ? collectDue.fullAmount : collectDue.amountOwed)
+    : 0
 
   const handleCollectDue = async () => {
     if (!collectDue) return
-    if (!isPaymentSplitValid(collectSplit, collectDue.amountOwed)) {
+    if (!isPaymentSplitValid(collectSplit, collectAmount)) {
       toast.error('For a mixed payment, cash + bank must equal the amount owed')
       return
     }
     setIsSubmitting(true)
     try {
       const result = await recordChitLatePayment(
-        chitGroupId, collectDue.cycleId, collectDue.memberId, collectDue.amountOwed,
+        chitGroupId, collectDue.cycleId, collectDue.memberId, collectAmount,
         paymentInvokeArgs(collectSplit),
       )
       if (result.success) {
@@ -922,10 +931,31 @@ export function ChitManualCycleForm({
               <p className="text-muted-foreground text-xs mt-0.5">
                 Overdue installment for cycle {collectDue.cycleNo}
               </p>
-              <p className="text-sm mt-1">Amount: <strong>{formatCurrency(collectDue.amountOwed)}</strong></p>
+              <p className="text-sm mt-1">Amount: <strong>{formatCurrency(collectAmount)}</strong></p>
             </div>
+
+            {/* When a bid discount applied to this cycle, the SHG can choose to
+                still charge a late payer the full contribution. */}
+            {collectDue.discount > 0.005 && (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">
+                  This cycle had a {formatCurrency(collectDue.discount)} bid discount. Collect:
+                </p>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant={!collectFull ? 'default' : 'outline'}
+                    className="flex-1" onClick={() => { setCollectFull(false); setCollectSplit(emptyPaymentSplit) }}>
+                    After discount ({formatCurrency(collectDue.amountOwed)})
+                  </Button>
+                  <Button type="button" size="sm" variant={collectFull ? 'default' : 'outline'}
+                    className="flex-1" onClick={() => { setCollectFull(true); setCollectSplit(emptyPaymentSplit) }}>
+                    Full ({formatCurrency(collectDue.fullAmount)})
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <PaymentMethodFields
-              total={collectDue.amountOwed}
+              total={collectAmount}
               value={collectSplit}
               onChange={setCollectSplit}
               idPrefix="chit-due"

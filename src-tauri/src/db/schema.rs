@@ -493,11 +493,35 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     // their interest is never counted as SHG income. Added AFTER the rebuild above
     // (which recreates loan_payments with a fixed column set) so it isn't dropped.
     add_column_if_missing(&tx, "loan_payments", "is_past_entry", "INTEGER NOT NULL DEFAULT 0")?;
-    // Backfill: existing past-loan payment rows (loans.is_past_entry = 1) are
-    // reference data — mark their payments so historical interest stops leaking.
+    // Flag/repair is_past_entry so ONLY genuine reference-data payments are excluded
+    // from income. A payment is "live" (real cash) iff it has a matching MEMBER_PAYMENT
+    // receipt (same member + created_at); reference/past-data payments have none.
+    //
+    // A prior blanket backfill wrongly flagged EVERY payment on a past loan as past —
+    // including live repayments made against a past loan, dropping their (real) interest
+    // from income and breaking the balance sheet. These two idempotent statements set
+    // the flag correctly regardless of history.
+    //   1) genuine past-data payments (on a past loan, no receipt) → is_past_entry = 1
+    //   2) live repayments (have a receipt) → is_past_entry = 0
     tx.execute_batch(
         "UPDATE loan_payments SET is_past_entry = 1
-         WHERE loan_id IN (SELECT id FROM loans WHERE COALESCE(is_past_entry, 0) = 1);"
+         WHERE loan_id IN (SELECT id FROM loans WHERE COALESCE(is_past_entry, 0) = 1)
+           AND NOT EXISTS (
+               SELECT 1 FROM shg_transactions s
+               WHERE s.reference_type = 'MEMBER_PAYMENT'
+                 AND s.reference_id = loan_payments.member_id
+                 AND s.created_at = loan_payments.created_at
+                 AND s.voided_at IS NULL AND s.reversal_of_id IS NULL
+           );
+         UPDATE loan_payments SET is_past_entry = 0
+         WHERE is_past_entry = 1
+           AND EXISTS (
+               SELECT 1 FROM shg_transactions s
+               WHERE s.reference_type = 'MEMBER_PAYMENT'
+                 AND s.reference_id = loan_payments.member_id
+                 AND s.created_at = loan_payments.created_at
+                 AND s.voided_at IS NULL AND s.reversal_of_id IS NULL
+           );"
     )?;
 
     // 13) Loan unpaid-interest balance — tracks interest that has accrued

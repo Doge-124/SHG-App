@@ -26,6 +26,7 @@ interface BalanceSheet {
   total_members_with_savings: number
   chit_funds_held: number
   chit_installments_receivable: number
+  chit_rewards_payable: number
   surplus: number
   shg_seed: number
   interest_earned: number
@@ -36,6 +37,7 @@ interface BalanceSheet {
   other_expenses: number
   total_liabilities_capital: number
   is_balanced: boolean
+  recon?: Record<string, number>
 }
 
 function formatDisplayDate(iso: string) {
@@ -164,9 +166,28 @@ export default function BalanceSheetPage() {
             <div className="flex items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-red-800">
               <AlertTriangle className="h-5 w-5 flex-shrink-0" />
               <p className="text-sm font-medium">
-                Balance Sheet does not balance — Assets: {formatCurrency(data.total_assets)} vs
-                L &amp; C: {formatCurrency(data.total_liabilities_capital)}
+                Balance Sheet does not reconcile — surplus from assets is{' '}
+                {formatCurrency(data.surplus)}, but surplus from income − expenses is{' '}
+                {formatCurrency(data.total_income - data.other_expenses)}
+                {' '}(difference {formatCurrency(Math.abs(data.surplus - (data.total_income - data.other_expenses)))}).
+                Some value changed the asset side without flowing through income/expenses.
               </p>
+            </div>
+          )}
+
+          {!data.is_balanced && data.recon && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+              <p className="text-xs font-semibold text-amber-800 uppercase tracking-wide mb-2">
+                Reconciliation components (diagnostic)
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-xs font-mono">
+                {Object.entries(data.recon).map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">{k}</span>
+                    <span className="font-medium">{formatCurrency(v)}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -208,8 +229,8 @@ export default function BalanceSheetPage() {
                 </p>
 
                 {/* Income sources */}
-                {data.shg_seed > 0 && (
-                  <Row label="Opening Seed Balance" value={data.shg_seed} indent muted />
+                {data.shg_seed !== 0 && (
+                  <Row label="SHG Opening Capital" value={data.shg_seed} indent muted />
                 )}
                 {data.interest_earned > 0 && (
                   <Row label="Interest Earned on Loans" value={data.interest_earned} indent muted />
@@ -230,6 +251,12 @@ export default function BalanceSheetPage() {
 
                 <Separator className="my-4" />
                 <Row label="Total Liabilities &amp; Capital" value={data.total_liabilities_capital} bold />
+                {data.chit_rewards_payable > 0 && (
+                  <Row label="Chit prizes still to be paid (members yet to win)"
+                    note="memo — estimated future prize obligation, funded by their future installments"
+                    value={data.chit_rewards_payable}
+                    muted />
+                )}
               </CardContent>
             </Card>
 
