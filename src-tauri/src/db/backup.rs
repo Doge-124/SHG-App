@@ -47,7 +47,73 @@ pub fn create_backup(conn: &Connection, backup_type: &str) -> Result<BackupInfo,
     };
 
     save_backup_info(conn, &backup_info)?;
+
+    // Bound local disk growth: keep the most recent routine backups, drop older
+    // ones. Safety snapshots are preserved. Best-effort; never fails the backup.
+    prune_old_backups(90);
+    prune_stale_backup_info(conn);
+
     Ok(backup_info)
+}
+
+/// Keep the most recent `keep_recent` routine backup files and delete older ones.
+/// Safety snapshots (pre-upgrade / pre-migration / pre-restore) are NEVER deleted.
+/// Best-effort — failures are logged, not propagated.
+pub fn prune_old_backups(keep_recent: usize) {
+    let dir = match get_backup_directory() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut routine: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in read.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        if !name.ends_with(".db") {
+            continue;
+        }
+        // Never prune safety snapshots.
+        if name.contains("pre-upgrade") || name.contains("pre-migration") || name.contains("pre_restore") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        routine.push((path, mtime));
+    }
+    if routine.len() <= keep_recent {
+        return;
+    }
+    routine.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+    for (path, _) in routine.into_iter().skip(keep_recent) {
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::warn!("Failed to prune old backup {}: {e}", path.display());
+        }
+    }
+}
+
+/// Drop backup_info rows whose file no longer exists (e.g. pruned or deleted).
+fn prune_stale_backup_info(conn: &Connection) {
+    let dir = match get_backup_directory() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let rows: Vec<(String, String)> = match conn.prepare("SELECT id, file_name FROM backup_info") {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map(|it| it.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    for (id, file_name) in rows {
+        if !dir.join(&file_name).exists() {
+            let _ = conn.execute("DELETE FROM backup_info WHERE id = ?1", [id]);
+        }
+    }
 }
 
 /// Copy a backup file over the live DB file.
@@ -86,27 +152,74 @@ pub fn restore_backup_file(backup_filename: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Get list of available backups
+/// List available backups by scanning the backup directory (the source of truth),
+/// enriching the type/date from `backup_info` when known. Scanning the folder means
+/// the automatic safety snapshots (pre-upgrade / pre-migration / pre-restore) are
+/// restorable from the UI too — not just manual/cloud backups.
 pub fn get_backup_list(conn: &Connection) -> Result<Vec<BackupInfo>, AppError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, file_name, file_size, created_at, backup_type 
-         FROM backup_info 
-         ORDER BY created_at DESC"
-    )?;
-    
-    let backups = stmt.query_map([], |row| {
-        Ok(BackupInfo {
-            id: row.get(0)?,
-            file_name: row.get(1)?,
-            file_size: row.get(2)?,
-            created_at: row.get(3)?,
-            backup_type: row.get(4)?,
-        })
-    })?
-    .collect::<Result<Vec<BackupInfo>, _>>()
-    .map_err(|e| AppError::database(format!("Failed to get backup list: {}", e)))?;
-    
-    Ok(backups)
+    let dir = get_backup_directory()?;
+
+    // Known type + creation time for app-registered backups, keyed by file_name.
+    let mut known: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT file_name, backup_type, created_at FROM backup_info") {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        }) {
+            for r in rows.flatten() {
+                known.insert(r.0, (r.1, r.2));
+            }
+        }
+    }
+
+    let read = std::fs::read_dir(&dir)
+        .map_err(|e| AppError::database(format!("Failed to read backups directory: {e}")))?;
+
+    let mut out: Vec<BackupInfo> = Vec::new();
+    for entry in read.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !name.ends_with(".db") {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let file_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+
+        let (backup_type, created_at) = classify_backup(&name, known.get(&name), mtime);
+        out.push(BackupInfo { id: name.clone(), file_name: name, file_size, created_at, backup_type });
+    }
+
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
+/// Determine a backup's type + creation time from its filename, the stored
+/// backup_info entry (if any), and the file mtime as a fallback.
+fn classify_backup(
+    name: &str,
+    stored: Option<&(String, String)>,
+    mtime: Option<String>,
+) -> (String, String) {
+    let created = stored
+        .map(|(_, c)| c.clone())
+        .or(mtime)
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let ty = if name.contains("pre-upgrade") {
+        "pre-upgrade".to_string()
+    } else if name.contains("pre-migration") {
+        "pre-migration".to_string()
+    } else if name.contains("pre_restore") {
+        "pre-restore".to_string()
+    } else {
+        stored.map(|(t, _)| t.clone()).unwrap_or_else(|| "manual".to_string())
+    };
+    (ty, created)
 }
 
 /// Save backup information to database

@@ -166,6 +166,29 @@ fn create_pre_migration_backup(
     Ok(out_path)
 }
 
+/// Take a labelled, encryption-preserving snapshot of the DB (`VACUUM INTO`).
+/// Used for one-off safety backups such as before the idempotent legacy
+/// migrations run on an app-version upgrade.
+pub fn create_labeled_backup(
+    conn: &Connection,
+    backup_dir: &Path,
+    label: &str,
+) -> Result<PathBuf, AppError> {
+    std::fs::create_dir_all(backup_dir)?;
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let safe: String = label
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let out_path = backup_dir.join(format!("auto-{safe}_{ts}.db"));
+    if out_path.exists() {
+        std::fs::remove_file(&out_path)?;
+    }
+    let sql = format!("VACUUM INTO '{}'", out_path.to_string_lossy().replace('\'', "''"));
+    conn.execute_batch(&sql)?;
+    Ok(out_path)
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationStatus {

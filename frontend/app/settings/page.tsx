@@ -513,6 +513,45 @@ export default function SettingsPage() {
     }
   }
 
+  const handleRollbackLastUpdate = async () => {
+    setIsRestoreLoading(true)
+    try {
+      const res = await getBackupList()
+      if (!res.success || !res.data) { toast.error(res.error || 'Could not load backups'); return }
+      const latest = res.data
+        .filter(b => b.type === 'pre-upgrade')
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+      if (!latest) {
+        toast.error('No pre-upgrade safety backup found yet. Use "Restore Backup" to pick one manually.')
+        return
+      }
+      const m = latest.fileName.match(/pre-upgrade-v([0-9.]+)/)
+      const version = m ? m[1] : null
+      const when = new Date(latest.createdAt).toLocaleString()
+      const ok = confirm(
+        `Roll back to the automatic snapshot taken just before the last update` +
+        (version ? ` — your data as it was on app v${version}` : '') +
+        ` (${when}).\n\n` +
+        `This replaces ALL current data with that snapshot.\n\n` +
+        (version
+          ? `IMPORTANT: to fully roll back, also reinstall app v${version}. If you stay on the current version, its update re-applies on next launch.\n\n`
+          : '') +
+        `Continue?`
+      )
+      if (!ok) return
+      const response = await restoreBackup(latest.fileName)
+      if (response.success) {
+        toast.success('Rolled back to the pre-update snapshot. Please restart the application.')
+      } else {
+        toast.error(response.error || 'Failed to roll back')
+      }
+    } catch {
+      toast.error('An error occurred during rollback')
+    } finally {
+      setIsRestoreLoading(false)
+    }
+  }
+
   const handleChangeAdminPin = async () => {
     if (!currentAdminPin.trim()) {
       toast.error('Please enter your current admin PIN')
@@ -942,22 +981,34 @@ export default function SettingsPage() {
                 <div className="p-4 rounded-lg border bg-card">
                   <h4 className="font-medium mb-2">Restore Data</h4>
                   <p className="text-sm text-muted-foreground mb-3">
-                    Restore from a previous backup
+                    Restore from a previous backup, or roll back the last update.
                   </p>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    className="w-full" 
-                    onClick={handleOpenRestoreDialog}
-                    disabled={isRestoreLoading}
-                  >
-                    {isRestoreLoading ? (
-                      <Spinner className="mr-2 h-4 w-4" />
-                    ) : (
-                      <Database className="mr-2 h-4 w-4" />
-                    )}
-                    Restore Backup
-                  </Button>
+                  <div className="space-y-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={handleOpenRestoreDialog}
+                      disabled={isRestoreLoading}
+                    >
+                      {isRestoreLoading ? (
+                        <Spinner className="mr-2 h-4 w-4" />
+                      ) : (
+                        <Database className="mr-2 h-4 w-4" />
+                      )}
+                      Restore Backup
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-amber-400 text-amber-700 hover:bg-amber-50"
+                      onClick={handleRollbackLastUpdate}
+                      disabled={isRestoreLoading}
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Roll Back Last Update
+                    </Button>
+                  </div>
                 </div>
               </div>
 

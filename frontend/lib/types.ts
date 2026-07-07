@@ -355,7 +355,8 @@ export interface BackupInfo {
   fileName: string
   fileSize: number
   createdAt: string
-  type: 'manual' | 'automatic'
+  // manual | cloud | pre-upgrade | pre-migration | pre-restore | automatic
+  type: string
 }
 
 // Fixed-asset register

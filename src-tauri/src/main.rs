@@ -54,9 +54,11 @@ fn main() {
         .manage(std::sync::Mutex::new(AppState {
             db: Option::<rusqlite::Connection>::None,
             db_key: None,
+            integrity_warning: None,
         }))
         .invoke_handler(tauri::generate_handler![
             commands::auth::unlock_db,
+            commands::auth::get_integrity_warning,
             commands::auth::setup_db,
             commands::auth::reset_pin,
             commands::auth::has_security,
@@ -149,6 +151,7 @@ fn main() {
             commands::trial_balance::get_balance_sheet_cmd,
             commands::trial_balance::get_income_expenditure_cmd,
             commands::trial_balance::get_income_ledger_cmd,
+            commands::trial_balance::get_general_ledger_cmd,
             commands::settings::get_general_settings,
             commands::settings::save_general_settings,
             commands::settings::get_notification_settings,

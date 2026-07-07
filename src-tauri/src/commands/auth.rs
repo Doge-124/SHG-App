@@ -24,10 +24,42 @@ pub fn unlock_db(
 
     db::init_db_with_pin(&app, &pin)
         .map(|(conn, key)| {
+            // Startup integrity check. Only true file-level corruption (SQLite
+            // integrity / foreign-key violations) raises a startup warning — those
+            // signal data loss/corruption. Recoverable issues (stale balance caches,
+            // orphan rows) are left to the manual Settings → Check Integrity screen so
+            // we don't nag on every unlock.
+            match db::integrity::check_integrity(&conn) {
+                Ok(report) => {
+                    let corruption: Vec<&str> = report.checks.iter()
+                        .filter(|c| !c.passed
+                            && (c.name.contains("file integrity") || c.name.contains("Foreign-key")))
+                        .map(|c| c.name.as_str())
+                        .collect();
+                    if corruption.is_empty() {
+                        state.integrity_warning = None;
+                    } else {
+                        log::error!("Startup integrity check found corruption: {}", corruption.join(", "));
+                        state.integrity_warning = Some(format!(
+                            "Database corruption detected ({}). Restore from a backup as soon as possible, and open Settings \u{2192} Check Integrity for details.",
+                            corruption.join(", ")
+                        ));
+                    }
+                }
+                Err(e) => { log::warn!("Startup integrity check could not run: {e}"); }
+            }
             state.db = Some(conn);
             state.db_key = Some(key);
         })
         .map_err(|e: AppError| e.to_string())
+}
+
+/// Returns a startup-integrity warning message if the last unlock's integrity
+/// check found problems, else None. The UI polls this after unlock.
+#[tauri::command]
+pub fn get_integrity_warning(state: State<Mutex<AppState>>) -> Result<Option<String>, String> {
+    let guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    Ok(guard.integrity_warning.clone())
 }
 
 /// Initial DB setup when no database exists yet.

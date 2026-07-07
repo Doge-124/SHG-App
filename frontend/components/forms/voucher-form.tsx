@@ -80,6 +80,8 @@ const voucherReasons = [
   'Maintenance expenses',
   'Refreshment expenses',
   'Meeting expenses',
+  'Loan Commission',
+  'Salary/Incentive',
   'Other'
 ]
 

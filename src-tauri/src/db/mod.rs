@@ -39,6 +39,7 @@ pub mod trial_balance;
 pub mod balance_sheet;
 pub mod income_expenditure;
 pub mod income_ledger;
+pub mod general_ledger;
 pub mod migrations;
 pub mod integrity;
 pub mod past_edit;
@@ -101,6 +102,10 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
             },
         )?;
 
+        // Record the version this fresh DB was created at so the first unlock
+        // doesn't take a redundant "pre-upgrade" safety backup.
+        write_app_version_marker(&data_dir, env!("CARGO_PKG_VERSION"));
+
         return Ok((conn, db_key));
     }
 
@@ -119,6 +124,20 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
 
     let mut conn = connection::open_db(&db_path, &db_key)?;
 
+    // Safety net: the legacy `apply_migrations` below runs schema surgery on EVERY
+    // unlock, with no backup of its own. Whenever the app version changes (i.e. a
+    // new build that may carry new/changed migration logic), take one encryption-
+    // preserving snapshot BEFORE touching the schema. This is the single automatic
+    // backup that protects against a bad migration in an update.
+    let app_version = env!("CARGO_PKG_VERSION");
+    let version_changed = read_app_version_marker(&data_dir).as_deref() != Some(app_version);
+    if version_changed {
+        match migrations::create_labeled_backup(&conn, &backup_dir, &format!("pre-upgrade-v{app_version}")) {
+            Ok(p) => log::info!("Pre-upgrade safety backup written: {}", p.display()),
+            Err(e) => log::warn!("Pre-upgrade safety backup failed (continuing): {e}"),
+        }
+    }
+
     // Legacy idempotent setup — runs every time, safe to keep.
     schema::apply_migrations(&mut conn)?;
     loans::init_loans_table(&mut conn)?;
@@ -132,10 +151,29 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
         migrations::baseline_to(&conn, migrations::CURRENT_SCHEMA_VERSION)?;
     }
 
-    // Apply any new migrations (with auto-backup beforehand).
+    // Apply any new versioned migrations (these take their own pre-migration backup).
     migrations::run_pending_migrations(&mut conn, &db_path, &backup_dir)?;
 
+    // All schema work for this version succeeded — record it so we don't take
+    // another safety backup on the next unlock of the same build.
+    if version_changed {
+        write_app_version_marker(&data_dir, app_version);
+    }
+
     Ok((conn, db_key))
+}
+
+/// Path of the marker recording the app version whose migrations last completed.
+fn app_version_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(".app_version")
+}
+fn read_app_version_marker(data_dir: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(app_version_marker_path(data_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+fn write_app_version_marker(data_dir: &std::path::Path, version: &str) {
+    let _ = std::fs::write(app_version_marker_path(data_dir), version);
 }
 
 // Re-export commonly used types and functions from submodules so that

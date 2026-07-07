@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { toast } from 'sonner'
 import PinScreen from './PinScreen'
 import SetPinScreen from './SetPinScreen'
 import ResetPinScreen from './ResetPinScreen'
@@ -37,6 +38,10 @@ export default function AuthLayout({ children }: Props) {
     invoke('run_support_inbox').catch(() => {})
     // Run an automatic cloud backup if one is due per the user's schedule.
     invoke('run_cloud_backup_if_due').catch(() => {})
+    // Surface any database-integrity problem detected during unlock.
+    invoke<string | null>('get_integrity_warning')
+      .then((w) => { if (w) toast.error(w, { duration: 20000 }) })
+      .catch(() => {})
   }
 
   // While the app stays open, re-check whether a scheduled cloud backup is due
