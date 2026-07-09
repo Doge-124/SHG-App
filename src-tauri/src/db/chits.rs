@@ -914,6 +914,10 @@ pub struct ChitPositions {
     /// catches genuine errors:
     ///   dividend_payable = Σ(live winners' bid discount) − Σ(live payment shortfalls)
     pub dividend_payable: f64,
+    // Raw components of dividend_payable, surfaced for balance-sheet diagnostics.
+    pub declared_live: f64,   // sum of live winners' bid discount
+    pub consumed_live: f64,   // sum of live payment shortfalls below monthly
+    pub live_cash: f64,       // raw Σ chit_payments.amount for live cycles
 }
 
 pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitPositions, AppError> {
@@ -994,7 +998,21 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
         [as_of], |r| r.get(0),
     ).unwrap_or(0.0);
 
+    // Raw live cash actually recorded in the chit_payments table (the accrual source).
+    // Should equal the ledger's CHIT_PAYMENT receipts; a divergence points to a
+    // payments-vs-ledger data inconsistency rather than an accrual-model gap.
+    let live_cash: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cp.amount), 0)
+         FROM chit_payments cp
+         JOIN chit_cycles cc ON cc.id = cp.cycle_id
+         WHERE COALESCE(cc.is_past_entry, 0) = 0 AND cp.paid_at <= ?1",
+        [as_of], |r| r.get(0),
+    ).unwrap_or(0.0);
+
     pos.dividend_payable = declared_live - consumed_live;
+    pos.declared_live = declared_live;
+    pos.consumed_live = consumed_live;
+    pos.live_cash = live_cash;
 
     Ok(pos)
 }
