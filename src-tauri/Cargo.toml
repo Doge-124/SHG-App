@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.0.41"
+version = "1.0.42"
 description = "SHG Manager - Financial management for Self Help Groups"
 authors = ["Doge124"]
 license = "UNLICENSED"
