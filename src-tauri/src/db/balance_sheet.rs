@@ -85,6 +85,9 @@ pub struct ReconDebug {
     pub chit_declared_live: f64,             // Σ live winners' bid discount
     pub chit_consumed_live: f64,             // Σ live payment shortfalls below monthly
     pub chit_live_cash: f64,                 // raw Σ chit_payments.amount (live) — cf. receipts
+    pub chit_live_winner_gross: f64,         // Σ gross debited to live-cycle winners — cf. chit_payouts_txn
+    pub chit_past_winner_gross: f64,         // Σ gross debited to past-cycle winners
+    pub chit_live_winner_count: f64,         // number of live-cycle winners
     pub chit_opening_capital: f64,           // past-data chit net folded into capital
     pub shg_seed_raw: f64,
     pub shg_capital: f64,
@@ -231,6 +234,9 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     let chit_declared_live = chit_pos.declared_live;
     let chit_consumed_live = chit_pos.consumed_live;
     let chit_live_cash = chit_pos.live_cash;
+    let chit_live_winner_gross = chit_pos.live_winner_gross;
+    let chit_past_winner_gross = chit_pos.past_winner_gross;
+    let chit_live_winner_count = chit_pos.live_winner_count as f64;
 
     let total_assets =
         cash_in_hand + cash_at_bank + loans_to_members + fixed_assets + chit_receivable;
@@ -467,6 +473,9 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
             chit_declared_live,
             chit_consumed_live,
             chit_live_cash,
+            chit_live_winner_gross,
+            chit_past_winner_gross,
+            chit_live_winner_count,
             chit_opening_capital,
             shg_seed_raw: shg_seed,
             shg_capital,

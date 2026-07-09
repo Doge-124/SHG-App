@@ -918,6 +918,9 @@ pub struct ChitPositions {
     pub declared_live: f64,   // sum of live winners' bid discount
     pub consumed_live: f64,   // sum of live payment shortfalls below monthly
     pub live_cash: f64,       // raw Σ chit_payments.amount for live cycles
+    pub live_winner_gross: f64,  // Σ gross debited to members who won in a LIVE cycle
+    pub past_winner_gross: f64,  // Σ gross debited to members who won in a PAST cycle
+    pub live_winner_count: i64,  // how many members won in a live cycle
 }
 
 pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitPositions, AppError> {
@@ -995,6 +998,14 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
         pos.payable += balance.max(0.0);
         pos.receivable += (-balance).max(0.0);
         pos.opening_capital += -past_balance;
+
+        // Diagnostics: gross attributed to winners, split by live vs past cycle.
+        if has_won && !won_in_past {
+            pos.live_winner_gross += gross;
+            pos.live_winner_count += 1;
+        } else if won_in_past {
+            pos.past_winner_gross += gross;
+        }
     }
 
     // Undistributed auction dividend (see struct doc). Bid discounts declared by
