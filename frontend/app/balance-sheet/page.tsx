@@ -20,13 +20,11 @@ interface BalanceSheet {
   cash_at_bank: number
   loans_to_members: number
   fixed_assets: number
-  chit_advances: number
+  chit_receivable: number
   total_assets: number
   member_savings: number
   total_members_with_savings: number
-  chit_funds_held: number
-  chit_installments_receivable: number
-  chit_rewards_payable: number
+  chit_payable: number
   surplus: number
   shg_seed: number
   interest_earned: number
@@ -213,11 +211,11 @@ export default function BalanceSheetPage() {
                   note={`${data.total_members_with_savings} members`}
                   value={data.member_savings} />
 
-                {data.chit_funds_held > 0 && (
+                {data.chit_payable > 0 && (
                   <Row
-                    label="Chit funds to pay out (held for winners)"
-                    note="installments collected, not yet paid out"
-                    value={data.chit_funds_held}
+                    label="Chit dues payable (members yet to win)"
+                    note="paid in so far, not yet won — owed back by the SHG"
+                    value={data.chit_payable}
                   />
                 )}
 
@@ -251,12 +249,6 @@ export default function BalanceSheetPage() {
 
                 <Separator className="my-4" />
                 <Row label="Total Liabilities &amp; Capital" value={data.total_liabilities_capital} bold />
-                {data.chit_rewards_payable > 0 && (
-                  <Row label="Chit prizes still to be paid (members yet to win)"
-                    note="memo — estimated future prize obligation, funded by their future installments"
-                    value={data.chit_rewards_payable}
-                    muted />
-                )}
               </CardContent>
             </Card>
 
@@ -273,22 +265,16 @@ export default function BalanceSheetPage() {
                 <Row label="Cash in Hand" value={data.cash_in_hand} />
                 <Row label="Cash at Bank" value={data.cash_at_bank} />
                 <Row label="Loans to Members (Outstanding)" value={data.loans_to_members} />
+                {data.chit_receivable > 0 && (
+                  <Row label="Chit dues receivable (winners repaying)"
+                    note="won already, still repaying remaining installments"
+                    value={data.chit_receivable} />
+                )}
                 {data.fixed_assets > 0 && (
                   <Row label="Fixed Assets (at cost)" value={data.fixed_assets} />
                 )}
-                {data.chit_advances > 0 && (
-                  <Row label="Chit installments to receive"
-                    note="paid to winners ahead of collections"
-                    value={data.chit_advances} />
-                )}
                 <Separator className="my-4" />
                 <Row label="Total Assets" value={data.total_assets} bold />
-                {data.chit_installments_receivable > 0 && (
-                  <Row label="Chit installments receivable (arrears)"
-                    note="memo — already reflected in the net chit position above"
-                    value={data.chit_installments_receivable}
-                    muted />
-                )}
 
                 {/* Mini breakdown */}
                 <Separator className="my-4" />

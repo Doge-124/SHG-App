@@ -1,13 +1,16 @@
 //! Balance Sheet — snapshot of Assets vs Liabilities & Capital.
 //! Supports any "as on" date so year-end sheets (March 31) work correctly.
 //!
-//! Assets   = Cash + Bank + Loans Outstanding
-//! Liabilities & Capital = Member Savings + Chit Funds Held + SHG Surplus
+//! Assets   = Cash + Bank + Loans Outstanding + Chit Dues Receivable + Fixed Assets
+//! Liabilities & Capital = Member Savings + Chit Dues Payable + SHG Surplus
 //!
-//! `chit_funds_held` captures chit installments that have come into the SHG
-//! cash box but haven't yet been paid out to the cycle's winner — they're
-//! owed to the chit pool. Without this row a mid-cycle chit would inflate
-//! cash with no offsetting entry on the right-hand side.
+//! Chits are shown as two accrual positions that move every cycle (see
+//! `chits::get_chit_member_positions`): `chit_receivable` (winners still repaying
+//! — an asset) and `chit_payable` (members who have paid in but not yet won — a
+//! liability the SHG owes them). Both settle to ~zero once a chit completes. The
+//! chit cash the SHG actually holds is already inside Cash/Bank via the ledger, and
+//! the identity `cash_held + chit_receivable = chit_payable + chit_commission`
+//! keeps the two-way surplus reconciliation intact.
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -22,31 +25,22 @@ pub struct BalanceSheet {
     pub cash_at_bank: f64,
     pub loans_to_members: f64,
     pub fixed_assets: f64,         // fixed-asset register, at cost (active assets)
-    pub chit_advances: f64,        // net amount fronted to chit winners ahead of collections
+    // Chit dues RECEIVABLE — members who have won but are still repaying their
+    // installments over the remaining cycles owe the SHG. Shrinks each cycle.
+    pub chit_receivable: f64,
     pub total_assets: f64,
 
     // ── Liabilities: Member Savings ───────────────────────────────────────
     pub member_savings: f64,       // total savings the SHG holds for members
     pub total_members_with_savings: i64,
 
-    // ── Liabilities: Chit Funds Held ──────────────────────────────────────
-    // Chit installments collected but not yet disbursed (or net amount over
-    // the lifetime of the chit-payout commission accounting):
-    //   SUM(chit_payments.amount) - SUM(CHIT_PAYOUT vouchers).
-    // Goes to zero when a cycle has been fully paid out and the commission
-    // has been recognised as income.
-    pub chit_funds_held: f64,
+    // ── Liabilities: Chit Dues Payable ────────────────────────────────────
+    // Members who have paid into a chit but have NOT yet won: the SHG owes them
+    // what they have contributed so far. Grows as they keep paying, and nets to
+    // ~zero once every member has won and the chit completes.
+    pub chit_payable: f64,
 
-    // Memo (informational, NOT added into totals — the net chit position above
-    // already captures it): gross installments still owed by members for live
-    // drawn cycles ("amount to be received").
-    pub chit_installments_receivable: f64,
-
-    // Memo (informational): estimated prize money still to be paid to members of
-    // active chits who have not won yet ("money owed to people yet to win").
-    pub chit_rewards_payable: f64,
-
-    // ── Capital: SHG Surplus (= Total Assets − Member Savings) ───────────
+    // ── Capital: SHG Surplus (= Total Assets − Member Savings − Chit Payable) ─
     pub surplus: f64,
 
     // Surplus breakdown (informational):
@@ -77,16 +71,16 @@ pub struct ReconDebug {
     pub loans_to_members: f64,
     pub past_loans_capital: f64,
     pub fixed_assets: f64,
-    pub chit_advances: f64,
+    pub chit_receivable: f64,                // asset — winners still repaying
     pub total_assets: f64,
     pub member_savings: f64,
     pub member_savings_receipts: f64,
     pub loan_repayment_receipts: f64,
     pub chit_installments_receipts: f64,     // CHIT_PAYMENT shg receipts (cash in)
-    pub chit_installments_collected: f64,    // chit_payments table (live cycles) — should match
     pub savings_payouts_txn: f64,
     pub opening_member_liability: f64,
-    pub chit_funds_held: f64,
+    pub chit_payable: f64,                   // liability — members yet to win
+    pub chit_opening_capital: f64,           // past-data chit net folded into capital
     pub shg_seed_raw: f64,
     pub shg_capital: f64,
     pub interest_earned: f64,
@@ -208,49 +202,25 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0);
 
-    // ── Chit funds held ───────────────────────────────────────────────────
-    // = live installments collected through chit_payments
-    // − payouts disbursed via CHIT_PAYOUT vouchers.
-    // PAST-DATA cycles are reference-only: they create no real cash receipts and
-    // no payout vouchers, and the SHG's historical position is already captured
-    // in the opening balance. Counting their installments here would inflate the
-    // liability with money the SHG doesn't actually hold, throwing the surplus
-    // wildly negative — so exclude past cycles. Voided rows are excluded too.
-    let chit_installments_collected: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(cp.amount), 0)
-         FROM chit_payments cp
-         JOIN chit_cycles cc ON cc.id = cp.cycle_id
-         WHERE COALESCE(cc.is_past_entry, 0) = 0
-           AND cp.paid_at <= ?1",
-        [&date_end], |r| r.get(0),
-    ).unwrap_or(0.0);
-
-    let chit_payouts_disbursed: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
-         WHERE txn_type = 'VOUCHER' AND reference_type = 'CHIT_PAYOUT'
-           AND voided_at IS NULL AND reversal_of_id IS NULL
-           AND created_at <= ?1",
-        [&date_end], |r| r.get(0),
-    ).unwrap_or(0.0);
-
-    // Net chit position. Positive = the SHG is holding pooled installments it still
-    // owes the chit (a LIABILITY). Negative = it has paid early winners more than it
-    // has collected, so members' future installments will repay it (an ASSET). We do
-    // NOT clamp: clamping the negative case to zero hid ongoing chits and broke the
-    // Assets = Liabilities + Capital reconciliation.
-    let chit_net = chit_installments_collected - chit_payouts_disbursed;
-    let chit_funds_held = chit_net.max(0.0);      // liability side
-    let chit_advances = (-chit_net).max(0.0);     // asset side (receivable from the chit)
+    // ── Chit member positions (accrual) ───────────────────────────────────
+    // A proper chit statement shows two real, member-level positions that move
+    // every cycle (the closed form of the chit passbook balance):
+    //   • chit_payable   (LIABILITY) — members who have paid in but NOT yet won;
+    //     the SHG owes them what they have paid so far. Grows as they keep paying.
+    //   • chit_receivable (ASSET)     — members who HAVE won but are still repaying
+    //     over the remaining cycles; they owe the SHG. Shrinks each cycle.
+    // PAST-DATA cycles carry no ledger cash (it sits in the opening balance), so
+    // their net effect is folded into chit_opening_capital below — mirroring the
+    // past-loan / member-opening opening-capital adjustments — which keeps the
+    // Assets = Liabilities + Capital reconciliation intact.
+    let chit_pos = crate::db::chits::get_chit_member_positions(conn, &date_end)
+        .unwrap_or_default();
+    let chit_payable = chit_pos.payable;            // liability side
+    let chit_receivable = chit_pos.receivable;      // asset side
+    let chit_opening_capital = chit_pos.opening_capital;
 
     let total_assets =
-        cash_in_hand + cash_at_bank + loans_to_members + fixed_assets + chit_advances;
-
-    // Gross arrears (memo only — do NOT add to total_assets; the net chit position
-    // above already reflects it): installments members still owe for live drawn cycles.
-    let chit_installments_receivable =
-        crate::db::chits::get_total_chit_receivable(conn).unwrap_or(0.0);
-    let chit_rewards_payable =
-        crate::db::chits::get_total_chit_rewards_payable(conn).unwrap_or(0.0);
+        cash_in_hand + cash_at_bank + loans_to_members + fixed_assets + chit_receivable;
 
     // ── Surplus breakdown ─────────────────────────────────────────────────
     // SHG seed (OPENING type in shg_transactions — set via Settings)
@@ -423,20 +393,24 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // payouts, so the reconciliation holds for every past-data combination.
     let opening_member_liability =
         member_savings - member_savings_receipts + savings_payouts_txn;
-    let shg_capital = shg_seed - opening_member_liability + past_loans_capital;
+    // chit_opening_capital: net effect of past-data chit cycles (whose cash lives in
+    // the opening balance, not the ledger). Folding it into opening capital keeps the
+    // accrual chit_payable / chit_receivable consistent with the two-way surplus check.
+    let shg_capital =
+        shg_seed - opening_member_liability + past_loans_capital + chit_opening_capital;
     let total_income = shg_capital + interest_earned + chit_commission + donations_grants + other_income;
 
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:
-    //   1. Derived = total_assets − member_savings − chit_funds_held
-    //      (what the SHG has beyond what it owes members + the chit pool)
+    //   1. Derived = total_assets − member_savings − chit_payable
+    //      (what the SHG has beyond what it owes members + chit dues payable)
     //   2. Independent = total_income − total_expenses (P&L since inception)
     // They should agree to within rounding. If they don't, something has
     // mutated assets without flowing through the income/expense ledger
     // (or vice versa) — a real integrity break that the user needs to see.
-    let surplus_derived     = total_assets - member_savings - chit_funds_held;
+    let surplus_derived     = total_assets - member_savings - chit_payable;
     let surplus_independent = total_income - other_expenses;
-    let total_liabilities_capital = member_savings + chit_funds_held + surplus_derived;
+    let total_liabilities_capital = member_savings + chit_payable + surplus_derived;
     let is_balanced = (surplus_derived - surplus_independent).abs() < 0.01;
 
     Ok(BalanceSheet {
@@ -445,13 +419,11 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         cash_at_bank,
         loans_to_members,
         fixed_assets,
-        chit_advances,
+        chit_receivable,
         total_assets,
         member_savings,
         total_members_with_savings,
-        chit_funds_held,
-        chit_installments_receivable,
-        chit_rewards_payable,
+        chit_payable,
         surplus: surplus_derived,
         shg_seed: shg_capital,
         interest_earned,
@@ -468,16 +440,16 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
             loans_to_members,
             past_loans_capital,
             fixed_assets,
-            chit_advances,
+            chit_receivable,
             total_assets,
             member_savings,
             member_savings_receipts,
             loan_repayment_receipts,
             chit_installments_receipts: chit_installments,
-            chit_installments_collected,
             savings_payouts_txn,
             opening_member_liability,
-            chit_funds_held,
+            chit_payable,
+            chit_opening_capital,
             shg_seed_raw: shg_seed,
             shg_capital,
             interest_earned,

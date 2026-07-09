@@ -883,60 +883,87 @@ pub fn get_chit_pending_dues(
     Ok(out)
 }
 
-/// Total chit installments still receivable (arrears) across all LIVE (non-past)
-/// drawn regular cycles — the SHG's "amount still to be received" from members.
-/// Uses the same per-installment due formula as `get_chit_pending_dues`
-/// (monthly contribution reduced by the previous cycle's carried-forward auction
-/// discount). Past-data cycles are excluded so this stays consistent with the
-/// balance sheet's live-only chit position.
-pub fn get_total_chit_receivable(conn: &Connection) -> Result<f64, AppError> {
-    let total: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(
-                        MAX(cg.monthly_contribution - COALESCE(
-                            (SELECT prev.auction_discount_per_member FROM chit_cycles prev
-                             WHERE prev.chit_id = cc.chit_id AND prev.cycle_no = cc.cycle_no - 1), 0), 0)
-                     ), 0)
-             FROM chit_cycles cc
-             JOIN chit_groups cg ON cg.id = cc.chit_id
-             JOIN chit_members cm ON cm.chit_id = cc.chit_id
-             WHERE cc.winning_member_id IS NOT NULL
-               AND cc.cycle_no <= cg.months
-               AND COALESCE(cc.is_past_entry, 0) = 0
-               AND NOT EXISTS (
-                   SELECT 1 FROM chit_payments cp
-                   WHERE cp.cycle_id = cc.id AND cp.member_id = cm.member_id
-               )",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0.0);
-    Ok(total)
+/// Aggregate chit position for the balance sheet, computed per member across all
+/// chits as the closed form of the chit passbook balance (`get_member_chit_ledger`):
+///
+///   credit_i  = Σ over the member's payments of MAX(cash_paid, monthly_contribution)
+///               (each cycle credits the member their full contribution — the cash
+///                actually paid plus any auction/bid discount that reduced it)
+///   balance_i = credit_i − (gross prize, if the member has won)
+///
+/// A member who has paid in but not yet won is a CREDITOR (SHG owes them what they
+/// have paid) → `payable`. A member who has won but is still repaying installments
+/// is a DEBTOR (owes the SHG) → `receivable`. `opening_capital` is the negated sum
+/// of each member's PAST-cycle-only balance — past-data cycles carry no ledger cash
+/// (it lives in the opening balance), so this term lets the sheet reconcile, exactly
+/// like the past-loan / member-opening opening-capital adjustments.
+///
+/// The `MAX(cash, monthly)` credit is what makes the sheet reconcile: summed across
+/// a cycle's members, the per-payment discount (`monthly − cash`) exactly equals the
+/// winner's bid discount, so `cash_held + receivable = payable + chit_commission`.
+#[derive(Debug, Default)]
+pub struct ChitPositions {
+    pub payable: f64,        // liability — owed to members yet to win
+    pub receivable: f64,     // asset — owed by winners still repaying
+    pub opening_capital: f64,
 }
 
-/// Total chit prize money still to be paid out to members of ACTIVE chits who
-/// have not won yet — the SHG's future prize obligation ("money owed to people in
-/// a chit who are yet to win"). Estimated as (net prize = gross prize − commission)
-/// per not-yet-won member. Future bid discounts aren't known, so this is an
-/// informational estimate.
-pub fn get_total_chit_rewards_payable(conn: &Connection) -> Result<f64, AppError> {
-    let total: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(
-                        MAX(COALESCE(cg.fixed_prize_amount, cg.total_amount) - cg.commission_per_winner, 0)
-                     ), 0)
-             FROM chit_members cm
-             JOIN chit_groups cg ON cg.id = cm.chit_id
-             WHERE cg.status = 'ACTIVE'
-               AND NOT EXISTS (
-                   SELECT 1 FROM chit_cycle_winners w
-                   WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
-               )",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0.0);
-    Ok(total)
+pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitPositions, AppError> {
+    // `as_of` is the inclusive upper bound (e.g. "2026-03-31T23:59:59"); everything
+    // is counted only up to that instant so the position matches the sheet's date.
+    let mut stmt = conn.prepare(
+        "SELECT
+            COALESCE(cg.fixed_prize_amount, cg.total_amount) AS gross,
+            (SELECT COALESCE(SUM(MAX(cp.amount, cg.monthly_contribution)), 0)
+               FROM chit_payments cp
+               WHERE cp.chit_id = cm.chit_id AND cp.member_id = cm.member_id
+                 AND cp.paid_at <= ?1) AS credit,
+            (SELECT COALESCE(SUM(MAX(cp.amount, cg.monthly_contribution)), 0)
+               FROM chit_payments cp
+               JOIN chit_cycles cc ON cc.id = cp.cycle_id
+               WHERE cp.chit_id = cm.chit_id AND cp.member_id = cm.member_id
+                 AND cp.paid_at <= ?1 AND COALESCE(cc.is_past_entry, 0) = 1) AS past_credit,
+            (SELECT COALESCE(cc.is_past_entry, 0)
+               FROM chit_cycle_winners w JOIN chit_cycles cc ON cc.id = w.cycle_id
+               WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
+                 AND w.paid_at <= ?1
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_ccw,
+            (SELECT COALESCE(cc.is_past_entry, 0)
+               FROM chit_cycles cc
+               WHERE cc.chit_id = cm.chit_id AND cc.winning_member_id = cm.member_id
+                 AND cc.auction_date <= ?1
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_legacy
+         FROM chit_members cm
+         JOIN chit_groups cg ON cg.id = cm.chit_id",
+    )?;
+
+    let rows = stmt.query_map([as_of], |r| {
+        Ok((
+            r.get::<_, f64>(0)?,          // gross
+            r.get::<_, f64>(1)?,          // credit
+            r.get::<_, f64>(2)?,          // past_credit
+            r.get::<_, Option<i64>>(3)?,  // won_ccw: None=not won, Some(0)=won live, Some(1)=won past
+            r.get::<_, Option<i64>>(4)?,  // won_legacy
+        ))
+    })?;
+
+    let mut pos = ChitPositions::default();
+    for row in rows {
+        let (gross, credit, past_credit, won_ccw, won_legacy) = row?;
+        // Winning-cycle's is_past_entry: prefer the modern winners table.
+        let won = won_ccw.or(won_legacy);
+        let has_won = won.is_some();
+        let won_in_past = matches!(won, Some(x) if x != 0);
+
+        let balance = credit - if has_won { gross } else { 0.0 };
+        let past_balance = past_credit - if won_in_past { gross } else { 0.0 };
+
+        pos.payable += balance.max(0.0);
+        pos.receivable += (-balance).max(0.0);
+        pos.opening_capital += -past_balance;
+    }
+
+    Ok(pos)
 }
 
 /// One line of a member's detailed chit ledger.
