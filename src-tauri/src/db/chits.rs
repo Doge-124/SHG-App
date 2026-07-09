@@ -923,9 +923,15 @@ pub struct ChitPositions {
 pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitPositions, AppError> {
     // `as_of` is the inclusive upper bound (e.g. "2026-03-31T23:59:59"); everything
     // is counted only up to that instant so the position matches the sheet's date.
+    // Winner debit uses the ACTUAL recorded gross (payout_amount + bid_discount +
+    // commission from the winning row), NOT the chit's current configured prize. The
+    // recorded payout matches the CHIT_PAYOUT ledger voucher exactly, so the accrual
+    // stays reconciled with cash even if the chit's total_amount / fixed_prize_amount
+    // is edited after a payout, or a winner is paid a non-standard amount. Config gross
+    // is only a last-resort fallback for legacy rows missing a payout figure.
     let mut stmt = conn.prepare(
         "SELECT
-            COALESCE(cg.fixed_prize_amount, cg.total_amount) AS gross,
+            COALESCE(cg.fixed_prize_amount, cg.total_amount) AS config_gross,
             (SELECT COALESCE(SUM(MAX(cp.amount, cg.monthly_contribution)), 0)
                FROM chit_payments cp
                WHERE cp.chit_id = cm.chit_id AND cp.member_id = cm.member_id
@@ -939,33 +945,49 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
                FROM chit_cycle_winners w JOIN chit_cycles cc ON cc.id = w.cycle_id
                WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
                  AND w.paid_at <= ?1
-               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_ccw,
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_ccw_ispast,
+            (SELECT COALESCE(w.payout_amount, 0) + COALESCE(w.bid_discount, 0)
+                      + COALESCE(w.commission, 0)
+               FROM chit_cycle_winners w JOIN chit_cycles cc ON cc.id = w.cycle_id
+               WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
+                 AND w.paid_at <= ?1
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_ccw_gross,
             (SELECT COALESCE(cc.is_past_entry, 0)
                FROM chit_cycles cc
                WHERE cc.chit_id = cm.chit_id AND cc.winning_member_id = cm.member_id
                  AND cc.auction_date <= ?1
-               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_legacy
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_legacy_ispast,
+            (SELECT cc.payout_amount
+               FROM chit_cycles cc
+               WHERE cc.chit_id = cm.chit_id AND cc.winning_member_id = cm.member_id
+                 AND cc.auction_date <= ?1
+               ORDER BY cc.cycle_no ASC LIMIT 1) AS won_legacy_gross
          FROM chit_members cm
          JOIN chit_groups cg ON cg.id = cm.chit_id",
     )?;
 
     let rows = stmt.query_map([as_of], |r| {
         Ok((
-            r.get::<_, f64>(0)?,          // gross
+            r.get::<_, f64>(0)?,          // config_gross (fallback)
             r.get::<_, f64>(1)?,          // credit
             r.get::<_, f64>(2)?,          // past_credit
-            r.get::<_, Option<i64>>(3)?,  // won_ccw: None=not won, Some(0)=won live, Some(1)=won past
-            r.get::<_, Option<i64>>(4)?,  // won_legacy
+            r.get::<_, Option<i64>>(3)?,  // won_ccw_ispast: None=not won, Some(0)=live, Some(1)=past
+            r.get::<_, Option<f64>>(4)?,  // won_ccw_gross (recorded)
+            r.get::<_, Option<i64>>(5)?,  // won_legacy_ispast
+            r.get::<_, Option<f64>>(6)?,  // won_legacy_gross (recorded)
         ))
     })?;
 
     let mut pos = ChitPositions::default();
     for row in rows {
-        let (gross, credit, past_credit, won_ccw, won_legacy) = row?;
-        // Winning-cycle's is_past_entry: prefer the modern winners table.
-        let won = won_ccw.or(won_legacy);
-        let has_won = won.is_some();
-        let won_in_past = matches!(won, Some(x) if x != 0);
+        let (config_gross, credit, past_credit,
+             won_ccw_ispast, won_ccw_gross, won_legacy_ispast, won_legacy_gross) = row?;
+        // Winning cycle: prefer the modern winners table, fall back to the legacy column.
+        let won_ispast = won_ccw_ispast.or(won_legacy_ispast);
+        let has_won = won_ispast.is_some();
+        let won_in_past = matches!(won_ispast, Some(x) if x != 0);
+        // Actual gross drawn = recorded payout (+bid +commission); config only if absent.
+        let gross = won_ccw_gross.or(won_legacy_gross).unwrap_or(config_gross);
 
         let balance = credit - if has_won { gross } else { 0.0 };
         let past_balance = past_credit - if won_in_past { gross } else { 0.0 };
