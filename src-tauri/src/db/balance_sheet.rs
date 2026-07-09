@@ -37,8 +37,14 @@ pub struct BalanceSheet {
     // ── Liabilities: Chit Dues Payable ────────────────────────────────────
     // Members who have paid into a chit but have NOT yet won: the SHG owes them
     // what they have contributed so far. Grows as they keep paying, and nets to
-    // ~zero once every member has won and the chit completes.
+    // ~zero once every member has won and the chit completes. Also includes any
+    // undistributed auction dividend and prizes awarded-but-not-yet-disbursed.
     pub chit_payable: f64,
+
+    // Of chit_payable, the portion that is a prize awarded to a winner but not yet
+    // fully paid out in cash (a voided/partial payout). Shown as its own line so the
+    // "members yet to win" figure stays clean. Normally zero.
+    pub chit_winner_unpaid: f64,
 
     // ── Capital: SHG Surplus (= Total Assets − Member Savings − Chit Payable) ─
     pub surplus: f64,
@@ -82,6 +88,7 @@ pub struct ReconDebug {
     pub chit_payable: f64,                   // liability — members yet to win (incl. dividend)
     pub chit_payable_accrual: f64,           // members-yet-to-win component (pre-dividend)
     pub chit_dividend_payable: f64,          // undistributed auction dividend component
+    pub chit_winner_unpaid: f64,             // prizes awarded but not yet disbursed in cash
     pub chit_declared_live: f64,             // Σ live winners' bid discount
     pub chit_consumed_live: f64,             // Σ live payment shortfalls below monthly
     pub chit_live_cash: f64,                 // raw Σ chit_payments.amount (live) — cf. receipts
@@ -228,7 +235,8 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // it belongs on the liability side alongside the members' accrued contributions.
     let chit_dividend_payable = chit_pos.dividend_payable;
     let chit_payable_accrual = chit_pos.payable;                   // members yet to win
-    let chit_payable = chit_payable_accrual + chit_dividend_payable; // liability side
+    // chit_payable is finalised after chit_payouts_txn below (it also includes any
+    // prize that was awarded to a winner but not yet fully disbursed in cash).
     let chit_receivable = chit_pos.receivable;                     // asset side
     let chit_opening_capital = chit_pos.opening_capital;
     let chit_declared_live = chit_pos.declared_live;
@@ -368,6 +376,18 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         [&date_end], |r| r.get(0),
     ).unwrap_or(0.0);
 
+    // Chit prizes AWARDED (per the winners' accrual) but not yet fully DISBURSED in
+    // cash. Each live winner's payout voucher should equal their gross prize less any
+    // bid discount; when the ledger has paid out less than that, the shortfall is a
+    // real liability — the SHG still owes that winner the balance (e.g. a voided or
+    // partially-made payout). Adding it keeps the accrual receivable consistent with
+    // the cash actually disbursed. Normally zero.
+    let chit_winner_unpaid =
+        (chit_live_winner_gross - chit_declared_live) - chit_payouts_txn;
+    // Final chit liability: members yet to win + undistributed auction dividend +
+    // prizes awarded but not yet disbursed.
+    let chit_payable = chit_payable_accrual + chit_dividend_payable + chit_winner_unpaid;
+
     let savings_payouts_txn: f64 = conn.query_row(
         "SELECT COALESCE(SUM(amount), 0) FROM shg_transactions
          WHERE txn_type = 'VOUCHER' AND reference_type = 'SAVINGS_WITHDRAWAL'
@@ -443,6 +463,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         member_savings,
         total_members_with_savings,
         chit_payable,
+        chit_winner_unpaid,
         surplus: surplus_derived,
         shg_seed: shg_capital,
         interest_earned,
@@ -470,6 +491,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
             chit_payable,
             chit_payable_accrual,
             chit_dividend_payable,
+            chit_winner_unpaid,
             chit_declared_live,
             chit_consumed_live,
             chit_live_cash,

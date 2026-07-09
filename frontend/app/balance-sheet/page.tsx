@@ -25,6 +25,7 @@ interface BalanceSheet {
   member_savings: number
   total_members_with_savings: number
   chit_payable: number
+  chit_winner_unpaid: number
   surplus: number
   shg_seed: number
   interest_earned: number
@@ -211,11 +212,19 @@ export default function BalanceSheetPage() {
                   note={`${data.total_members_with_savings} members`}
                   value={data.member_savings} />
 
-                {data.chit_payable > 0 && (
+                {(data.chit_payable - data.chit_winner_unpaid) > 0 && (
                   <Row
                     label="Chit dues payable (members yet to win)"
                     note="paid in so far, not yet won — owed back by the SHG"
-                    value={data.chit_payable}
+                    value={data.chit_payable - data.chit_winner_unpaid}
+                  />
+                )}
+
+                {Math.abs(data.chit_winner_unpaid) > 0.005 && (
+                  <Row
+                    label="Chit prizes awarded, not yet paid out"
+                    note="won, but the payout has not been fully disbursed in cash"
+                    value={data.chit_winner_unpaid}
                   />
                 )}
 
