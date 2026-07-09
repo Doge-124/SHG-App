@@ -79,7 +79,8 @@ pub struct ReconDebug {
     pub chit_installments_receipts: f64,     // CHIT_PAYMENT shg receipts (cash in)
     pub savings_payouts_txn: f64,
     pub opening_member_liability: f64,
-    pub chit_payable: f64,                   // liability — members yet to win
+    pub chit_payable: f64,                   // liability — members yet to win (incl. dividend)
+    pub chit_dividend_payable: f64,          // undistributed auction dividend component
     pub chit_opening_capital: f64,           // past-data chit net folded into capital
     pub shg_seed_raw: f64,
     pub shg_capital: f64,
@@ -215,8 +216,12 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // Assets = Liabilities + Capital reconciliation intact.
     let chit_pos = crate::db::chits::get_chit_member_positions(conn, &date_end)
         .unwrap_or_default();
-    let chit_payable = chit_pos.payable;            // liability side
-    let chit_receivable = chit_pos.receivable;      // asset side
+    // The undistributed auction dividend is money the SHG holds on the members'
+    // behalf between a winner's bid and the next cycle's reduced contributions, so
+    // it belongs on the liability side alongside the members' accrued contributions.
+    let chit_dividend_payable = chit_pos.dividend_payable;
+    let chit_payable = chit_pos.payable + chit_dividend_payable;   // liability side
+    let chit_receivable = chit_pos.receivable;                     // asset side
     let chit_opening_capital = chit_pos.opening_capital;
 
     let total_assets =
@@ -449,6 +454,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
             savings_payouts_txn,
             opening_member_liability,
             chit_payable,
+            chit_dividend_payable,
             chit_opening_capital,
             shg_seed_raw: shg_seed,
             shg_capital,

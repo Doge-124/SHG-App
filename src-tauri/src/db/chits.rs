@@ -906,6 +906,14 @@ pub struct ChitPositions {
     pub payable: f64,        // liability — owed to members yet to win
     pub receivable: f64,     // asset — owed by winners still repaying
     pub opening_capital: f64,
+    /// Undistributed auction dividend (liability). A winner's bid discount reduces
+    /// the cycle payout immediately (cash), but is only handed back to members as
+    /// reduced contributions in the FOLLOWING cycle. Between those two events the SHG
+    /// holds that discount on the members' behalf. Computed independently from the
+    /// bid discounts (not derived from cash) so the balance-sheet reconciliation still
+    /// catches genuine errors:
+    ///   dividend_payable = Σ(live winners' bid discount) − Σ(live payment shortfalls)
+    pub dividend_payable: f64,
 }
 
 pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitPositions, AppError> {
@@ -962,6 +970,31 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
         pos.receivable += (-balance).max(0.0);
         pos.opening_capital += -past_balance;
     }
+
+    // Undistributed auction dividend (see struct doc). Bid discounts declared by
+    // LIVE winners, minus the discount already passed back to members through
+    // reduced LIVE contributions. Past cycles carry no ledger cash, so only live
+    // cycles matter here; a past-cycle discount consumed by a live payment nets out
+    // against the opening-capital term. Can be slightly negative at the past→live
+    // boundary (dividend pre-funded from opening balance) — that is correct.
+    let declared_live: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(w.bid_discount), 0)
+         FROM chit_cycle_winners w
+         JOIN chit_cycles cc ON cc.id = w.cycle_id
+         WHERE COALESCE(cc.is_past_entry, 0) = 0 AND w.paid_at <= ?1",
+        [as_of], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    let consumed_live: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(MAX(cg.monthly_contribution - cp.amount, 0)), 0)
+         FROM chit_payments cp
+         JOIN chit_cycles cc ON cc.id = cp.cycle_id
+         JOIN chit_groups cg ON cg.id = cp.chit_id
+         WHERE COALESCE(cc.is_past_entry, 0) = 0 AND cp.paid_at <= ?1",
+        [as_of], |r| r.get(0),
+    ).unwrap_or(0.0);
+
+    pos.dividend_payable = declared_live - consumed_live;
 
     Ok(pos)
 }
