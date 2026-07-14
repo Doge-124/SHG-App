@@ -691,6 +691,40 @@ pub fn advance_to_next_cycle(
     })
 }
 
+/// Change the auction (cycle) date of an existing cycle. Allowed only while the
+/// cycle is still active (no winner yet); once a winner has been processed the
+/// date is locked so it stays consistent with the recorded payout and ledger.
+pub fn update_chit_cycle_date(
+    conn: &Connection,
+    chit_id: i64,
+    cycle_id: i64,
+    auction_date: &str,
+) -> Result<(), AppError> {
+    let trimmed = auction_date.trim();
+    let day = &trimmed[..10.min(trimmed.len())];
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map_err(|_| AppError::validation("Cycle date must be a valid date (YYYY-MM-DD)"))?;
+
+    // The cycle must exist, belong to this chit, and not yet be completed.
+    let winner: Option<Option<i64>> = conn.query_row(
+        "SELECT winning_member_id FROM chit_cycles WHERE id = ?1 AND chit_id = ?2",
+        (cycle_id, chit_id),
+        |r| r.get::<_, Option<i64>>(0),
+    ).optional()?;
+    match winner {
+        None => return Err(AppError::business("Chit cycle not found")),
+        Some(Some(_)) => return Err(AppError::business(
+            "This cycle is completed — its date is locked.")),
+        Some(None) => {}
+    }
+
+    conn.execute(
+        "UPDATE chit_cycles SET auction_date = ?1 WHERE id = ?2 AND chit_id = ?3",
+        (day, cycle_id, chit_id),
+    )?;
+    Ok(())
+}
+
 /// Record member installment payment for the current cycle.
 ///
 /// `gross_amount` is the net amount collected (after per-member auction discount deducted).

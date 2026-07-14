@@ -449,6 +449,24 @@ export async function getCurrentCycleWithSummary(chitGroupId: string): Promise<A
   }
 }
 
+export async function updateChitCycleDate(
+  chitGroupId: string,
+  cycleId: string,
+  auctionDate: string,
+): Promise<ApiResponse<void>> {
+  try {
+    await invoke('update_chit_cycle_date', {
+      chitId: parseInt(chitGroupId),
+      cycleId: parseInt(cycleId),
+      auctionDate,
+    })
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to update cycle date:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to update cycle date' }
+  }
+}
+
 export async function advanceToNextCycle(
   chitGroupId: string,
   auctionDate?: string,

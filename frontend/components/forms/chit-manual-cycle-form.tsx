@@ -17,6 +17,7 @@ import { Plus, ArrowRight, DollarSign, Users, Trophy, CheckCircle, Clock, AlertT
 import {
   getCurrentCycleWithSummary,
   advanceToNextCycle,
+  updateChitCycleDate,
   recordMemberPaymentWithDiscount,
   getCycleEligibility,
   overrideMemberEligibility,
@@ -139,6 +140,10 @@ export function ChitManualCycleForm({
   // days after the current cycle, or the chit's start date for the first cycle.
   const [newCycleDate, setNewCycleDate] = useState<string>('')
 
+  // Editable date of the active cycle (changeable after it has been started).
+  const [cycleDateEdit, setCycleDateEdit] = useState<string>('')
+  const [savingCycleDate, setSavingCycleDate] = useState(false)
+
   // Auction discount for this cycle (from prev cycle, shown in payment tab)
   const [auctionDiscount, setAuctionDiscount] = useState<number>(0)
   const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
@@ -199,6 +204,11 @@ export function ChitManualCycleForm({
     setNewCycleDate(def)
   }, [currentCycle, startDate, open])
 
+  // Keep the active-cycle date editor in sync with the loaded cycle.
+  useEffect(() => {
+    setCycleDateEdit(currentCycle?.dueDate ? currentCycle.dueDate.slice(0, 10) : '')
+  }, [currentCycle])
+
   const loadData = async () => {
     setIsLoading(true)
     try {
@@ -233,6 +243,23 @@ export function ChitManualCycleForm({
       toast.error('Failed to load chit data')
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handleUpdateCycleDate = async () => {
+    if (!currentCycle || !cycleDateEdit) return
+    setSavingCycleDate(true)
+    try {
+      const res = await updateChitCycleDate(chitGroupId, currentCycle.id, cycleDateEdit)
+      if (res.success) {
+        toast.success('Cycle date updated')
+        await loadData()
+        onSuccess?.()
+      } else {
+        toast.error(res.error || 'Failed to update cycle date')
+      }
+    } finally {
+      setSavingCycleDate(false)
     }
   }
 
@@ -474,10 +501,31 @@ export function ChitManualCycleForm({
         {currentCycle ? (
           <Alert className={cycleCompleted ? 'border-green-500 bg-green-50' : 'border-blue-500'}>
             <AlertDescription className="flex items-center justify-between">
-              <span className="flex items-center gap-2">
+              <span className="flex items-center gap-2 flex-wrap">
                 {cycleCompleted && <Lock className="h-4 w-4 text-green-600" />}
                 <strong>Cycle {currentCycle.cycleNumber}</strong>
-                {currentCycle.dueDate && <span className="text-muted-foreground">· {formatDate(currentCycle.dueDate)}</span>}
+                {cycleCompleted ? (
+                  currentCycle.dueDate && <span className="text-muted-foreground">· {formatDate(currentCycle.dueDate)}</span>
+                ) : (
+                  <span className="flex items-center gap-1 text-muted-foreground">
+                    ·
+                    <Input
+                      type="date"
+                      value={cycleDateEdit}
+                      onChange={e => setCycleDateEdit(e.target.value)}
+                      className="h-7 w-[9.5rem] py-0"
+                    />
+                    {cycleDateEdit && cycleDateEdit !== (currentCycle.dueDate?.slice(0, 10) ?? '') && (
+                      <Button
+                        size="sm" variant="outline" className="h-7 px-2"
+                        onClick={handleUpdateCycleDate}
+                        disabled={savingCycleDate}
+                      >
+                        {savingCycleDate ? 'Saving…' : 'Save date'}
+                      </Button>
+                    )}
+                  </span>
+                )}
                 {cycleCompleted && <span className="text-green-700 text-sm">— Completed & locked</span>}
               </span>
               <Badge variant={cycleCompleted ? 'secondary' : 'default'}

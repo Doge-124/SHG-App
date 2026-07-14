@@ -527,6 +527,23 @@ pub fn advance_to_next_cycle(
     })
 }
 
+#[tauri::command]
+pub fn update_chit_cycle_date(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycle_id: i64,
+    auction_date: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard
+        .db
+        .as_mut()
+        .ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db::chits::update_chit_cycle_date(conn, chit_id, cycle_id, &auction_date)
+        .map_err(|e: AppError| e.to_string())
+}
+
 #[derive(serde::Deserialize)]
 pub struct RecordPaymentWithDiscountInput {
     pub chit_id: i64,
