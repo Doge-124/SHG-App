@@ -190,6 +190,13 @@ export function ChitManualCycleForm({
         const summary = cycleRes.data.paymentSummary as PaymentSummaryItem[]
         setPaymentSummary(summary)
 
+        // Sync the displayed auction discount to what the backend actually applies
+        // to eligible members this cycle (derived from the previous cycle's bid),
+        // so the "Eligible member pays" header matches each member's amount to
+        // collect. Eligible members all share one discount; derive it from any one.
+        const elig = summary.find(p => p.isEligibleForDiscount && !p.hasWon)
+        setAuctionDiscount(elig ? Math.max(0, monthlyContribution - elig.payableAmount) : 0)
+
         // Load eligibility if cycle exists
         if (cycleRes.data.cycle) {
           const eligRes = await getCycleEligibility(chitGroupId, cycleRes.data.cycle.id)
@@ -679,9 +686,10 @@ export function ChitManualCycleForm({
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <Label>Auction Discount (per member)</Label>
-                      <Input type="number" min={0} step="0.01" value={auctionDiscount || ''}
-                        onChange={e => setAuctionDiscount(parseFloat(e.target.value) || 0)} />
-                      <p className="text-xs text-muted-foreground">From previous cycle's bid discounts distributed to eligible members</p>
+                      <div className="flex items-center h-9 px-3 rounded-md border bg-muted text-sm font-medium">
+                        {formatCurrency(auctionDiscount)}
+                      </div>
+                      <p className="text-xs text-muted-foreground">Carried from the previous cycle's bid discount — this is the exact amount deducted from each eligible member below</p>
                     </div>
                     <div className="space-y-1">
                       <Label>Eligible member pays</Label>
