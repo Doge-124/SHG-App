@@ -167,6 +167,7 @@ fn main() {
             commands::settings::change_database_password,
             commands::settings::create_backup,
             commands::settings::restore_backup,
+            commands::settings::restore_backup_from_file,
             commands::settings::get_backup_list,
             commands::assets::list_assets,
             commands::assets::get_asset_summary,

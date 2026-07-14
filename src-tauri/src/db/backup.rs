@@ -152,6 +152,55 @@ pub fn restore_backup_file(backup_filename: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Import an EXTERNAL `.db` file (chosen via a file picker) as the live database.
+///
+/// Unlike `restore_backup_file`, the source is an absolute path anywhere on disk,
+/// not a name inside the backup folder. Returns the path of the pre-restore safety
+/// snapshot so the caller can roll back if the imported file fails to open (e.g. it
+/// was encrypted with a different PIN). The caller must drop the live connection
+/// before calling and reopen afterwards.
+pub fn restore_backup_from_path(source_path: &str) -> Result<String, AppError> {
+    let source = std::path::Path::new(source_path);
+    if !source.exists() {
+        return Err(AppError::database(format!(
+            "The selected file no longer exists: {}",
+            source_path
+        )));
+    }
+
+    let db_path = get_current_database_path()?;
+    let backup_dir = get_backup_directory()?;
+
+    // Safety snapshot of the current DB before we overwrite it.
+    let safety = backup_dir.join(format!(
+        "pre_restore_{}.db",
+        Utc::now().format("%Y%m%d_%H%M%S")
+    ));
+    std::fs::copy(&db_path, &safety)
+        .map_err(|e| AppError::database(format!("Failed to create safety copy: {}", e)))?;
+
+    // Replace the live DB file with the chosen file.
+    std::fs::copy(source, &db_path)
+        .map_err(|e| AppError::database(format!("Failed to import the selected file: {}", e)))?;
+
+    // Remove stale WAL/SHM so SQLite starts fresh with the imported file.
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+
+    Ok(safety.to_string_lossy().to_string())
+}
+
+/// Roll back a failed import by copying the pre-restore safety snapshot back over
+/// the live DB. Used when an imported file cannot be opened with the current key.
+pub fn rollback_from_safety(safety_path: &str) -> Result<(), AppError> {
+    let db_path = get_current_database_path()?;
+    std::fs::copy(safety_path, &db_path)
+        .map_err(|e| AppError::database(format!("Failed to roll back to previous data: {}", e)))?;
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    Ok(())
+}
+
 /// List available backups by scanning the backup directory (the source of truth),
 /// enriching the type/date from `backup_info` when known. Scanning the folder means
 /// the automatic safety snapshots (pre-upgrade / pre-migration / pre-restore) are

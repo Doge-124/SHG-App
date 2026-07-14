@@ -202,6 +202,17 @@ export async function restoreBackup(backupPath: string): Promise<ApiResponse<voi
   }
 }
 
+export async function restoreBackupFromFile(sourcePath: string): Promise<ApiResponse<void>> {
+  try {
+    await invoke('restore_backup_from_file', { sourcePath })
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to restore from file:', error)
+    // Surface the backend's specific message (e.g. wrong-PIN) to the user.
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to restore from the selected file' }
+  }
+}
+
 export async function getBackupList(): Promise<ApiResponse<BackupInfo[]>> {
   try {
     const backups = await invoke('get_backup_list') as BackupInfo[]

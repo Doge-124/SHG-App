@@ -17,6 +17,7 @@ import {
   FileText,
   Wrench,
   Printer,
+  FolderOpen,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -32,13 +33,14 @@ import { Spinner } from '@/components/ui/spinner'
 import { invoke } from '@tauri-apps/api/core'
 import { check as checkUpdate } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { save as saveDialog } from '@tauri-apps/plugin-dialog'
+import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog'
 import { readDir, readFile, writeFile, BaseDirectory } from '@tauri-apps/plugin-fs'
 import {
   getAllSettings,
   saveAllSettings,
   createBackup,
   restoreBackup,
+  restoreBackupFromFile,
   clearAllData,
   clearDataKeepMembers,
   changeDatabasePassword,
@@ -513,6 +515,46 @@ export default function SettingsPage() {
     }
   }
 
+  // Restore from a .db file anywhere on disk (file picker) rather than one already
+  // sitting in the app's backup folder.
+  const handleRestoreFromFile = async () => {
+    let selected: string | string[] | null
+    try {
+      selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: 'Select a backup file (.db) to restore',
+        filters: [{ name: 'SHG Manager backup', extensions: ['db'] }],
+      })
+    } catch (error) {
+      console.error('Failed to open file picker:', error)
+      toast.error('Could not open the file picker')
+      return
+    }
+    if (!selected || typeof selected !== 'string') return
+
+    if (!confirm(
+      'Restore from this file? This will REPLACE all current data with the data in the selected file. ' +
+      'A safety copy of your current data is made automatically first.'
+    )) return
+
+    setIsRestoreLoading(true)
+    try {
+      const response = await restoreBackupFromFile(selected)
+      if (response.success) {
+        toast.success('Backup restored from file. Please restart the application.')
+        setRestoreDialogOpen(false)
+      } else {
+        toast.error(response.error || 'Failed to restore from the selected file')
+      }
+    } catch (error) {
+      console.error('Failed to restore from file:', error)
+      toast.error('An error occurred while restoring from the file')
+    } finally {
+      setIsRestoreLoading(false)
+    }
+  }
+
   const handleRollbackLastUpdate = async () => {
     setIsRestoreLoading(true)
     try {
@@ -981,7 +1023,8 @@ export default function SettingsPage() {
                 <div className="p-4 rounded-lg border bg-card">
                   <h4 className="font-medium mb-2">Restore Data</h4>
                   <p className="text-sm text-muted-foreground mb-3">
-                    Restore from a previous backup, or roll back the last update.
+                    Restore from a saved backup, import a backup file from anywhere on
+                    your computer, or roll back the last update.
                   </p>
                   <div className="space-y-2">
                     <Button
@@ -997,6 +1040,20 @@ export default function SettingsPage() {
                         <Database className="mr-2 h-4 w-4" />
                       )}
                       Restore Backup
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={handleRestoreFromFile}
+                      disabled={isRestoreLoading}
+                    >
+                      {isRestoreLoading ? (
+                        <Spinner className="mr-2 h-4 w-4" />
+                      ) : (
+                        <FolderOpen className="mr-2 h-4 w-4" />
+                      )}
+                      Restore from File…
                     </Button>
                     <Button
                       variant="outline"

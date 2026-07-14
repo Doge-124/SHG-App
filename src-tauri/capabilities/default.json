@@ -16,6 +16,7 @@
     "fs:allow-applog-read",
     "dialog:default",
     "dialog:allow-save",
+    "dialog:allow-open",
     "log:default",
     "log:allow-log"
   ]

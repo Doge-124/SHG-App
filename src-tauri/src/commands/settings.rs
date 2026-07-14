@@ -357,6 +357,64 @@ pub fn restore_backup(
         .map_err(|e| e.to_string())
 }
 
+/// Restore from a `.db` file chosen anywhere on disk (via a file picker), rather
+/// than one already sitting in the backup folder. Validates by reopening with the
+/// current key: if the file was made with a different PIN or isn't a valid SHG
+/// database, the import is rolled back to the previous data automatically.
+#[tauri::command]
+pub fn restore_backup_from_file(
+    state: State<Mutex<AppState>>,
+    source_path: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+
+    let db_key = guard
+        .db_key
+        .clone()
+        .ok_or_else(|| "DB key not available — please unlock the database first".to_string())?;
+
+    if !std::path::Path::new(&source_path).exists() {
+        return Err("The selected file does not exist.".to_string());
+    }
+
+    // Checkpoint WAL so nothing is lost, then drop the live connection so the file
+    // can be replaced.
+    if let Some(conn) = &guard.db {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+    guard.db = None;
+
+    // Overwrite the live DB with the chosen file, keeping a safety snapshot.
+    let safety = match backup::restore_backup_from_path(&source_path) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = reopen_db(&mut guard, &db_key, &app);
+            return Err(e.to_string());
+        }
+    };
+
+    // Verify by opening with the current key. Wrong PIN / non-SHG file fails here.
+    match reopen_db(&mut guard, &db_key, &app) {
+        Ok(()) => Ok(()),
+        Err(open_err) => {
+            // Roll back to the safety snapshot so the app stays usable.
+            match backup::rollback_from_safety(&safety) {
+                Ok(()) => {
+                    let _ = reopen_db(&mut guard, &db_key, &app);
+                    Err("Could not open the selected file. It was likely created with a \
+                         different PIN, or it is not a valid SHG Manager backup. Your existing \
+                         data has been kept unchanged.".to_string())
+                }
+                Err(rb) => Err(format!(
+                    "The selected file could not be opened ({open_err}) and the automatic \
+                     roll-back also failed ({rb}). A safety copy of your previous data is saved at: {safety}"
+                )),
+            }
+        }
+    }
+}
+
 fn reopen_db(
     guard: &mut std::sync::MutexGuard<AppState>,
     db_key: &str,
