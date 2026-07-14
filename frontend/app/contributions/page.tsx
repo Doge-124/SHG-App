@@ -317,7 +317,7 @@ export default function ContributionsPage() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              Expected number of installments each member should have paid by now. It increases by one every week automatically.
+              Expected number of installments each member should have paid by now. It increases by one every Monday automatically.
             </p>
           </CardContent>
         </Card>
@@ -569,7 +569,7 @@ export default function ContributionsPage() {
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
               Enter how many installments each member should have paid by now. From
-              today it will automatically increase by one every week. Members who have
+              today it will automatically increase by one every Monday. Members who have
               paid fewer than this are flagged as behind.
             </p>
             <div className="space-y-1">

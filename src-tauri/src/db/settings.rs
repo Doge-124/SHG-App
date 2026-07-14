@@ -417,19 +417,20 @@ pub fn save_appearance_settings(conn: &mut Connection, settings: &AppearanceSett
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallmentStatus {
-    /// Expected installment number as of today (anchor + whole weeks elapsed).
+    /// Expected installment number as of today (anchor + Mondays elapsed).
     pub current_number: i64,
     /// The number last set by the user.
     pub anchor_number: i64,
     /// ISO date the anchor number was set (None if never configured).
     pub anchor_date: Option<String>,
-    /// Whole weeks added on top of the anchor since it was set.
+    /// Number of Mondays that have passed since the anchor was set.
     pub weeks_elapsed: i64,
 }
 
 /// Compute the current expected installment number. It starts at the anchor
-/// number set by the user and grows by one for every whole week since. Returns
-/// the full status so the UI can show both the live number and the anchor.
+/// number set by the user and steps up by one on every Monday since — regardless
+/// of which weekday it was anchored on. Returns the full status so the UI can show
+/// both the live number and the anchor.
 pub fn get_installment_status(conn: &Connection) -> Result<InstallmentStatus, AppError> {
     let (anchor_number, anchor_date): (i64, Option<String>) = conn
         .query_row(
@@ -444,11 +445,9 @@ pub fn get_installment_status(conn: &Connection) -> Result<InstallmentStatus, Ap
         Some(d) if anchor_number > 0 => {
             let anchor = chrono::NaiveDate::parse_from_str(&d[..10.min(d.len())], "%Y-%m-%d");
             match anchor {
-                Ok(start) => {
-                    let today = chrono::Utc::now().date_naive();
-                    let days = (today - start).num_days();
-                    if days > 0 { days / 7 } else { 0 }
-                }
+                // Count Mondays strictly after the anchor date, using LOCAL time so the
+                // roll-over happens at the operator's local Monday midnight.
+                Ok(start) => mondays_between(start, chrono::Local::now().date_naive()),
                 Err(_) => 0,
             }
         }
@@ -460,13 +459,33 @@ pub fn get_installment_status(conn: &Connection) -> Result<InstallmentStatus, Ap
     Ok(InstallmentStatus { current_number, anchor_number, anchor_date, weeks_elapsed })
 }
 
-/// Set the current installment number. Anchors it to today so it resumes
-/// incrementing weekly from this value.
+/// Number of Mondays that fall strictly after `start` and on or before `end`.
+/// This is how many times the weekly installment number has ticked over since it
+/// was anchored: it holds on the anchor day and increments on each following Monday.
+fn mondays_between(start: chrono::NaiveDate, end: chrono::NaiveDate) -> i64 {
+    use chrono::Datelike;
+    if end <= start {
+        return 0;
+    }
+    // Days from the anchor to the first Monday strictly after it. If the anchor is
+    // itself a Monday, the next tick is the following Monday (7 days later).
+    let wd = start.weekday().num_days_from_monday() as i64; // 0 = Mon … 6 = Sun
+    let to_first_monday = if wd == 0 { 7 } else { 7 - wd };
+    let first_monday = start + chrono::Duration::days(to_first_monday);
+    if first_monday > end {
+        0
+    } else {
+        (end - first_monday).num_days() / 7 + 1
+    }
+}
+
+/// Set the current installment number. Anchors it to today (local date) so it
+/// resumes stepping up on each following Monday from this value.
 pub fn set_installment_number(conn: &mut Connection, number: i64) -> Result<(), AppError> {
     if number < 0 {
         return Err(AppError::validation("Installment number cannot be negative"));
     }
-    let today = chrono::Utc::now().date_naive().to_string(); // YYYY-MM-DD
+    let today = chrono::Local::now().date_naive().to_string(); // YYYY-MM-DD (local)
     conn.execute(
         "UPDATE settings
          SET installment_anchor_number = ?1, installment_anchor_date = ?2,
