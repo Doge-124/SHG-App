@@ -84,6 +84,7 @@ interface ChitManualCycleFormProps {
   winnersPerCycle: number
   commissionPerWinner: number
   durationMonths: number
+  startDate?: string
   open: boolean
   onOpenChange: (open: boolean) => void
   onSuccess?: () => void
@@ -109,9 +110,21 @@ interface AuctionWinnerRow {
   bankRefType?: BankRefType
 }
 
+/** Local-date "YYYY-MM-DD" (avoids the UTC shift of Date.toISOString). */
+function isoLocal(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+/** Add `days` to an ISO date string, returning a local "YYYY-MM-DD". */
+function addDaysIso(iso: string, days: number): string {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  dt.setDate(dt.getDate() + days)
+  return isoLocal(dt)
+}
+
 export function ChitManualCycleForm({
   chitGroupId, chitGroupName, monthlyContribution, totalAmount,
-  winnersPerCycle, commissionPerWinner, durationMonths,
+  winnersPerCycle, commissionPerWinner, durationMonths, startDate,
   open, onOpenChange, onSuccess,
 }: ChitManualCycleFormProps) {
   const [members, setMembers] = useState<ChitMember[]>([])
@@ -121,6 +134,10 @@ export function ChitManualCycleForm({
   const [isLoading, setIsLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeTab, setActiveTab] = useState<'current' | 'payment' | 'winner'>('current')
+
+  // Date for the next cycle being started (operator-selectable). Defaults to 30
+  // days after the current cycle, or the chit's start date for the first cycle.
+  const [newCycleDate, setNewCycleDate] = useState<string>('')
 
   // Auction discount for this cycle (from prev cycle, shown in payment tab)
   const [auctionDiscount, setAuctionDiscount] = useState<number>(0)
@@ -173,6 +190,15 @@ export function ChitManualCycleForm({
     }
   }, [paymentSummary])
 
+  // Default the next cycle's date: 30 days after the current cycle, or the chit's
+  // start date for the very first cycle (today as a last resort).
+  useEffect(() => {
+    const def = currentCycle?.dueDate
+      ? addDaysIso(currentCycle.dueDate, 30)
+      : (startDate ? startDate.slice(0, 10) : isoLocal(new Date()))
+    setNewCycleDate(def)
+  }, [currentCycle, startDate, open])
+
   const loadData = async () => {
     setIsLoading(true)
     try {
@@ -211,9 +237,10 @@ export function ChitManualCycleForm({
   }
 
   const handleAdvanceCycle = async () => {
+    if (!newCycleDate) { toast.error('Please choose a date for the cycle'); return }
     setIsSubmitting(true)
     try {
-      const result = await advanceToNextCycle(chitGroupId)
+      const result = await advanceToNextCycle(chitGroupId, newCycleDate)
       if (result.success && result.data) {
         toast.success(result.data.message)
         setAuctionDiscount(0)
@@ -662,9 +689,22 @@ export function ChitManualCycleForm({
                           This cycle is complete — start the next cycle to continue. The discount carries forward automatically.
                         </p>
                       )}
+                      <div className="space-y-1 mb-3">
+                        <Label htmlFor="new-cycle-date">Cycle date</Label>
+                        <Input
+                          id="new-cycle-date"
+                          type="date"
+                          value={newCycleDate}
+                          onChange={e => setNewCycleDate(e.target.value)}
+                          disabled={isSubmitting || !!(currentCycle && !currentCycle.winnerId)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Defaults to {currentCycle ? '30 days after the current cycle' : "the chit's start date"} — change it to set the actual auction date.
+                        </p>
+                      </div>
                       <Button
                         onClick={handleAdvanceCycle}
-                        disabled={isSubmitting || !!(currentCycle && !currentCycle.winnerId)}
+                        disabled={isSubmitting || !newCycleDate || !!(currentCycle && !currentCycle.winnerId)}
                         className="w-full"
                       >
                         <Plus className="h-4 w-4 mr-2" />

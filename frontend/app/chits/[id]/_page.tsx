@@ -710,6 +710,7 @@ export default function ChitDetailPage() {
           winnersPerCycle={group.winnersPerCycle ?? 1}
           commissionPerWinner={group.commissionPerWinner ?? 0}
           durationMonths={group.durationMonths}
+          startDate={group.startDate}
           open={showManualCycleForm} onOpenChange={setShowManualCycleForm} onSuccess={reload}
         />
       )}

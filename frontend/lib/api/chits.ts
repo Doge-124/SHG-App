@@ -449,13 +449,19 @@ export async function getCurrentCycleWithSummary(chitGroupId: string): Promise<A
   }
 }
 
-export async function advanceToNextCycle(chitGroupId: string): Promise<ApiResponse<{
+export async function advanceToNextCycle(
+  chitGroupId: string,
+  auctionDate?: string,
+): Promise<ApiResponse<{
   cycle: ChitCycle;
   message: string;
 }>> {
   try {
-    
-    const result = await invoke('advance_to_next_cycle', { chitId: parseInt(chitGroupId) }) as any
+
+    const result = await invoke('advance_to_next_cycle', {
+      chitId: parseInt(chitGroupId),
+      auctionDate: auctionDate || null,
+    }) as any
     
     
     const cycle: ChitCycle = {

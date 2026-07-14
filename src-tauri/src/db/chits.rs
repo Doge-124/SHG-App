@@ -597,6 +597,7 @@ pub fn get_current_cycle(conn: &Connection, chit_id: i64) -> Result<Option<ChitC
 pub fn advance_to_next_cycle(
     conn: &mut Connection,
     chit_id: i64,
+    auction_date_override: Option<&str>,
 ) -> Result<ChitCycle, AppError> {
     let current_cycle = get_current_cycle(conn, chit_id)?;
     let next_cycle_no = current_cycle.as_ref().map(|c| c.cycle_no + 1).unwrap_or(1);
@@ -635,12 +636,25 @@ pub fn advance_to_next_cycle(
         )));
     }
 
-    let auction_date = if let Some(ref current) = current_cycle {
+    // Default cycle date: 30 days after the previous cycle, or the chit's start date
+    // for the first cycle. The operator may override it with an explicit date.
+    let default_auction_date = if let Some(ref current) = current_cycle {
         let current_date = chrono::NaiveDate::parse_from_str(&current.auction_date, "%Y-%m-%d")
             .unwrap_or_else(|_| chrono::Local::now().naive_local().date());
         (current_date + chrono::Duration::days(30)).format("%Y-%m-%d").to_string()
     } else {
         chit.start_date.clone()
+    };
+
+    let auction_date = match auction_date_override.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(d) => {
+            // Accept a full ISO datetime too, but store just the date part.
+            let day = &d[..10.min(d.len())];
+            chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+                .map_err(|_| AppError::validation("Cycle date must be a valid date (YYYY-MM-DD)"))?;
+            day.to_string()
+        }
+        None => default_auction_date,
     };
 
     // Auction discount from previous cycle carries to new cycle's payment calculations.
