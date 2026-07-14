@@ -601,8 +601,9 @@ export function printLoanSchedule(
         <tbody>${body || '<tr><td colspan="5" style="text-align:center;color:#888">No schedule entries</td></tr>'}</tbody>
       </table>
       <div class="legend">
-        Interest accrues at ${escapeHtml(formatCurrency(s.dailyInterest))}/day on principal after the ${s.upfrontDays}-day upfront period.
-        Projected Outstanding = original outstanding + cumulative interest, before repayments (so it is a projection, not the live balance on payment rows).${fineNote}
+        Interest accrues at ${s.dailyRate}%/day on the outstanding balance after the ${s.upfrontDays}-day upfront period
+        (${escapeHtml(formatCurrency(s.dailyInterest))}/day at the original principal). Projected Outstanding = outstanding
+        principal + accrued interest, and reflects repayments made — each repayment lowers the balance and the interest that follows.${fineNote}
       </div>
       <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
     </body></html>`

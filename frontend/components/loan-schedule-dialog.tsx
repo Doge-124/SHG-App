@@ -192,9 +192,10 @@ export function LoanScheduleDialog({ loanId, open, onOpenChange }: Props) {
             {/* Interest note */}
             <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground space-y-1">
               <p>
-                <strong>Interest accrual:</strong> {formatCurrency(s.dailyInterest)}/day on principal
-                after the {s.upfrontDays}-day upfront period.
-                Projected outstanding = original outstanding + cumulative interest (before repayments).
+                <strong>Interest accrual:</strong> {s.dailyRate}%/day on the <em>outstanding</em> balance
+                after the {s.upfrontDays}-day upfront period ({formatCurrency(s.dailyInterest)}/day at the
+                original principal). Projected Outstanding = outstanding principal + accrued interest, and
+                reflects repayments made — each repayment lowers the balance and the interest that follows.
               </p>
               {s.loanType === 'weekly' && s.dueDate && (
                 <p>

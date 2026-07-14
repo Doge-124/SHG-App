@@ -1332,15 +1332,27 @@ pub fn get_loan_repayment_schedule(
     });
 
     // ── Build entries ──────────────────────────────────────────────────────
+    // Replay the loan through the SAME accrual model used at repayment time
+    // (interest_due_for + interest-first allocation), so the projected balance
+    // reflects real repayments: principal repaid reduces the outstanding, and
+    // future interest accrues on the reducing balance — not on the full principal.
+    // Events are already sorted by date with payments before same-day markers.
     let mut entries: Vec<ScheduleEntry> = Vec::new();
+
+    let mut bal_outstanding = outstanding_at_issue;
+    let mut bal_unpaid: f64 = 0.0;
+    let mut bal_paid_through = upfront_end; // = issued + upfront_days
 
     for (date, entry_type, label) in &events {
         let days_elapsed = (*date - issued_date).num_days();
         let days_after   = (days_elapsed - upfront_days).max(0);
-        let accrued      = (days_after as f64 * daily_int * 100.0).round() / 100.0;
-        let projected    = outstanding_at_issue + accrued;
         let is_past      = *date <= today;
         let is_overdue   = due_date_nd.map_or(false, |dd| *date > dd && is_past);
+
+        // Interest owed as of this date on the current reducing balance.
+        let due = interest_due_for(
+            bal_outstanding, bal_unpaid, daily_rate, bal_paid_through, *date,
+        );
 
         let (pay_amount, pay_method) = if *entry_type == "payment" {
             // Dequeue the next payment recorded on this date.
@@ -1349,6 +1361,20 @@ pub fn get_loan_repayment_schedule(
                 .unwrap_or((0.0, String::new()))
         } else {
             (0.0, String::new())
+        };
+
+        let (accrued, projected) = if *entry_type == "payment" {
+            // Apply the repayment interest-first so later rows show the lower
+            // balance (clamped; this is a read-only projection, never errors).
+            let interest_paid = pay_amount.min(due);
+            let principal_paid = (pay_amount - interest_paid).min(bal_outstanding).max(0.0);
+            bal_outstanding = (bal_outstanding - principal_paid).max(0.0);
+            bal_unpaid = (due - interest_paid).max(0.0);
+            bal_paid_through = (*date).max(bal_paid_through);
+            // Payment rows show "—" for these columns in the UI.
+            (0.0, bal_outstanding)
+        } else {
+            (due, ((bal_outstanding + due) * 100.0).round() / 100.0)
         };
 
         entries.push(ScheduleEntry {
