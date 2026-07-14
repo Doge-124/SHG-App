@@ -471,6 +471,145 @@ export function printChitMemberLedger(
   printHtml(html)
 }
 
+// ─── Loan repayment schedule (interest accrual projection) ───────────────
+
+export interface LoanScheduleEntry {
+  date: string
+  label: string
+  entryType: string
+  daysElapsed: number
+  daysAfterUpfront: number
+  interestAccrued: number
+  projectedOutstanding: number
+  dailyInterest: number
+  isPast: boolean
+  isOverdue: boolean
+  paymentAmount: number
+  paymentMethod: string
+}
+
+export interface LoanScheduleReport {
+  loanId: number
+  memberName: string
+  principal: number
+  dailyRate: number
+  dailyInterest: number
+  loanType: string
+  issuedAt: string
+  upfrontDays: number
+  upfrontEndDate: string
+  upfrontInterest: number
+  outstandingAtIssue: number
+  dueDate: string | null
+  currentOutstanding: number
+  totalRepaid: number
+  status: string
+  entries: LoanScheduleEntry[]
+}
+
+/** Printable HTML (Print / Save as PDF) for a member's loan repayment schedule. */
+export function printLoanSchedule(
+  s: LoanScheduleReport,
+  opts: { shgName?: string; memberCode?: string; loanRef?: string },
+): void {
+  const rowBg = (e: LoanScheduleEntry): string => {
+    if (e.entryType === 'today') return ' style="background:#eff6ff"'
+    if (e.entryType === 'due_date' && e.isOverdue) return ' style="background:#fef2f2"'
+    if (e.entryType === 'due_date') return ' style="background:#fff7ed"'
+    if (e.entryType === 'payment') return ' style="background:#f0fdf4"'
+    if (e.entryType === 'issued') return ' style="background:#f8fafc"'
+    if (e.entryType === 'upfront_end') return ' style="background:#faf5ff"'
+    return ''
+  }
+
+  const body = s.entries.map((e) => {
+    const interestCell =
+      e.entryType === 'issued'
+        ? `<span style="color:#666">${escapeHtml(formatCurrency(s.upfrontInterest))} upfront (paid)</span>`
+        : (e.entryType === 'payment' || e.daysAfterUpfront === 0)
+          ? '<span style="color:#999">—</span>'
+          : `<span${e.isOverdue ? ' style="color:#b91c1c"' : ''}>${escapeHtml(formatCurrency(e.interestAccrued))}</span>`
+
+    const outstandingCell =
+      e.entryType === 'payment'
+        ? '<span style="color:#999">—</span>'
+        : `<span${e.isOverdue ? ' style="color:#b91c1c"' : ''}>${escapeHtml(formatCurrency(e.projectedOutstanding))}</span>`
+
+    const eventExtra =
+      e.entryType === 'payment'
+        ? ` <b style="color:#166534">−${escapeHtml(formatCurrency(e.paymentAmount))}</b>${e.paymentMethod ? ` <span style="color:#666">(${escapeHtml(e.paymentMethod)})</span>` : ''}`
+        : e.entryType === 'today'
+          ? ' <b>(Today)</b>'
+          : (e.entryType === 'due_date' && e.isOverdue)
+            ? ' <b style="color:#b91c1c">(Overdue)</b>'
+            : ''
+
+    return `<tr${rowBg(e)}>
+      <td style="white-space:nowrap;font-family:monospace">${escapeHtml(fmtDate(e.date))}</td>
+      <td>${escapeHtml(e.label)}${eventExtra}</td>
+      <td style="text-align:right;color:#666">${e.daysElapsed}</td>
+      <td style="text-align:right">${interestCell}</td>
+      <td style="text-align:right;font-weight:600">${outstandingCell}</td>
+    </tr>`
+  }).join('')
+
+  const dueLine = s.dueDate
+    ? ` · Due ${escapeHtml(fmtDate(s.dueDate))}`
+    : (s.loanType === 'monthly' ? ' · Open-ended (no fixed due date)' : '')
+
+  const fineNote = s.loanType === 'weekly' && s.dueDate
+    ? ` After the due date, a fine of outstanding × 7%/100 per overdue day applies.`
+    : ''
+
+  const html = `<!doctype html><html><head><meta charset="utf-8">
+    <title>Loan Schedule — ${escapeHtml(s.memberName)}</title>
+    <style>
+      body { font: 13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; color: #111; }
+      h1 { font-size: 18px; margin: 0 0 2px; }
+      .sub { color: #555; font-size: 12px; margin-bottom: 12px; }
+      .cards { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px; font-size:12px; }
+      .card { border:1px solid #ddd; border-radius:6px; padding:8px 12px; }
+      .card span { color:#666; }
+      .card b { display:block; font-size:14px; }
+      .meta { font-size:12px; margin-bottom:12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #ccc; padding: 6px 8px; font-size: 12px; }
+      th { background: #f1f5f9; text-align: left; }
+      .legend { color:#666; font-size:11px; margin-top:10px; }
+      @media print { button { display: none; } }
+    </style></head>
+    <body>
+      <h1>${escapeHtml(opts.shgName || 'SHG Manager')}</h1>
+      <div class="sub">Loan Repayment Schedule${opts.loanRef ? ` — ${escapeHtml(opts.loanRef)}` : ''} (${escapeHtml(s.loanType)})</div>
+      <div class="meta">
+        <b>${escapeHtml(s.memberName)}</b>${opts.memberCode ? ` (${escapeHtml(opts.memberCode)})` : ''}
+        · Issued ${escapeHtml(fmtDate(s.issuedAt))}${dueLine} · Status: ${escapeHtml(s.status)}
+      </div>
+      <div class="cards">
+        <div class="card"><span>Principal</span><b>${escapeHtml(formatCurrency(s.principal))}</b></div>
+        <div class="card"><span>Daily Rate</span><b>${s.dailyRate}% <span style="font-weight:400">(${escapeHtml(formatCurrency(s.dailyInterest))}/day)</span></b></div>
+        <div class="card"><span>Upfront Interest (${s.upfrontDays}d)</span><b>${escapeHtml(formatCurrency(s.upfrontInterest))}</b></div>
+        <div class="card"><span>Total Paid</span><b style="color:#166534">${escapeHtml(formatCurrency(s.totalRepaid + s.upfrontInterest))}</b></div>
+        <div class="card"><span>Current Outstanding</span><b style="color:${s.currentOutstanding > 0 ? '#b45309' : '#166534'}">${escapeHtml(formatCurrency(s.currentOutstanding))}</b></div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Event</th><th style="text-align:right">Days</th>
+              <th style="text-align:right">Interest Accrued</th>
+              <th style="text-align:right">Projected Outstanding</th></tr>
+        </thead>
+        <tbody>${body || '<tr><td colspan="5" style="text-align:center;color:#888">No schedule entries</td></tr>'}</tbody>
+      </table>
+      <div class="legend">
+        Interest accrues at ${escapeHtml(formatCurrency(s.dailyInterest))}/day on principal after the ${s.upfrontDays}-day upfront period.
+        Projected Outstanding = original outstanding + cumulative interest, before repayments (so it is a projection, not the live balance on payment rows).${fineNote}
+      </div>
+      <button onclick="window.print()" style="margin-top:16px;padding:8px 16px">Print / Save as PDF</button>
+    </body></html>`
+
+  printHtml(html)
+}
+
 export interface LoanLedgerReportRow {
   date: string
   particulars: string

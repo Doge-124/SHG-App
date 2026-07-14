@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -13,8 +14,10 @@ import {
 import { formatCurrency, formatDate } from '@/lib/format'
 import {
   CalendarClock, CheckCircle2, AlertTriangle, Clock, ArrowDownLeft,
-  Banknote, TrendingUp, Info,
+  Banknote, TrendingUp, Info, Printer,
 } from 'lucide-react'
+import { printLoanSchedule } from '@/lib/reports'
+import { useSettings } from '@/lib/settings-context'
 import { cn } from '@/lib/utils'
 
 interface ScheduleEntry {
@@ -82,6 +85,7 @@ function rowClass(entry: ScheduleEntry) {
 export function LoanScheduleDialog({ loanId, open, onOpenChange }: Props) {
   const [schedule, setSchedule] = useState<LoanRepaymentSchedule | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const { settings } = useSettings()
 
   useEffect(() => {
     if (open && loanId !== null) {
@@ -97,15 +101,27 @@ export function LoanScheduleDialog({ loanId, open, onOpenChange }: Props) {
 
   const s = schedule
 
+  const handlePrint = () => {
+    if (!s) return
+    printLoanSchedule(s, { shgName: settings?.general?.groupName })
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <CalendarClock className="h-5 w-5" />
-            Repayment Schedule
-            {s && <span className="text-muted-foreground font-normal text-sm">— {s.memberName}</span>}
-          </DialogTitle>
+          <div className="flex items-center justify-between gap-2 pr-8">
+            <DialogTitle className="flex items-center gap-2">
+              <CalendarClock className="h-5 w-5" />
+              Repayment Schedule
+              {s && <span className="text-muted-foreground font-normal text-sm">— {s.memberName}</span>}
+            </DialogTitle>
+            {s && (
+              <Button size="sm" variant="outline" onClick={handlePrint}>
+                <Printer className="mr-1 h-4 w-4" />Print
+              </Button>
+            )}
+          </div>
         </DialogHeader>
 
         {isLoading && (
