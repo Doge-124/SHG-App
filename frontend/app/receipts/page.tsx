@@ -58,7 +58,7 @@ export default function ReceiptsPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [paymentFilter, setPaymentFilter] = useState<'all' | 'cash' | 'bank'>('all')
+  const [paymentFilter, setPaymentFilter] = useState<'all' | 'cash' | 'bank' | 'mixed'>('all')
   const [printPreview, setPrintPreview] = useState<{
     isOpen: boolean
     type: 'receipt' | 'receipts'
@@ -86,7 +86,7 @@ export default function ReceiptsPage() {
 
   const filteredReceipts = paymentFilter === 'all'
     ? receipts
-    : receipts.filter((r) => r.payment_method === paymentFilter.toLowerCase())
+    : receipts.filter((r) => r.payment_method?.toUpperCase() === paymentFilter.toUpperCase())
 
   // Mixed receipts carry a cash_amount/bank_amount split; count each side
   // toward the right total so the cards still reconcile.
@@ -302,6 +302,7 @@ export default function ReceiptsPage() {
             <SelectItem value="all">All Methods</SelectItem>
             <SelectItem value="cash">Cash</SelectItem>
             <SelectItem value="bank">Bank</SelectItem>
+            <SelectItem value="mixed">Mixed</SelectItem>
           </SelectContent>
         </Select>
       </div>
