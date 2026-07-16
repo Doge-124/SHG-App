@@ -54,9 +54,10 @@ pub struct BalanceSheet {
     pub interest_earned: f64,      // loan repayments minus principal recovered
     pub chit_commission: f64,
     pub donations_grants: f64,
+    pub opening_asset_capital: f64, // fixed assets owned before the app started (capital)
     pub other_income: f64,
     pub total_income: f64,
-    pub other_expenses: f64,       // vouchers not related to loans or chit payouts
+    pub other_expenses: f64,       // operating expenses (excl. loans/chit/asset capex)
 
     // ── Verification ──────────────────────────────────────────────────────
     pub total_liabilities_capital: f64,
@@ -334,8 +335,8 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
 
     // Opening assets (already owned before the app) add to the SHG's capital: they
     // increase fixed_assets with no offsetting cash movement, so mirror their cost
-    // on the income/capital side to keep the sheet balanced. Folded into other_income
-    // so the surplus breakdown still sums to total_income.
+    // on the capital side to keep the sheet balanced. Reported as its own capital
+    // line (NOT lumped into Other Income — it is opening capital, not earned income).
     let opening_asset_capital: f64 = conn.query_row(
         "SELECT COALESCE(SUM(cost), 0) FROM assets
          WHERE is_opening = 1 AND purchase_date <= ?1
@@ -344,8 +345,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     ).unwrap_or(0.0);
 
     let pass_through = member_savings_receipts + chit_installments + loan_repayment_receipts;
-    let other_income = (total_receipts - shg_seed - pass_through - chit_commission - donations_grants).max(0.0)
-        + opening_asset_capital;
+    let other_income = (total_receipts - shg_seed - pass_through - chit_commission - donations_grants).max(0.0);
 
     // Other expenses = all vouchers that are genuine expenses — NOT loan
     // disbursements, chit payouts, or savings payouts. A savings payout
@@ -437,7 +437,8 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
     // accrual chit_payable / chit_receivable consistent with the two-way surplus check.
     let shg_capital =
         shg_seed - opening_member_liability + past_loans_capital + chit_opening_capital;
-    let total_income = shg_capital + interest_earned + chit_commission + donations_grants + other_income;
+    let total_income = shg_capital + interest_earned + chit_commission + donations_grants
+        + other_income + opening_asset_capital;
 
     // ── Derived surplus ───────────────────────────────────────────────────
     // Two independent computations of surplus:
@@ -469,6 +470,7 @@ pub fn get_balance_sheet(conn: &Connection, as_on_date: &str) -> Result<BalanceS
         interest_earned,
         chit_commission,
         donations_grants,
+        opening_asset_capital,
         other_income,
         total_income,
         other_expenses,

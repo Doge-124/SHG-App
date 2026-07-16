@@ -31,6 +31,7 @@ interface BalanceSheet {
   interest_earned: number
   chit_commission: number
   donations_grants: number
+  opening_asset_capital: number
   other_income: number
   total_income: number
   other_expenses: number
@@ -248,11 +249,20 @@ export default function BalanceSheetPage() {
                 {data.donations_grants > 0 && (
                   <Row label="Donations &amp; Grants" value={data.donations_grants} indent muted />
                 )}
+                {data.opening_asset_capital > 0 && (
+                  <Row label="Fixed Assets Brought In"
+                    note="opening capital — assets owned before using the app"
+                    value={data.opening_asset_capital} indent muted />
+                )}
                 {data.other_income > 0 && (
-                  <Row label="Other Income" value={data.other_income} indent muted />
+                  <Row label="Other Income"
+                    note="miscellaneous receipts"
+                    value={data.other_income} indent muted />
                 )}
                 {data.other_expenses > 0 && (
-                  <Row label="Less: Other Expenses" value={-data.other_expenses} indent muted />
+                  <Row label="Less: Operating Expenses"
+                    note="excludes loans, chit payouts &amp; asset purchases"
+                    value={-data.other_expenses} indent muted />
                 )}
                 <Row label="Total Surplus / Reserve" value={data.surplus} bold />
 
