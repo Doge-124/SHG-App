@@ -75,7 +75,7 @@ function mapLoan(loan: any): Loan {
 
 /**
  * Calculate the overdue fine for a weekly loan.
- * Fine accumulates after 120 days (100-day term + 20-day grace).
+ * Fine accumulates after the 120-day term (upfront interest covers 120 days; no grace).
  * Formula: outstanding × 0.07 / 100 × daysOverdue
  */
 export function calculateWeeklyFine(outstanding: number, issuedAt: string, paymentDate?: Date): number {
@@ -307,9 +307,9 @@ export function calculateAccruedInterest(
   }
 
   const issued = new Date(loan.issuedAt)
-  // Weekly loans: 100 days upfront collected — interest only accrues after day 100.
+  // Weekly loans: 120 days upfront collected — interest only accrues after day 120.
   // Monthly loans: 30 days upfront collected — interest only accrues after day 30.
-  const upfrontDays = loan.loanType === 'weekly' ? 100 : 30
+  const upfrontDays = loan.loanType === 'weekly' ? 120 : 30
   const upfrontEnd = new Date(issued.getTime() + upfrontDays * 86400000)
 
   // Reset to last payment date if it's after the upfront period, so we only

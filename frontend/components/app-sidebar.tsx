@@ -48,8 +48,8 @@ function isOverdue(issuedAt: string, loanType: string): boolean {
   const issued = new Date(issuedAt)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const graceEnd = new Date(issued.getTime() + 120 * 86_400_000) // 100-day term + 20-day grace
-  return today > graceEnd
+  const dueEnd = new Date(issued.getTime() + 120 * 86_400_000) // 120-day term, no grace
+  return today > dueEnd
 }
 
 const mainNavItems = [

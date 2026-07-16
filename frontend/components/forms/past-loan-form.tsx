@@ -51,7 +51,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
   const [repayments, setRepayments] = useState<Repayment[]>([])
 
   // Derived values
-  const upfrontDays = loanType === 'weekly' ? 100 : 30
+  const upfrontDays = loanType === 'weekly' ? 120 : 30
   const upfrontInterest = Math.round(amount * interestRate / 100 * upfrontDays * 100) / 100
   const totalRepaid = repayments.reduce((s, r) => s + r.amount, 0)
 
@@ -272,7 +272,7 @@ export function PastLoanForm({ open, onOpenChange, onSuccess }: PastLoanFormProp
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="monthly">Monthly (open-ended)</SelectItem>
-                        <SelectItem value="weekly">Weekly (100-day term, 20-day grace)</SelectItem>
+                        <SelectItem value="weekly">Weekly (120-day term, no grace)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

@@ -358,14 +358,15 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
     // this starts at issued_at + upfront_days (matching interest_start_date).
     // Borrowers can voluntarily prepay a month, which pushes this forward and
     // stops interest accruing until then. Backfill existing loans to that same
-    // baseline (30d monthly / 100d weekly after issue) so behaviour is
-    // unchanged for in-flight loans.
+    // baseline (30d monthly / 120d weekly after issue). Note: paid_through_floor
+    // also clamps to issued_at + upfront_days at read time, so the effective start
+    // follows the current upfront window regardless of this stored value.
     let added_paid_through = add_column_if_missing(&tx, "loans", "interest_paid_through", "TEXT")?;
     if added_paid_through {
         tx.execute_batch(r#"
             UPDATE loans
             SET interest_paid_through = date(substr(issued_at,1,10), '+' ||
-                CASE WHEN lower(loan_type) = 'weekly' THEN 100 ELSE 30 END || ' days')
+                CASE WHEN lower(loan_type) = 'weekly' THEN 120 ELSE 30 END || ' days')
             WHERE interest_paid_through IS NULL;
         "#)?;
     }

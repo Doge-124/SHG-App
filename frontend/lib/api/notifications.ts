@@ -27,7 +27,7 @@ export async function getNotificationAlerts(): Promise<NotificationAlerts> {
   today.setHours(0, 0, 0, 0)
 
   // ── Overdue active loans ────────────────────────────────────────────────
-  // Weekly loans: 100-day term + 20-day grace = overdue after 120 days.
+  // Weekly loans: 120-day term, no grace = overdue after 120 days.
   // Monthly loans: open-ended, no due date — not included in overdue alerts.
   const overdueLoans: LoanAlert[] = []
   try {
@@ -37,7 +37,7 @@ export async function getNotificationAlerts(): Promise<NotificationAlerts> {
         if (loan.status !== 'active') continue
         if (loan.loanType !== 'weekly') continue // monthly loans have no fixed term
         const issued = new Date(loan.issuedAt)
-        const graceEnd = new Date(issued.getTime() + 120 * 86_400_000) // 100-day term + 20-day grace
+        const graceEnd = new Date(issued.getTime() + 120 * 86_400_000) // 120-day term, no grace
         const daysOverdue = Math.floor((today.getTime() - graceEnd.getTime()) / 86_400_000)
         if (daysOverdue > 0) {
           overdueLoans.push({

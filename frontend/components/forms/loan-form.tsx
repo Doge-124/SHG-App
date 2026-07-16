@@ -82,7 +82,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
   const dailyInterestRate = Number(form.watch('dailyInterestRate')) || 0
   const loanType = form.watch('loanType')
 
-  const upfrontDays = loanType === 'weekly' ? 100 : 30
+  const upfrontDays = loanType === 'weekly' ? 120 : 30
   const upfrontInterest = Math.round(amount * dailyInterestRate / 100 * upfrontDays * 100) / 100
   const borrowerReceives = amount - upfrontInterest
   const dailyInterestAmount = Math.round(amount * dailyInterestRate / 100 * 100) / 100
@@ -163,7 +163,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                     </FormControl>
                     <SelectContent>
                       <SelectItem value="monthly">Monthly (open-ended)</SelectItem>
-                      <SelectItem value="weekly">Weekly (100-day term, 20-day grace)</SelectItem>
+                      <SelectItem value="weekly">Weekly (120-day term, no grace)</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -226,7 +226,7 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                 </p>
                 {loanType === 'weekly' && (
                   <p className="text-xs text-muted-foreground pt-1">
-                    Fine starts after 120 days: outstanding × 0.07% × days overdue
+                    Interest begins on day 121. Fine starts after the 120-day term (no grace): outstanding × 0.07% × days overdue
                   </p>
                 )}
               </div>
@@ -239,7 +239,15 @@ export function LoanForm({ open, onOpenChange, onSubmit, isLoading = false }: Lo
                 value={paySplit}
                 onChange={setPaySplit}
                 idPrefix="loan-disb"
+                mixedSeedCash={upfrontInterest}
               />
+              {paySplit.method === 'mixed' && (
+                <p className="text-xs text-muted-foreground">
+                  Tip: keep the cash portion equal to the upfront interest ({formatCurrency(upfrontInterest)}).
+                  It pays out in cash and returns immediately as upfront interest, so only the bank
+                  portion (a cheque) moves in real life.
+                </p>
+              )}
             </div>
 
             <FormField

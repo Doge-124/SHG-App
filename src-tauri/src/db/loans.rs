@@ -59,13 +59,14 @@ pub struct Loan {
 /// The SHG collects the first 30 days of interest at disbursement, but this
 /// is income only — it does NOT reduce the principal the borrower owes:
 ///   upfront_interest = principal × daily_rate% × 30  (monthly)
-///                    = principal × daily_rate% × 100 (weekly — full term upfront)
+///                    = principal × daily_rate% × 120 (weekly — full term upfront)
 ///   outstanding principal = full `amount`
 ///   cash handed to borrower = `amount − upfront_interest` (they pay the interest immediately)
 ///   voucher: full principal (money out), receipt: upfront_interest (income).
 ///
-/// Monthly loans are open-ended. Weekly loans have a 100-day term + 20-day grace (120 days total)
-/// after which a daily fine accrues (calculated at repayment time, not stored here).
+/// Monthly loans are open-ended. Weekly loans have a 120-day term with NO grace: the
+/// upfront interest covers the first 120 days, daily interest begins on day 121, and a
+/// daily fine accrues once past the 120-day term (calculated at repayment time).
 #[allow(clippy::too_many_arguments)]
 pub fn create_loan(
     conn: &mut Connection,
@@ -112,12 +113,12 @@ pub fn create_loan(
         "MIXED" => if cash_part.unwrap_or(0.0) >= bank_part.unwrap_or(0.0) { "CASH" } else { "BANK" },
         other => other,
     };
-    // For a MIXED disbursement the upfront interest (income) is always collected
-    // in CASH, not split with the bank portion. Single-method loans book it under
-    // that same method.
-    let income_method: &str = if payment_method == "MIXED" { "CASH" } else { loan_method };
+    // Upfront interest (income) is always collected in CASH by default, regardless
+    // of how the principal is disbursed — the SHG disburses the full principal by
+    // the chosen method and takes the interest skim as cash income.
+    let income_method: &str = "CASH";
 
-    let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
+    let upfront_days = if loan_type.to_lowercase() == "weekly" { 120.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
     // Upfront interest is collected as income, NOT deducted from principal.
     // The borrower owes the full principal back, on top of the interest they
@@ -181,7 +182,7 @@ pub fn create_loan(
     // inflated balance and the net-outflow check is atomic.
     if upfront_interest > 0.0 {
         let upfront_note = "Upfront Interest";
-        // Upfront interest is collected in cash for mixed disbursements (income_method).
+        // Upfront interest is booked as CASH income by default (income_method).
         ledger::record_receipt(
             &mut tx,
             upfront_interest,
@@ -301,7 +302,7 @@ pub fn record_past_loan(
     validation::validate_money_amount(amount)?;
     validation::validate_payment_method(payment_method)?;
 
-    let upfront_days = if loan_type.to_lowercase() == "weekly" { 100.0 } else { 30.0 };
+    let upfront_days = if loan_type.to_lowercase() == "weekly" { 120.0 } else { 30.0 };
     let upfront_interest = ((amount * daily_interest_rate / 100.0 * upfront_days) * 100.0).round() / 100.0;
     // Outstanding starts at the full principal — upfront interest is income,
     // not a principal reduction. (Matches the live create_loan path.)
@@ -433,9 +434,9 @@ fn parse_iso_date(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").ok()
 }
 
-/// Days the upfront interest covers — 30 for monthly, 100 for weekly.
+/// Days the upfront interest covers — 30 for monthly, 120 for weekly.
 fn upfront_days_for(loan_type: &str) -> i64 {
-    if loan_type.to_lowercase() == "weekly" { 100 } else { 30 }
+    if loan_type.to_lowercase() == "weekly" { 120 } else { 30 }
 }
 
 /// Date when daily interest accrual begins for a loan (issued_at + upfront_days).
@@ -1242,13 +1243,15 @@ pub fn get_loan_repayment_schedule(
     // at issue equals the full principal owed.
     let outstanding_at_issue = principal;
 
-    let upfront_days: i64 = if loan.loan_type == "weekly" { 100 } else { 30 };
+    let upfront_days: i64 = if loan.loan_type == "weekly" { 120 } else { 30 };
 
     let issued_date = chrono::NaiveDate::parse_from_str(&loan.issued_at[..10], "%Y-%m-%d")
         .map_err(|_| AppError::business("Invalid issued_at date"))?;
     let upfront_end = issued_date + chrono::Duration::days(upfront_days);
+    // Weekly loans have no grace: the loan is due at the end of the 120-day upfront
+    // term (interest begins the next day), so the due date is the upfront end.
     let due_date_nd = if loan.loan_type == "weekly" {
-        Some(issued_date + chrono::Duration::days(120))
+        Some(upfront_end)
     } else {
         None
     };
