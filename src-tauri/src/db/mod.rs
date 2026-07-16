@@ -154,6 +154,14 @@ pub fn init_db_with_pin(app: &tauri::AppHandle, pin: &str) -> Result<(rusqlite::
     // Apply any new versioned migrations (these take their own pre-migration backup).
     migrations::run_pending_migrations(&mut conn, &db_path, &backup_dir)?;
 
+    // Idempotent safety repair: complete any mixed-payment cancellation that
+    // previously reversed only one half (cash/bank), leaving a stranded sibling.
+    match cancel::repair_orphaned_mixed_reversals(&mut conn) {
+        Ok(n) if n > 0 => log::warn!("Repaired {n} stranded mixed-payment reversal half(s)"),
+        Ok(_) => {}
+        Err(e) => log::error!("Mixed-reversal repair failed (non-fatal): {e}"),
+    }
+
     // All schema work for this version succeeded — record it so we don't take
     // another safety backup on the next unlock of the same build.
     if version_changed {

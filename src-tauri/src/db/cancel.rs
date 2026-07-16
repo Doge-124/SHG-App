@@ -125,6 +125,54 @@ pub fn cancel_shg_transaction(
     }
 }
 
+/// One-time repair for the mixed-reversal bug: cancelling a MIXED loan repayment
+/// or chit payout used to reverse only the clicked half, leaving the sibling half
+/// live and the SHG balance off by that amount. Find any still-live original row
+/// whose mixed-payment group has already been (partly) voided, and reverse it too.
+///
+/// Safe + idempotent: a fully-live group (nothing voided) is untouched, and once a
+/// straggler is reversed it is no longer live so it won't be picked up again.
+/// Returns the number of rows repaired.
+pub fn repair_orphaned_mixed_reversals(conn: &mut Connection) -> Result<usize, AppError> {
+    let ids: Vec<i64> = {
+        let mut stmt = match conn.prepare(
+            "SELECT t.id FROM shg_transactions t
+             WHERE t.group_id IS NOT NULL
+               AND t.voided_at IS NULL
+               AND t.reversal_of_id IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM shg_transactions s
+                   WHERE s.group_id = t.group_id AND s.voided_at IS NOT NULL
+               )",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(0), // e.g. group_id column absent on very old DBs
+        };
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut v = Vec::new();
+        for r in rows {
+            if let Ok(id) = r { v.push(id); }
+        }
+        v
+    };
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction()?;
+    let mut repaired = 0usize;
+    for id in ids {
+        let txn = load_txn(&tx, id)?;
+        void_and_reverse(&tx, &txn, "Auto-repair: completed a partially-reversed mixed payment")?;
+        audit::log_audit_tx(&tx, "MIXED_REVERSAL_REPAIR", "shg_transaction",
+            Some(txn.id), &format!("Reversed stranded {} half Rs.{:.2} ({})",
+                txn.payment_method, txn.amount, txn.reference_type.as_deref().unwrap_or("")))?;
+        repaired += 1;
+    }
+    tx.commit()?;
+    Ok(repaired)
+}
+
 // ───── Bookkeeping primitives ────────────────────────────────────────────
 
 /// Insert the reversing row and mark the original voided. All other tables
@@ -328,10 +376,12 @@ fn cancel_loan_repayment(
     // Drop the loan_payments row.
     tx.execute("DELETE FROM loan_payments WHERE id = ?1", [payment_id])?;
 
-    void_and_reverse(&tx, txn, reason)?;
+    // Reverse the receipt(s). void_group handles a cash+bank mixed repayment so
+    // BOTH halves are reversed (the loan side above already used the group total).
+    void_group(&tx, txn, reason)?;
 
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("MEMBER_PAYMENT reversed (loan #{}, Rs.{}): {}", loan_id, txn.amount, reason))?;
+        Some(txn.id), &format!("MEMBER_PAYMENT reversed (loan #{}, Rs.{}): {}", loan_id, total, reason))?;
     tx.commit()?;
     Ok(())
 }
@@ -411,7 +461,9 @@ fn cancel_chit_payout_with_commission(
         void_and_reverse(&tx, &commission, &format!("Auto-reversed with payout #{}", txn.id))?;
     }
 
-    void_and_reverse(&tx, txn, reason)?;
+    // Reverse the payout voucher(s). void_group handles a cash+bank mixed payout so
+    // both halves are reversed, not just the clicked one.
+    void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
         Some(txn.id), &format!("CHIT_PAYOUT reversed (cycle #{}, Rs.{}): {}", cycle_id, txn.amount, reason))?;
     tx.commit()?;
