@@ -18,6 +18,7 @@ import {
   getCurrentCycleWithSummary,
   advanceToNextCycle,
   updateChitCycleDate,
+  setCycleCollectionDiscount,
   recordMemberPaymentWithDiscount,
   getCycleEligibility,
   overrideMemberEligibility,
@@ -40,42 +41,6 @@ import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
 import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
 import { MemberTypeTag } from '@/components/member-type-tag'
 import { cn } from '@/lib/utils'
-
-type BankRefType = 'transfer' | 'cheque'
-
-/** Tag a cheque reference so it reads clearly on the Bank Book / reports. */
-function tagBankRef(refType: BankRefType | undefined, val: string | undefined): string | null {
-  const t = (val ?? '').trim()
-  if (!t) return null
-  return refType === 'cheque' ? `Cheque ${t}` : t
-}
-
-/** Compact Transfer/Cheque selector + reference input for a bank payout. */
-function BankRefInline({ refType, value, onRefType, onValue }: {
-  refType: BankRefType
-  value: string
-  onRefType: (t: BankRefType) => void
-  onValue: (v: string) => void
-}) {
-  return (
-    <div className="grid grid-cols-3 gap-2">
-      <Select value={refType} onValueChange={(t) => onRefType(t as BankRefType)}>
-        <SelectTrigger className="h-8 col-span-1"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="transfer">Transfer</SelectItem>
-          <SelectItem value="cheque">Cheque</SelectItem>
-        </SelectContent>
-      </Select>
-      <Input
-        className="h-8 col-span-2"
-        placeholder={refType === 'cheque' ? 'Cheque no.' : 'UTR / ref no.'}
-        value={value}
-        onChange={(e) => onValue(e.target.value)}
-        maxLength={64}
-      />
-    </div>
-  )
-}
 
 interface ChitManualCycleFormProps {
   chitGroupId: string
@@ -106,9 +71,7 @@ interface PaymentSummaryItem {
 interface AuctionWinnerRow {
   memberId: string
   bidDiscount: number
-  paymentMethod: 'cash' | 'bank'
-  bankTxnId?: string
-  bankRefType?: BankRefType
+  split: PaymentSplit
 }
 
 /** Local-date "YYYY-MM-DD" (avoids the UTC shift of Date.toISOString). */
@@ -144,16 +107,17 @@ export function ChitManualCycleForm({
   const [cycleDateEdit, setCycleDateEdit] = useState<string>('')
   const [savingCycleDate, setSavingCycleDate] = useState(false)
 
-  // Auction discount for this cycle (from prev cycle, shown in payment tab)
+  // Auction discount for this cycle (from prev cycle, or a manual override).
   const [auctionDiscount, setAuctionDiscount] = useState<number>(0)
+  // Editable value of the per-member auction discount for the active cycle.
+  const [discountEdit, setDiscountEdit] = useState<string>('')
+  const [savingDiscount, setSavingDiscount] = useState(false)
   const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [selectedMemberId, setSelectedMemberId] = useState<string>('')
 
   // Winner tab
   const [fixedWinnerId, setFixedWinnerId] = useState<string>('')
-  const [fixedWinnerMethod, setFixedWinnerMethod] = useState<'cash' | 'bank'>('cash')
-  const [fixedWinnerRefType, setFixedWinnerRefType] = useState<BankRefType>('transfer')
-  const [fixedWinnerBankRef, setFixedWinnerBankRef] = useState<string>('')
+  const [fixedWinnerSplit, setFixedWinnerSplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [auctionWinners, setAuctionWinners] = useState<AuctionWinnerRow[]>([])
   const [overrideDiscount, setOverrideDiscount] = useState<string>('')
 
@@ -167,9 +131,7 @@ export function ChitManualCycleForm({
 
   // Closing cycle / final settlement
   const [closingInfo, setClosingInfo] = useState<ChitClosingInfo | null>(null)
-  const [closingMethods, setClosingMethods] = useState<Record<string, 'cash' | 'bank'>>({})
-  const [closingRefTypes, setClosingRefTypes] = useState<Record<string, BankRefType>>({})
-  const [closingBankRefs, setClosingBankRefs] = useState<Record<string, string>>({})
+  const [closingSplits, setClosingSplits] = useState<Record<string, PaymentSplit>>({})
 
   const perMemberAmount = (memberId: string) => {
     const summary = paymentSummary.find(p => p.memberId === memberId)
@@ -182,6 +144,10 @@ export function ChitManualCycleForm({
     return pb ? ` (Passbook: ${pb})` : ''
   }
   const memberTypeOf = (memberId: string) => members.find(m => m.memberId === memberId)?.memberType
+
+  const closingSplit = (memberId: string): PaymentSplit => closingSplits[memberId] ?? emptyPaymentSplit
+  const setClosingSplit = (memberId: string, v: PaymentSplit) =>
+    setClosingSplits(prev => ({ ...prev, [memberId]: v }))
 
   useEffect(() => {
     if (open) loadData()
@@ -208,6 +174,11 @@ export function ChitManualCycleForm({
   useEffect(() => {
     setCycleDateEdit(currentCycle?.dueDate ? currentCycle.dueDate.slice(0, 10) : '')
   }, [currentCycle])
+
+  // Keep the editable discount in sync with the applied value from the backend.
+  useEffect(() => {
+    setDiscountEdit(String(auctionDiscount))
+  }, [auctionDiscount])
 
   const loadData = async () => {
     setIsLoading(true)
@@ -260,6 +231,41 @@ export function ChitManualCycleForm({
       }
     } finally {
       setSavingCycleDate(false)
+    }
+  }
+
+  const handleSaveDiscount = async () => {
+    if (!currentCycle) return
+    const val = parseFloat(discountEdit)
+    if (isNaN(val) || val < 0) { toast.error('Enter a valid discount amount'); return }
+    if (val > monthlyContribution) { toast.error('Discount cannot exceed the monthly contribution'); return }
+    setSavingDiscount(true)
+    try {
+      const res = await setCycleCollectionDiscount(chitGroupId, currentCycle.id, val)
+      if (res.success) {
+        toast.success('Auction discount updated for this cycle')
+        await loadData()
+      } else {
+        toast.error(res.error || 'Failed to update the auction discount')
+      }
+    } finally {
+      setSavingDiscount(false)
+    }
+  }
+
+  const handleResetDiscount = async () => {
+    if (!currentCycle) return
+    setSavingDiscount(true)
+    try {
+      const res = await setCycleCollectionDiscount(chitGroupId, currentCycle.id, null)
+      if (res.success) {
+        toast.success('Reverted to the carried-forward discount')
+        await loadData()
+      } else {
+        toast.error(res.error || 'Failed to reset the auction discount')
+      }
+    } finally {
+      setSavingDiscount(false)
     }
   }
 
@@ -327,14 +333,21 @@ export function ChitManualCycleForm({
   // they shouldn't be held up by late payers. Does not close the chit.
   const handlePayClosing = async () => {
     if (!closingInfo || closingInfo.leftoverMembers.length === 0) return
+    const gross = closingGross
+    for (const m of closingInfo.leftoverMembers) {
+      if (!isPaymentSplitValid(closingSplit(m.memberId), gross)) {
+        toast.error(`For ${m.memberName}, cash + bank must equal ${formatCurrency(gross)}`)
+        return
+      }
+    }
     const payouts = closingInfo.leftoverMembers.map(m => {
-      const method = closingMethods[m.memberId] ?? 'cash'
+      const args = paymentInvokeArgs(closingSplit(m.memberId))
       return {
         memberId: m.memberId,
-        paymentMethod: method,
-        bankTxnId: method === 'bank'
-          ? tagBankRef(closingRefTypes[m.memberId], closingBankRefs[m.memberId])
-          : null,
+        paymentMethod: args.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed',
+        bankTxnId: args.bankTxnId,
+        cashAmount: args.cashAmount,
+        bankAmount: args.bankAmount,
       }
     })
     setIsSubmitting(true)
@@ -416,32 +429,50 @@ export function ChitManualCycleForm({
       return
     }
 
+    // Validate each winner's cash/bank split against their net payout.
+    if (fixedWinnerId && !isPaymentSplitValid(fixedWinnerSplit, fixedWinnerGross)) {
+      toast.error(`For the fixed winner, cash + bank must equal ${formatCurrency(fixedWinnerGross)}`)
+      return
+    }
+    for (const w of auctionWinners.filter(w => w.memberId)) {
+      if (!isPaymentSplitValid(w.split, auctionWinnerGross(w.bidDiscount))) {
+        toast.error(`For an auction winner, cash + bank must equal ${formatCurrency(auctionWinnerGross(w.bidDiscount))}`)
+        return
+      }
+    }
+
     const validAuctionWinners: AuctionWinnerInput[] = auctionWinners
       .filter(w => w.memberId)
-      .map(w => ({
-        memberId: w.memberId,
-        bidDiscount: w.bidDiscount,
-        paymentMethod: w.paymentMethod,
-        bankTxnId: w.paymentMethod === 'bank' ? tagBankRef(w.bankRefType, w.bankTxnId) : null,
-      }))
+      .map(w => {
+        const args = paymentInvokeArgs(w.split)
+        return {
+          memberId: w.memberId,
+          bidDiscount: w.bidDiscount,
+          paymentMethod: args.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed',
+          bankTxnId: args.bankTxnId,
+          cashAmount: args.cashAmount,
+          bankAmount: args.bankAmount,
+        }
+      })
+
+    const fixedArgs = paymentInvokeArgs(fixedWinnerSplit)
 
     setIsSubmitting(true)
     try {
       const result = await processCycleWinners(
         chitGroupId, currentCycle.id,
         fixedWinnerId || null,
-        fixedWinnerId ? fixedWinnerMethod : null,
+        fixedWinnerId ? (fixedArgs.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed') : null,
         validAuctionWinners,
         overrideDiscount ? parseFloat(overrideDiscount) : undefined,
-        fixedWinnerId && fixedWinnerMethod === 'bank'
-          ? tagBankRef(fixedWinnerRefType, fixedWinnerBankRef)
-          : null,
+        fixedWinnerId ? fixedArgs.bankTxnId : null,
+        fixedWinnerId ? fixedArgs.cashAmount : null,
+        fixedWinnerId ? fixedArgs.bankAmount : null,
       )
       if (result.success && result.data) {
         toast.success(result.data.message)
         setFixedWinnerId('')
-        setFixedWinnerBankRef('')
-        setFixedWinnerRefType('transfer')
+        setFixedWinnerSplit(emptyPaymentSplit)
         setAuctionWinners([])
         setOverrideDiscount('')
         await loadData()
@@ -486,6 +517,12 @@ export function ChitManualCycleForm({
 
   const fixedWinnerPayout = totalAmount - commissionPerWinner
   const auctionWinnerPayout = (bidDiscount: number) => Math.max(0, totalAmount - bidDiscount - commissionPerWinner)
+  // GROSS payout voucher amounts (before commission). The mixed split is of the
+  // gross, so the commission can go in the cash slot and cancel against the cash
+  // commission receipt — leaving only the bank (cheque) as a real movement.
+  const fixedWinnerGross = totalAmount
+  const auctionWinnerGross = (bidDiscount: number) => Math.max(0, totalAmount - bidDiscount)
+  const closingGross = (closingInfo?.payoutEach ?? 0) + commissionPerWinner
 
   return (
     <>
@@ -670,35 +707,23 @@ export function ChitManualCycleForm({
                       {closingInfo.leftoverMembers.length > 0 ? (
                         <>
                           <p className="text-xs text-muted-foreground">
-                            These members never won — each is paid {formatCurrency(closingInfo.payoutEach)}. You can pay them out now even if some dues are still pending.
+                            These members never won — each receives {formatCurrency(closingInfo.payoutEach)} (net). You can pay them out now even if some dues are still pending.
+                            {commissionPerWinner > 0 && ` For a mixed payout, split the gross prize (${formatCurrency(closingGross)}) and keep cash = commission (${formatCurrency(commissionPerWinner)}) so only the bank portion moves.`}
                           </p>
                           <div className="space-y-2">
                             {closingInfo.leftoverMembers.map(m => (
                               <div key={m.memberId} className="space-y-2 p-2 rounded border text-sm">
                                 <div className="flex items-center justify-between gap-2">
                                   <span className="font-medium">{m.memberName}{passbookSuffix(m.memberId)}</span>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-muted-foreground">{formatCurrency(closingInfo.payoutEach)}</span>
-                                    <Select
-                                      value={closingMethods[m.memberId] ?? 'cash'}
-                                      onValueChange={(v: 'cash' | 'bank') => setClosingMethods(prev => ({ ...prev, [m.memberId]: v }))}
-                                    >
-                                      <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
-                                      <SelectContent>
-                                        <SelectItem value="cash">Cash</SelectItem>
-                                        <SelectItem value="bank">Bank</SelectItem>
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
+                                  <span className="text-muted-foreground">{formatCurrency(closingInfo.payoutEach)}</span>
                                 </div>
-                                {(closingMethods[m.memberId] ?? 'cash') === 'bank' && (
-                                  <BankRefInline
-                                    refType={closingRefTypes[m.memberId] ?? 'transfer'}
-                                    value={closingBankRefs[m.memberId] ?? ''}
-                                    onRefType={t => setClosingRefTypes(prev => ({ ...prev, [m.memberId]: t }))}
-                                    onValue={v => setClosingBankRefs(prev => ({ ...prev, [m.memberId]: v }))}
-                                  />
-                                )}
+                                <PaymentMethodFields
+                                  total={closingGross}
+                                  value={closingSplit(m.memberId)}
+                                  onChange={v => setClosingSplit(m.memberId, v)}
+                                  idPrefix={`chit-closing-${m.memberId}`}
+                                  mixedSeedCash={commissionPerWinner}
+                                />
                               </div>
                             ))}
                           </div>
@@ -771,22 +796,46 @@ export function ChitManualCycleForm({
               <Card>
                 <CardHeader><CardTitle className="text-base">Auction Discount for This Cycle</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <Label>Auction Discount (per member)</Label>
-                      <div className="flex items-center h-9 px-3 rounded-md border bg-muted text-sm font-medium">
-                        {formatCurrency(auctionDiscount)}
-                      </div>
-                      <p className="text-xs text-muted-foreground">Carried from the previous cycle's bid discount — this is the exact amount deducted from each eligible member below</p>
-                    </div>
-                    <div className="space-y-1">
-                      <Label>Eligible member pays</Label>
-                      <div className="flex items-center h-9 px-3 rounded-md border bg-muted text-sm font-medium">
-                        {formatCurrency(monthlyContribution - auctionDiscount)}
-                      </div>
-                      <p className="text-xs text-muted-foreground">{formatCurrency(monthlyContribution)} − {formatCurrency(auctionDiscount)}</p>
-                    </div>
-                  </div>
+                  {(() => {
+                    const editVal = parseFloat(discountEdit)
+                    const previewDiscount = isNaN(editVal) ? auctionDiscount : editVal
+                    const changed = !isNaN(editVal) && Math.abs(editVal - auctionDiscount) > 0.005
+                    return (
+                      <>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <Label htmlFor="auction-discount">Auction Discount (per member)</Label>
+                            <Input
+                              id="auction-discount"
+                              type="number" min={0} step="0.01" max={monthlyContribution}
+                              value={discountEdit}
+                              onChange={e => setDiscountEdit(e.target.value)}
+                              disabled={savingDiscount}
+                            />
+                            <p className="text-xs text-muted-foreground">Carried from the previous cycle's bid discount — edit to override what each eligible member pays this cycle.</p>
+                          </div>
+                          <div className="space-y-1">
+                            <Label>Eligible member pays</Label>
+                            <div className="flex items-center h-9 px-3 rounded-md border bg-muted text-sm font-medium">
+                              {formatCurrency(roundToFive(monthlyContribution - previewDiscount))}
+                            </div>
+                            <p className="text-xs text-muted-foreground">{formatCurrency(monthlyContribution)} − {formatCurrency(previewDiscount)}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" onClick={handleSaveDiscount} disabled={savingDiscount || !changed}>
+                            {savingDiscount ? 'Saving…' : 'Apply discount'}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={handleResetDiscount} disabled={savingDiscount}>
+                            Reset to carried value
+                          </Button>
+                          {changed && (
+                            <span className="text-xs text-amber-600">Apply to update each member's amount below.</span>
+                          )}
+                        </div>
+                      </>
+                    )
+                  })()}
                 </CardContent>
               </Card>
 
@@ -862,43 +911,34 @@ export function ChitManualCycleForm({
               <Card>
                 <CardHeader><CardTitle className="text-base">Fixed Prize Winner</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <Label>Member</Label>
-                      <Select value={fixedWinnerId} onValueChange={setFixedWinnerId}>
-                        <SelectTrigger><SelectValue placeholder="Select winner" /></SelectTrigger>
-                        <SelectContent>
-                          {eligibleMembersWithoutWin
-                            .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
-                            .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1">
-                      <Label>Payment Method</Label>
-                      <Select value={fixedWinnerMethod} onValueChange={(v: 'cash' | 'bank') => setFixedWinnerMethod(v)}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cash">Cash</SelectItem>
-                          <SelectItem value="bank">Bank</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                  <div className="space-y-1">
+                    <Label>Member</Label>
+                    <Select value={fixedWinnerId} onValueChange={setFixedWinnerId}>
+                      <SelectTrigger><SelectValue placeholder="Select winner" /></SelectTrigger>
+                      <SelectContent>
+                        {eligibleMembersWithoutWin
+                          .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
+                          .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
                   </div>
-                  {fixedWinnerMethod === 'bank' && (
-                    <div className="space-y-1">
-                      <Label className="text-xs">Bank Reference</Label>
-                      <BankRefInline
-                        refType={fixedWinnerRefType}
-                        value={fixedWinnerBankRef}
-                        onRefType={setFixedWinnerRefType}
-                        onValue={setFixedWinnerBankRef}
-                      />
-                    </div>
-                  )}
                   <div className="text-sm text-muted-foreground">
                     Payout: {formatCurrency(totalAmount)} − {formatCurrency(commissionPerWinner)} commission = <strong>{formatCurrency(fixedWinnerPayout)}</strong>
                   </div>
+                  <PaymentMethodFields
+                    total={fixedWinnerGross}
+                    value={fixedWinnerSplit}
+                    onChange={setFixedWinnerSplit}
+                    idPrefix="chit-fixed-winner"
+                    mixedSeedCash={commissionPerWinner}
+                  />
+                  {fixedWinnerSplit.method === 'mixed' && commissionPerWinner > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Split is of the gross prize ({formatCurrency(fixedWinnerGross)}). Keep cash =
+                      commission ({formatCurrency(commissionPerWinner)}) so it cancels against the cash
+                      commission receipt — the winner then gets {formatCurrency(fixedWinnerPayout)} by bank only.
+                    </p>
+                  )}
                 </CardContent>
               </Card>
 
@@ -908,58 +948,46 @@ export function ChitManualCycleForm({
                   <CardHeader><CardTitle className="text-base">Auction Winners ({winnersPerCycle - 1})</CardTitle></CardHeader>
                   <CardContent className="space-y-4">
                     {Array.from({ length: winnersPerCycle - 1 }, (_, i) => {
-                      const row = auctionWinners[i] ?? { memberId: '', bidDiscount: 0, paymentMethod: 'cash' as const }
+                      const row: AuctionWinnerRow = auctionWinners[i] ?? { memberId: '', bidDiscount: 0, split: emptyPaymentSplit }
                       const update = (field: keyof AuctionWinnerRow, value: any) => {
                         setAuctionWinners(prev => {
                           const next = [...prev]
-                          while (next.length <= i) next.push({ memberId: '', bidDiscount: 0, paymentMethod: 'cash' })
+                          while (next.length <= i) next.push({ memberId: '', bidDiscount: 0, split: emptyPaymentSplit })
                           next[i] = { ...next[i], [field]: value }
                           return next
                         })
                       }
                       return (
-                        <div key={i} className="grid grid-cols-3 gap-3 p-3 rounded border bg-muted/30">
-                          <div className="space-y-1">
-                            <Label className="text-xs">Auction Winner {i + 1}</Label>
-                            <Select value={row.memberId} onValueChange={v => update('memberId', v)}>
-                              <SelectTrigger className="h-8"><SelectValue placeholder="Select" /></SelectTrigger>
-                              <SelectContent>
-                                {eligibleMembersWithoutWin
-                                  .filter(m => m.memberId !== fixedWinnerId &&
-                                    !auctionWinners.find((w, j) => j !== i && w.memberId === m.memberId))
-                                  .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Bid Discount (Rs.)</Label>
-                            <Input type="number" min={0} className="h-8"
-                              value={row.bidDiscount || ''}
-                              onChange={e => update('bidDiscount', parseFloat(e.target.value) || 0)} />
-                            {row.bidDiscount > 0 && (
-                              <p className="text-xs text-muted-foreground">Gets: {formatCurrency(auctionWinnerPayout(row.bidDiscount))}</p>
-                            )}
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Method</Label>
-                            <Select value={row.paymentMethod} onValueChange={v => update('paymentMethod', v)}>
-                              <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="cash">Cash</SelectItem>
-                                <SelectItem value="bank">Bank</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          {row.paymentMethod === 'bank' && (
-                            <div className="col-span-3 space-y-1">
-                              <Label className="text-xs">Bank Reference</Label>
-                              <BankRefInline
-                                refType={row.bankRefType ?? 'transfer'}
-                                value={row.bankTxnId ?? ''}
-                                onRefType={t => update('bankRefType', t)}
-                                onValue={v => update('bankTxnId', v)}
-                              />
+                        <div key={i} className="space-y-3 p-3 rounded border bg-muted/30">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <Label className="text-xs">Auction Winner {i + 1}</Label>
+                              <Select value={row.memberId} onValueChange={v => update('memberId', v)}>
+                                <SelectTrigger className="h-8"><SelectValue placeholder="Select" /></SelectTrigger>
+                                <SelectContent>
+                                  {eligibleMembersWithoutWin
+                                    .filter(m => m.memberId !== fixedWinnerId &&
+                                      !auctionWinners.find((w, j) => j !== i && w.memberId === m.memberId))
+                                    .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
                             </div>
+                            <div className="space-y-1">
+                              <Label className="text-xs">Bid Discount (Rs.)</Label>
+                              <Input type="number" min={0} className="h-8"
+                                value={row.bidDiscount || ''}
+                                onChange={e => update('bidDiscount', parseFloat(e.target.value) || 0)} />
+                              <p className="text-xs text-muted-foreground">Gets: {formatCurrency(auctionWinnerPayout(row.bidDiscount))}</p>
+                            </div>
+                          </div>
+                          {row.memberId && (
+                            <PaymentMethodFields
+                              total={auctionWinnerGross(row.bidDiscount)}
+                              value={row.split}
+                              onChange={v => update('split', v)}
+                              idPrefix={`chit-auction-${i}`}
+                              mixedSeedCash={commissionPerWinner}
+                            />
                           )}
                         </div>
                       )

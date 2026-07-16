@@ -544,6 +544,23 @@ pub fn update_chit_cycle_date(
         .map_err(|e: AppError| e.to_string())
 }
 
+#[tauri::command]
+pub fn set_cycle_collection_discount(
+    state: State<Mutex<AppState>>,
+    chit_id: i64,
+    cycle_id: i64,
+    discount: Option<f64>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard
+        .db
+        .as_mut()
+        .ok_or_else(|| "DB not unlocked".to_string())?;
+
+    db::chits::set_cycle_collection_discount(conn, chit_id, cycle_id, discount)
+        .map_err(|e: AppError| e.to_string())
+}
+
 #[derive(serde::Deserialize)]
 pub struct RecordPaymentWithDiscountInput {
     pub chit_id: i64,
@@ -705,6 +722,10 @@ pub struct ClosingPayout {
     pub payment_method: String,
     #[serde(default)]
     pub bank_txn_id: Option<String>,
+    #[serde(default)]
+    pub cash_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_amount: Option<f64>,
 }
 
 /// Pay out leftover (never-won) members in the closing cycle. Allowed even while
@@ -718,14 +739,21 @@ pub fn pay_closing_members(
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
 
-    let pairs: Vec<(i64, String, Option<String>)> = payouts.into_iter()
-        .map(|p| (p.member_id, p.payment_method, p.bank_txn_id))
+    let inputs: Vec<db::chits::ClosingPayoutInput> = payouts.into_iter()
+        .map(|p| db::chits::ClosingPayoutInput {
+            member_id: p.member_id,
+            payment_method: p.payment_method.to_uppercase(),
+            bank_txn_id: p.bank_txn_id,
+            cash_amount: p.cash_amount,
+            bank_amount: p.bank_amount,
+        })
         .collect();
 
-    db::chits::pay_closing_members(conn, chit_id, &pairs).map_err(|e: AppError| e.to_string())?;
+    let count = inputs.len();
+    db::chits::pay_closing_members(conn, chit_id, &inputs).map_err(|e: AppError| e.to_string())?;
 
     db::audit::log_audit(conn, "CHIT_CLOSING_PAYOUT", "chit_group", Some(chit_id),
-        &format!("Chit {} — {} leftover member(s) paid out", chit_id, pairs.len()));
+        &format!("Chit {} — {} leftover member(s) paid out", chit_id, count));
     Ok(())
 }
 
@@ -1139,6 +1167,10 @@ pub struct AuctionWinnerInput {
     pub payment_method: String,
     #[serde(default)]
     pub bank_txn_id: Option<String>,
+    #[serde(default)]
+    pub cash_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_amount: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -1158,24 +1190,39 @@ pub fn process_chit_cycle_winners(
     fixed_winner_member_id: Option<i64>,
     fixed_winner_payment_method: Option<String>,
     fixed_winner_bank_txn_id: Option<String>,
+    fixed_winner_cash_amount: Option<f64>,
+    fixed_winner_bank_amount: Option<f64>,
     auction_winners: Vec<AuctionWinnerInput>,
     override_discount_per_member: Option<f64>,
 ) -> Result<ProcessWinnersResponse, String> {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
 
-    let fixed = fixed_winner_member_id.zip(fixed_winner_payment_method.as_deref().map(str::to_uppercase))
-        .map(|(id, pm)| (id, pm));
+    let fixed_input: Option<db::chits::WinnerPayoutInput> = fixed_winner_member_id.map(|id| {
+        db::chits::WinnerPayoutInput {
+            member_id: id,
+            bid_discount: 0.0,
+            payment_method: fixed_winner_payment_method
+                .as_deref().map(str::to_uppercase).unwrap_or_else(|| "CASH".to_string()),
+            bank_txn_id: fixed_winner_bank_txn_id.clone(),
+            cash_amount: fixed_winner_cash_amount,
+            bank_amount: fixed_winner_bank_amount,
+        }
+    });
 
-    let auction: Vec<(i64, f64, &str, Option<&str>)> = auction_winners.iter()
-        .map(|w| (w.member_id, w.bid_discount, w.payment_method.as_str(), w.bank_txn_id.as_deref()))
+    let auction: Vec<db::chits::WinnerPayoutInput> = auction_winners.iter()
+        .map(|w| db::chits::WinnerPayoutInput {
+            member_id: w.member_id,
+            bid_discount: w.bid_discount,
+            payment_method: w.payment_method.to_uppercase(),
+            bank_txn_id: w.bank_txn_id.clone(),
+            cash_amount: w.cash_amount,
+            bank_amount: w.bank_amount,
+        })
         .collect();
 
-    let fixed_ref: Option<(i64, &str, Option<&str>)> = fixed.as_ref()
-        .map(|(id, pm)| (*id, pm.as_str(), fixed_winner_bank_txn_id.as_deref()));
-
     let discount = db::chits::process_cycle_winners(
-        conn, chit_id, cycle_id, fixed_ref, &auction, override_discount_per_member,
+        conn, chit_id, cycle_id, fixed_input.as_ref(), &auction, override_discount_per_member,
     ).map_err(|e: AppError| e.to_string())?;
 
     let winners = db::chits::get_cycle_winners(conn, cycle_id)

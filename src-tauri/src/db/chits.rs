@@ -34,6 +34,119 @@ fn tag_member_ref(conn: &Connection, member_id: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Tag every ledger row of a mixed group (or the single last-inserted row) with the
+/// member, so both halves of a MIXED payout are attributed to the winner.
+fn tag_member_ref_group(conn: &Connection, member_id: i64, group_id: Option<&str>) -> Result<(), AppError> {
+    match group_id {
+        Some(gid) => {
+            conn.execute(
+                "UPDATE shg_transactions SET member_ref_id = ?1 WHERE group_id = ?2",
+                (member_id, gid),
+            )?;
+        }
+        None => tag_member_ref(conn, member_id)?,
+    }
+    Ok(())
+}
+
+/// A winner (fixed or auction) and how their payout is disbursed.
+#[derive(Debug, Clone)]
+pub struct WinnerPayoutInput {
+    pub member_id: i64,
+    pub bid_discount: f64,        // 0 for a fixed-prize winner
+    pub payment_method: String,   // CASH | BANK | MIXED
+    pub bank_txn_id: Option<String>,
+    pub cash_amount: Option<f64>, // net cash (required for MIXED)
+    pub bank_amount: Option<f64>, // net bank (required for MIXED)
+}
+
+/// A leftover (never-won) member paid out at closing, and how.
+#[derive(Debug, Clone)]
+pub struct ClosingPayoutInput {
+    pub member_id: i64,
+    pub payment_method: String,   // CASH | BANK | MIXED
+    pub bank_txn_id: Option<String>,
+    pub cash_amount: Option<f64>,
+    pub bank_amount: Option<f64>,
+}
+
+/// CASH/BANK value stored in chit_cycle_winners.payment_method (CHECK-constrained to
+/// CASH/BANK). For MIXED the larger net half wins; the real split lives on the ledger.
+fn winner_indicative_method(method: &str, cash: Option<f64>, bank: Option<f64>) -> &'static str {
+    match method {
+        "MIXED" => if cash.unwrap_or(0.0) >= bank.unwrap_or(0.0) { "CASH" } else { "BANK" },
+        "BANK" => "BANK",
+        _ => "CASH",
+    }
+}
+
+/// Record a winner's payout — the commission receipt (SHG income) plus the GROSS
+/// payout voucher. Supports CASH / BANK / MIXED. For MIXED, `cash_amount` and
+/// `bank_amount` are the NET split the winner receives and must sum to
+/// `gross_voucher − commission`; the commission is booked on the larger net side and
+/// the gross voucher split is derived so the real cash/bank movement equals the net
+/// split. Keeps CHIT_PAYOUT = gross and CHIT_COMMISSION = commission for reporting.
+#[allow(clippy::too_many_arguments)]
+fn record_winner_payout(
+    tx: &mut rusqlite::Transaction,
+    member_id: i64,
+    gross_voucher: f64,
+    commission: f64,
+    method: &str,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<&str>,
+    payout_reason: &str,
+    commission_reason: &str,
+    cycle_id: i64,
+    now: &str,
+) -> Result<(), AppError> {
+    match method {
+        "MIXED" => {
+            // The split is of the GROSS payout voucher (cash + bank = gross_voucher).
+            // Commission is booked as CASH income; putting the commission amount in
+            // the cash slot makes the cash disbursement and the cash commission
+            // receipt cancel, so the winner effectively receives the balance by bank
+            // (e.g. a cheque for the net) with no real cash movement.
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c < -0.005 || b < -0.005 {
+                return Err(AppError::validation("Cash and bank amounts cannot be negative"));
+            }
+            if (c + b - gross_voucher).abs() > 0.01 {
+                return Err(AppError::business(format!(
+                    "For a mixed payout, cash + bank ({:.2}) must equal the payout ({:.2}).",
+                    c + b, gross_voucher,
+                )));
+            }
+            if commission > 0.0 {
+                ledger::record_receipt(tx, commission, commission_reason,
+                    "CASH", Some("CHIT_COMMISSION"), Some(cycle_id), now)?;
+                tag_member_ref(tx, member_id)?;
+            }
+            let gid = ledger::record_voucher_mixed(tx, c, b,
+                payout_reason, Some("CHIT_PAYOUT"), Some(cycle_id), now, bank_txn_id)?;
+            tag_member_ref_group(tx, member_id, gid.as_deref())?;
+        }
+        "CASH" | "BANK" => {
+            // Commission is booked as CASH income by default, regardless of how the
+            // prize is disbursed (the SHG pays the gross prize and takes the
+            // commission as cash income).
+            if commission > 0.0 {
+                ledger::record_receipt(tx, commission, commission_reason,
+                    "CASH", Some("CHIT_COMMISSION"), Some(cycle_id), now)?;
+                tag_member_ref(tx, member_id)?;
+            }
+            let bt = if method == "BANK" { bank_txn_id } else { None };
+            ledger::record_voucher_ex(tx, gross_voucher, payout_reason,
+                method, Some("CHIT_PAYOUT"), Some(cycle_id), now, bt, None)?;
+            tag_member_ref(tx, member_id)?;
+        }
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    }
+    Ok(())
+}
+
 /// Round a chit installment to the nearest multiple of 5, rounding UP when the
 /// amount past the lower multiple of 5 is 3 or more and DOWN when it is less
 /// than 3 (e.g. 173.8 -> 175, 172.2 -> 170). Keeps collected contributions to
@@ -400,17 +513,14 @@ pub fn override_member_eligibility(
 
 // ── Winners ───────────────────────────────────────────────────────────────
 
-/// Record all winners for a cycle, compute the auction discount, create vouchers + commission receipts.
-///
-/// `fixed_winner`: (member_id, payment_method, bank_txn_id)
-/// `auction_winners`: [(member_id, bid_discount, payment_method, bank_txn_id)]
-/// `bank_txn_id` is the cheque no. / UTR for a BANK payout (ignored for CASH).
+/// Record all winners for a cycle, compute the auction discount, create vouchers +
+/// commission receipts. Each winner's payout may be CASH, BANK, or MIXED (net split).
 pub fn process_cycle_winners(
     conn: &mut Connection,
     chit_id: i64,
     cycle_id: i64,
-    fixed_winner: Option<(i64, &str, Option<&str>)>,
-    auction_winners: &[(i64, f64, &str, Option<&str>)], // (member_id, bid_discount, payment_method, bank_txn_id)
+    fixed_winner: Option<&WinnerPayoutInput>,
+    auction_winners: &[WinnerPayoutInput],
     override_discount_per_member: Option<f64>,
 ) -> Result<f64, AppError> { // returns auction_discount_per_member
     if is_cycle_completed(conn, cycle_id)? {
@@ -424,12 +534,6 @@ pub fn process_cycle_winners(
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
-    let cycle_no: i64 = conn.query_row(
-        "SELECT cycle_no FROM chit_cycles WHERE id = ?1",
-        [cycle_id],
-        |row| row.get(0),
-    )?;
-
     // Validate no member has already won in this chit.
     let check_already_won = |member_id: i64| -> Result<bool, AppError> {
         Ok(conn.query_row(
@@ -438,13 +542,13 @@ pub fn process_cycle_winners(
             |row| row.get(0),
         ).unwrap_or(false))
     };
-    if let Some((member_id, _, _)) = fixed_winner {
-        if check_already_won(member_id)? {
+    if let Some(w) = fixed_winner {
+        if check_already_won(w.member_id)? {
             return Err(AppError::business("Fixed winner has already won in a previous cycle"));
         }
     }
-    for (member_id, _, _, _) in auction_winners {
-        if check_already_won(*member_id)? {
+    for w in auction_winners {
+        if check_already_won(w.member_id)? {
             return Err(AppError::business("An auction winner has already won in a previous cycle"));
         }
     }
@@ -454,62 +558,48 @@ pub fn process_cycle_winners(
 
     let mut total_bid_discounts = 0.0_f64;
 
-    // Fixed prize winner.
-    // The voucher records the GROSS prize disbursed; the commission is booked as a
-    // separate receipt (SHG income). Net cash out = prize − commission, while the
-    // voucher correctly shows the full prize. The winner row keeps the NET amount
-    // the member actually receives.
-    if let Some((member_id, payment_method, bank_txn_id)) = fixed_winner {
+    // Fixed prize winner. The voucher records the GROSS prize; the commission is a
+    // separate receipt (SHG income). The winner row keeps the NET amount received.
+    if let Some(w) = fixed_winner {
         let payout = (prize - commission_per_winner).max(0.0);
+        let stored_method = winner_indicative_method(&w.payment_method, w.cash_amount, w.bank_amount);
         tx.execute(
             "INSERT INTO chit_cycle_winners
              (chit_id, cycle_id, member_id, winner_type, bid_discount, commission, payout_amount, payment_method, paid_at)
              VALUES (?1,?2,?3,'FIXED',0,?4,?5,?6,?7)",
-            (chit_id, cycle_id, member_id, commission_per_winner, payout, payment_method, &now),
+            (chit_id, cycle_id, w.member_id, commission_per_winner, payout, stored_method, &now),
         )?;
-        let pb = passbook_number(&tx, chit_id, member_id);
-        if commission_per_winner > 0.0 {
-            ledger::record_receipt(&mut tx, commission_per_winner,
-                &reason_with_passbook("Chit Commission", &pb),
-                payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
-            tag_member_ref(&tx, member_id)?;
-        }
-        let bank_txn = if payment_method == "BANK" { bank_txn_id } else { None };
-        ledger::record_voucher_ex(&mut tx, prize,
+        let pb = passbook_number(&tx, chit_id, w.member_id);
+        record_winner_payout(&mut tx, w.member_id, prize, commission_per_winner,
+            &w.payment_method, w.cash_amount, w.bank_amount, w.bank_txn_id.as_deref(),
             &reason_with_passbook("Chit Payout", &pb),
-            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
-        tag_member_ref(&tx, member_id)?;
+            &reason_with_passbook("Chit Commission", &pb),
+            cycle_id, &now)?;
     }
 
-    // Auction winners. Voucher = the bid-reduced prize (gross of commission);
-    // commission booked as a separate receipt. Winner row keeps the NET amount.
-    for (member_id, bid_discount, payment_method, bank_txn_id) in auction_winners {
-        let payout = (prize - bid_discount - commission_per_winner).max(0.0);
-        let voucher_amount = (prize - bid_discount).max(0.0);
-        total_bid_discounts += bid_discount;
+    // Auction winners. Voucher = the bid-reduced prize (gross of commission).
+    for w in auction_winners {
+        let voucher_amount = (prize - w.bid_discount).max(0.0);
+        let payout = (voucher_amount - commission_per_winner).max(0.0);
+        total_bid_discounts += w.bid_discount;
+        let stored_method = winner_indicative_method(&w.payment_method, w.cash_amount, w.bank_amount);
         tx.execute(
             "INSERT INTO chit_cycle_winners
              (chit_id, cycle_id, member_id, winner_type, bid_discount, commission, payout_amount, payment_method, paid_at)
              VALUES (?1,?2,?3,'AUCTION',?4,?5,?6,?7,?8)",
-            (chit_id, cycle_id, member_id, bid_discount, commission_per_winner, payout, payment_method, &now),
+            (chit_id, cycle_id, w.member_id, w.bid_discount, commission_per_winner, payout, stored_method, &now),
         )?;
-        let pb = passbook_number(&tx, chit_id, *member_id);
-        if commission_per_winner > 0.0 {
-            ledger::record_receipt(&mut tx, commission_per_winner,
-                &reason_with_passbook("Chit Commission", &pb),
-                payment_method, Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
-            tag_member_ref(&tx, *member_id)?;
-        }
-        let bank_txn = if *payment_method == "BANK" { *bank_txn_id } else { None };
-        let payout_base = if *bid_discount > 0.005 {
-            format!("Chit Payout (Bid discount {})", fmt_rs(*bid_discount))
+        let pb = passbook_number(&tx, chit_id, w.member_id);
+        let payout_base = if w.bid_discount > 0.005 {
+            format!("Chit Payout (Bid discount {})", fmt_rs(w.bid_discount))
         } else {
             "Chit Payout".to_string()
         };
-        ledger::record_voucher_ex(&mut tx, voucher_amount,
+        record_winner_payout(&mut tx, w.member_id, voucher_amount, commission_per_winner,
+            &w.payment_method, w.cash_amount, w.bank_amount, w.bank_txn_id.as_deref(),
             &reason_with_passbook(&payout_base, &pb),
-            payment_method, Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
-        tag_member_ref(&tx, *member_id)?;
+            &reason_with_passbook("Chit Commission", &pb),
+            cycle_id, &now)?;
     }
 
     let discount_per_member = if let Some(ov) = override_discount_per_member {
@@ -522,8 +612,8 @@ pub fn process_cycle_winners(
 
     // Backfill winning_member_id on chit_cycles for legacy compat.
     let first_winner = fixed_winner
-        .map(|(id, _, _)| id)
-        .or_else(|| auction_winners.first().map(|(id, _, _, _)| *id));
+        .map(|w| w.member_id)
+        .or_else(|| auction_winners.first().map(|w| w.member_id));
 
     tx.execute(
         "UPDATE chit_cycles SET
@@ -721,6 +811,50 @@ pub fn update_chit_cycle_date(
     conn.execute(
         "UPDATE chit_cycles SET auction_date = ?1 WHERE id = ?2 AND chit_id = ?3",
         (day, cycle_id, chit_id),
+    )?;
+    Ok(())
+}
+
+/// Manually override the per-member auction discount applied to THIS cycle's
+/// collections (what each eligible member pays). Pass `None` to clear the override
+/// and revert to the value carried from the previous cycle's auction. Allowed only
+/// while the cycle is active (no winner yet). Stored in `admin_discount_override`.
+pub fn set_cycle_collection_discount(
+    conn: &Connection,
+    chit_id: i64,
+    cycle_id: i64,
+    discount: Option<f64>,
+) -> Result<(), AppError> {
+    if let Some(d) = discount {
+        if d < 0.0 {
+            return Err(AppError::validation("Auction discount cannot be negative"));
+        }
+        let monthly: f64 = conn.query_row(
+            "SELECT monthly_contribution FROM chit_groups WHERE id = ?1",
+            [chit_id], |r| r.get(0),
+        ).map_err(|_| AppError::business("Chit not found"))?;
+        if d > monthly + 0.005 {
+            return Err(AppError::validation(
+                "Auction discount cannot exceed the monthly contribution"));
+        }
+    }
+
+    // The cycle must exist, belong to this chit, and not yet be completed.
+    let winner: Option<Option<i64>> = conn.query_row(
+        "SELECT winning_member_id FROM chit_cycles WHERE id = ?1 AND chit_id = ?2",
+        (cycle_id, chit_id),
+        |r| r.get::<_, Option<i64>>(0),
+    ).optional()?;
+    match winner {
+        None => return Err(AppError::business("Chit cycle not found")),
+        Some(Some(_)) => return Err(AppError::business(
+            "This cycle is completed — its discount is locked.")),
+        Some(None) => {}
+    }
+
+    conn.execute(
+        "UPDATE chit_cycles SET admin_discount_override = ?1 WHERE id = ?2 AND chit_id = ?3",
+        (discount, cycle_id, chit_id),
     )?;
     Ok(())
 }
@@ -1383,7 +1517,7 @@ pub fn get_chit_closing_info(conn: &Connection, chit_id: i64) -> Result<ClosingI
 pub fn pay_closing_members(
     conn: &mut Connection,
     chit_id: i64,
-    payouts: &[(i64, String, Option<String>)], // (member_id, payment_method, bank_txn_id)
+    payouts: &[ClosingPayoutInput],
 ) -> Result<(), AppError> {
     let (months, prize, commission_per_winner, status): (i64, f64, f64, String) = conn.query_row(
         "SELECT months, COALESCE(fixed_prize_amount, total_amount),
@@ -1411,18 +1545,20 @@ pub fn pay_closing_members(
     }
 
     // Validate every payout target is a real, not-yet-paid leftover member.
-    for (member_id, method, _) in payouts {
-        validation::validate_payment_method(method)?;
+    for p in payouts {
+        if !matches!(p.payment_method.as_str(), "CASH" | "BANK" | "MIXED") {
+            return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED"));
+        }
         let is_member: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM chit_members WHERE chit_id = ?1 AND member_id = ?2",
-            (chit_id, member_id), |r| r.get(0),
+            (chit_id, p.member_id), |r| r.get(0),
         ).unwrap_or(false);
         if !is_member {
             return Err(AppError::business("A payout member is not part of this chit."));
         }
         let already_won: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM chit_cycle_winners WHERE chit_id = ?1 AND member_id = ?2",
-            (chit_id, member_id), |r| r.get(0),
+            (chit_id, p.member_id), |r| r.get(0),
         ).unwrap_or(false);
         if already_won {
             return Err(AppError::business("A payout member has already been paid or has won a cycle."));
@@ -1446,32 +1582,27 @@ pub fn pay_closing_members(
                  (chit_id, cycle_no, auction_date, winning_member_id, bid_discount, payout_amount,
                   total_bid_discounts, auction_discount_per_member, is_past_entry)
                  VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, 0, 0)",
-                (chit_id, months + 1, &now[..10], payouts[0].0, prize),
+                (chit_id, months + 1, &now[..10], payouts[0].member_id, prize),
             )?;
             tx.last_insert_rowid()
         }
     };
 
-    for (member_id, method, bank_txn_id) in payouts {
+    for p in payouts {
+        let stored_method = winner_indicative_method(&p.payment_method, p.cash_amount, p.bank_amount);
         tx.execute(
             "INSERT INTO chit_cycle_winners
              (chit_id, cycle_id, member_id, winner_type, bid_discount, commission, payout_amount, payment_method, paid_at)
              VALUES (?1, ?2, ?3, 'FIXED', 0, ?4, ?5, ?6, ?7)",
-            (chit_id, cycle_id, *member_id, commission_per_winner, payout, method.as_str(), &now),
+            (chit_id, cycle_id, p.member_id, commission_per_winner, payout, stored_method, &now),
         )?;
-        let pb = passbook_number(&tx, chit_id, *member_id);
-        if commission_per_winner > 0.0 {
-            ledger::record_receipt(&mut tx, commission_per_winner,
-                &reason_with_passbook("Chit Commission (closing)", &pb),
-                method.as_str(), Some("CHIT_COMMISSION"), Some(cycle_id), &now)?;
-            tag_member_ref(&tx, *member_id)?;
-        }
+        let pb = passbook_number(&tx, chit_id, p.member_id);
         // Voucher = GROSS prize; commission booked as a separate receipt.
-        let bank_txn = if method == "BANK" { bank_txn_id.as_deref() } else { None };
-        ledger::record_voucher_ex(&mut tx, prize,
+        record_winner_payout(&mut tx, p.member_id, prize, commission_per_winner,
+            &p.payment_method, p.cash_amount, p.bank_amount, p.bank_txn_id.as_deref(),
             &reason_with_passbook("Chit Payout (closing)", &pb),
-            method.as_str(), Some("CHIT_PAYOUT"), Some(cycle_id), &now, bank_txn, None)?;
-        tag_member_ref(&tx, *member_id)?;
+            &reason_with_passbook("Chit Commission (closing)", &pb),
+            cycle_id, &now)?;
     }
 
     tx.commit()?;
@@ -1577,13 +1708,14 @@ pub fn process_winner_payout(
 
     let pb = passbook_number(&tx, chit_id, winning_member_id);
 
-    // Commission receipt — SHG's take from the winner, separate from member installments.
+    // Commission receipt — SHG's take from the winner, booked as CASH income by
+    // default (regardless of how the prize itself is disbursed).
     if commission > 0.0 {
         ledger::record_receipt(
             &mut tx,
             commission,
             &reason_with_passbook("Chit Commission", &pb),
-            payment_method,
+            "CASH",
             Some("CHIT_COMMISSION"),
             Some(cycle_id),
             payout_date,
@@ -1735,12 +1867,18 @@ pub fn get_cycle_payment_summary(
     // cycle with cycle_no - 1, matching past-data entry and pending-dues. This is
     // robust to whether this cycle's winners have been processed yet, and works
     // seamlessly across the past-entry → live-management boundary.
+    //
+    // A manual per-member override (admin_discount_override) set on THIS cycle wins
+    // over the carried value, letting the operator adjust what members pay this cycle.
     let discount_per_member: f64 = conn.query_row(
-        "SELECT COALESCE(prev.auction_discount_per_member, 0)
-         FROM chit_cycles cur
-         JOIN chit_cycles prev
-           ON prev.chit_id = cur.chit_id AND prev.cycle_no = cur.cycle_no - 1
-         WHERE cur.id = ?1",
+        "SELECT COALESCE(
+            (SELECT admin_discount_override FROM chit_cycles WHERE id = ?1),
+            (SELECT prev.auction_discount_per_member
+               FROM chit_cycles cur
+               JOIN chit_cycles prev
+                 ON prev.chit_id = cur.chit_id AND prev.cycle_no = cur.cycle_no - 1
+               WHERE cur.id = ?1),
+            0)",
         [cycle_id],
         |row| row.get(0),
     ).unwrap_or(0.0);

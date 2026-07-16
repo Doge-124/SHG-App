@@ -114,6 +114,7 @@ fn main() {
             commands::chits::get_current_cycle_with_summary,
             commands::chits::advance_to_next_cycle,
             commands::chits::update_chit_cycle_date,
+            commands::chits::set_cycle_collection_discount,
             commands::chits::record_member_payment_with_discount,
             commands::chits::get_chit_pending_dues,
             commands::chits::get_member_chit_ledger,

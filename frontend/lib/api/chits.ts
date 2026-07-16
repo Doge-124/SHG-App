@@ -449,6 +449,24 @@ export async function getCurrentCycleWithSummary(chitGroupId: string): Promise<A
   }
 }
 
+export async function setCycleCollectionDiscount(
+  chitGroupId: string,
+  cycleId: string,
+  discount: number | null,
+): Promise<ApiResponse<void>> {
+  try {
+    await invoke('set_cycle_collection_discount', {
+      chitId: parseInt(chitGroupId),
+      cycleId: parseInt(cycleId),
+      discount,
+    })
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to set cycle discount:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to update the auction discount' }
+  }
+}
+
 export async function updateChitCycleDate(
   chitGroupId: string,
   cycleId: string,
@@ -690,7 +708,13 @@ export async function getChitClosingInfo(chitGroupId: string): Promise<ApiRespon
  *  other members still owe dues; does not close the chit. */
 export async function payClosingMembers(
   chitGroupId: string,
-  payouts: { memberId: string; paymentMethod: 'cash' | 'bank'; bankTxnId?: string | null }[],
+  payouts: {
+    memberId: string
+    paymentMethod: 'cash' | 'bank' | 'mixed'
+    bankTxnId?: string | null
+    cashAmount?: number | null
+    bankAmount?: number | null
+  }[],
 ): Promise<ApiResponse<void>> {
   try {
     await withAutoPrint(() => invoke('pay_closing_members', {
@@ -699,6 +723,8 @@ export async function payClosingMembers(
         member_id: parseInt(p.memberId),
         payment_method: p.paymentMethod.toUpperCase(),
         bank_txn_id: p.bankTxnId ?? null,
+        cash_amount: p.cashAmount ?? null,
+        bank_amount: p.bankAmount ?? null,
       })),
     }))
     return { success: true }
@@ -952,18 +978,22 @@ export async function overrideMemberEligibility(chitGroupId: string, cycleId: st
 export interface AuctionWinnerInput {
   memberId: string
   bidDiscount: number
-  paymentMethod: 'cash' | 'bank'
+  paymentMethod: 'cash' | 'bank' | 'mixed'
   bankTxnId?: string | null
+  cashAmount?: number | null
+  bankAmount?: number | null
 }
 
 export async function processCycleWinners(
   chitGroupId: string,
   cycleId: string,
   fixedWinnerMemberId: string | null,
-  fixedWinnerPaymentMethod: 'cash' | 'bank' | null,
+  fixedWinnerPaymentMethod: 'cash' | 'bank' | 'mixed' | null,
   auctionWinners: AuctionWinnerInput[],
   overrideDiscountPerMember?: number,
   fixedWinnerBankTxnId?: string | null,
+  fixedWinnerCashAmount?: number | null,
+  fixedWinnerBankAmount?: number | null,
 ): Promise<ApiResponse<{ auctionDiscountPerMember: number; winners: import('@/lib/types').ChitCycleWinner[]; message: string }>> {
   try {
     const result = await withAutoPrint(() => invoke('process_chit_cycle_winners', {
@@ -972,11 +1002,15 @@ export async function processCycleWinners(
       fixedWinnerMemberId: fixedWinnerMemberId ? parseInt(fixedWinnerMemberId) : null,
       fixedWinnerPaymentMethod: fixedWinnerPaymentMethod?.toUpperCase() ?? null,
       fixedWinnerBankTxnId: fixedWinnerBankTxnId ?? null,
+      fixedWinnerCashAmount: fixedWinnerCashAmount ?? null,
+      fixedWinnerBankAmount: fixedWinnerBankAmount ?? null,
       auctionWinners: auctionWinners.map(w => ({
         member_id: parseInt(w.memberId),
         bid_discount: w.bidDiscount,
         payment_method: w.paymentMethod.toUpperCase(),
         bank_txn_id: w.bankTxnId ?? null,
+        cash_amount: w.cashAmount ?? null,
+        bank_amount: w.bankAmount ?? null,
       })),
       overrideDiscountPerMember: overrideDiscountPerMember ?? null,
     })) as any

@@ -43,19 +43,25 @@ export function PaymentMethodFields({
   onChange,
   allowMixed = true,
   idPrefix = 'pm',
+  mixedSeedCash,
 }: {
   total: number
   value: PaymentSplit
   onChange: (v: PaymentSplit) => void
   allowMixed?: boolean
   idPrefix?: string
+  /** When Mixed is first selected, seed the cash slot with this amount (clamped to
+   *  total) instead of the whole total — e.g. the income skim (upfront interest /
+   *  chit commission) so it can cancel against a cash receipt. */
+  mixedSeedCash?: number
 }) {
-  // When Mixed is selected and the split is empty, seed cash = full total so
-  // the officer just edits one side. When total changes, keep bank = total − cash.
+  // When Mixed is selected and the split is empty, seed the cash slot so the officer
+  // just edits one side. When total changes, keep bank = total − cash.
   useEffect(() => {
     if (value.method !== 'mixed') return
     if (value.cashAmount === 0 && value.bankAmount === 0 && total > 0) {
-      onChange({ ...value, cashAmount: total, bankAmount: 0 })
+      const seed = mixedSeedCash != null ? Math.min(Math.max(mixedSeedCash, 0), total) : total
+      onChange({ ...value, cashAmount: seed, bankAmount: Math.max(0, Math.round((total - seed) * 100) / 100) })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value.method, total])
