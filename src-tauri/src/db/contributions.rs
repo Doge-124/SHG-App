@@ -398,6 +398,9 @@ pub struct WeeklyContributionSummary {
     pub current_installment_number: i64,
     /// Number of members behind the current installment number.
     pub behind_count: i64,
+    /// Standard weekly contribution amount (0 = not set). When > 0, each member's
+    /// installments_paid is floor(savings / this amount).
+    pub weekly_contribution_amount: f64,
     pub members: Vec<MemberContributionStatus>,
 }
 
@@ -443,10 +446,21 @@ pub fn get_weekly_contribution_status(
     // Expected installment number as of today (auto-increments weekly).
     let current_installment_number =
         db::settings::get_installment_status(conn)?.current_number;
+    // Standard weekly amount. When set, installments are derived from savings so
+    // that paying several weeks' worth at once advances the count proportionally.
+    let weekly_amount = db::settings::get_weekly_contribution_amount(conn)?;
 
     let rows = stmt.query_map([from_date, &to_dt], |r| {
         let amount_paid: f64 = r.get(3)?;
-        let installments_paid: i64 = r.get(8)?;
+        let total_savings: f64 = r.get(7)?;
+        let tracked_installments: i64 = r.get(8)?;
+        // Derive from savings when a weekly amount is configured; otherwise fall
+        // back to the counted installments (past + ongoing +1 per contribution).
+        let installments_paid = if weekly_amount > 0.005 {
+            (total_savings / weekly_amount).floor().max(0.0) as i64
+        } else {
+            tracked_installments
+        };
         let behind_by = if current_installment_number > installments_paid {
             current_installment_number - installments_paid
         } else {
@@ -461,7 +475,7 @@ pub fn get_weekly_contribution_status(
             payment_method: r.get(4)?,
             paid_at:        r.get(5)?,
             payment_count:  r.get(6)?,
-            total_savings:  r.get(7)?,
+            total_savings,
             installments_paid,
             behind_by,
         })
@@ -484,6 +498,7 @@ pub fn get_weekly_contribution_status(
         total_collected,
         current_installment_number,
         behind_count,
+        weekly_contribution_amount: weekly_amount,
         members,
     })
 }

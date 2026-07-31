@@ -34,7 +34,8 @@ pub fn init_settings_table(conn: &mut Connection) -> Result<(), AppError> {
             shg_opening_locked INTEGER NOT NULL DEFAULT 0,
             installment_anchor_number INTEGER NOT NULL DEFAULT 0,
             installment_anchor_date TEXT,
-            cloud_backup_settings TEXT
+            cloud_backup_settings TEXT,
+            weekly_contribution_amount REAL NOT NULL DEFAULT 0
         )",
         [],
     )?;
@@ -492,6 +493,29 @@ pub fn set_installment_number(conn: &mut Connection, number: i64) -> Result<(), 
              updated_at = CURRENT_TIMESTAMP
          WHERE id = 1",
         (number, today),
+    )?;
+    Ok(())
+}
+
+/// The standard weekly contribution amount. When > 0, a member's installment count
+/// is derived as floor(savings / weekly amount) rather than +1 per contribution, so
+/// paying multiple weeks at once advances the count proportionally. 0 = not set.
+pub fn get_weekly_contribution_amount(conn: &Connection) -> Result<f64, AppError> {
+    let amt: f64 = conn.query_row(
+        "SELECT COALESCE(weekly_contribution_amount, 0) FROM settings WHERE id = 1",
+        [], |r| r.get(0),
+    ).unwrap_or(0.0);
+    Ok(amt)
+}
+
+/// Set the standard weekly contribution amount (0 to clear).
+pub fn set_weekly_contribution_amount(conn: &mut Connection, amount: f64) -> Result<(), AppError> {
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(AppError::validation("Weekly contribution amount cannot be negative"));
+    }
+    conn.execute(
+        "UPDATE settings SET weekly_contribution_amount = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        [amount],
     )?;
     Ok(())
 }

@@ -12,7 +12,10 @@ use crate::db::contributions::{
     SavingsPayout,
 };
 use crate::db::audit;
-use crate::db::settings::{get_installment_status, set_installment_number, InstallmentStatus};
+use crate::db::settings::{
+    get_installment_status, set_installment_number, InstallmentStatus,
+    get_weekly_contribution_amount, set_weekly_contribution_amount,
+};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -126,6 +129,31 @@ pub fn set_installment_number_cmd(
     set_installment_number(conn, number).map_err(|e: AppError| e.to_string())?;
     audit::log_audit(conn, "INSTALLMENT_NUMBER_SET", "settings", None,
         &format!("Current installment number set to {number}"));
+    Ok(())
+}
+
+/// Get the standard weekly contribution amount (0 = not set).
+#[tauri::command]
+pub fn get_weekly_contribution_amount_cmd(
+    state: State<Mutex<AppState>>,
+) -> Result<f64, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    get_weekly_contribution_amount(conn).map_err(|e: AppError| e.to_string())
+}
+
+/// Set the standard weekly contribution amount. Member installment counts are then
+/// derived as floor(savings / this amount).
+#[tauri::command]
+pub fn set_weekly_contribution_amount_cmd(
+    state: State<Mutex<AppState>>,
+    amount: f64,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+    set_weekly_contribution_amount(conn, amount).map_err(|e: AppError| e.to_string())?;
+    audit::log_audit(conn, "WEEKLY_CONTRIBUTION_AMOUNT_SET", "settings", None,
+        &format!("Weekly contribution amount set to {amount}"));
     Ok(())
 }
 

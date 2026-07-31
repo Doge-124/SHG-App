@@ -44,6 +44,7 @@ interface Summary {
   totalCollected: number
   currentInstallmentNumber: number
   behindCount: number
+  weeklyContributionAmount: number
   members: MemberStatus[]
 }
 
@@ -92,6 +93,10 @@ export default function ContributionsPage() {
   const [numberDialogOpen, setNumberDialogOpen] = useState(false)
   const [numberInput, setNumberInput] = useState('')
   const [isSavingNumber, setIsSavingNumber] = useState(false)
+
+  const [amountDialogOpen, setAmountDialogOpen] = useState(false)
+  const [amountInput, setAmountInput] = useState('')
+  const [isSavingAmount, setIsSavingAmount] = useState(false)
 
   // Quick-pay dialog
   const [payDialog, setPayDialog] = useState<{ open: boolean; member: MemberStatus | null }>({ open: false, member: null })
@@ -151,6 +156,22 @@ export default function ContributionsPage() {
     }
   }
 
+  const handleSaveAmount = async () => {
+    const a = parseFloat(amountInput)
+    if (isNaN(a) || a < 0) { toast.error('Enter a valid amount'); return }
+    setIsSavingAmount(true)
+    try {
+      await invoke('set_weekly_contribution_amount_cmd', { amount: a })
+      toast.success(a > 0 ? `Weekly contribution set to ${formatCurrency(a)}` : 'Weekly contribution amount cleared')
+      setAmountDialogOpen(false)
+      load(fromDate, toDate)
+    } catch (e: any) {
+      toast.error(e?.toString() || 'Failed to set weekly contribution amount')
+    } finally {
+      setIsSavingAmount(false)
+    }
+  }
+
   // Filtered members
   const displayed = (summary?.members ?? []).filter(m => {
     if (filter === 'paid' && !m.hasPaid) return false
@@ -193,7 +214,10 @@ export default function ContributionsPage() {
 
   const openPayDialog = (m: MemberStatus) => {
     setPayDialog({ open: true, member: m })
-    setPayAmount('')
+    // Pre-fill with the standard weekly amount (if set); operator can override to
+    // pay several weeks at once.
+    const weekly = summary?.weeklyContributionAmount ?? 0
+    setPayAmount(weekly > 0 ? String(weekly) : '')
     setPayMethod('CASH')
   }
 
@@ -305,19 +329,42 @@ export default function ContributionsPage() {
                   )}
                 </div>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNumberInput(summary.currentInstallmentNumber > 0 ? String(summary.currentInstallmentNumber) : '')
-                  setNumberDialogOpen(true)
-                }}
-              >
-                Set Number
-              </Button>
+              <div className="flex items-center gap-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">Weekly Contribution Amount</p>
+                  {summary.weeklyContributionAmount > 0 ? (
+                    <p className="font-bold text-lg text-indigo-700">{formatCurrency(summary.weeklyContributionAmount)}</p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Not set</p>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setAmountInput(summary.weeklyContributionAmount > 0 ? String(summary.weeklyContributionAmount) : '')
+                    setAmountDialogOpen(true)
+                  }}
+                >
+                  Set Amount
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setNumberInput(summary.currentInstallmentNumber > 0 ? String(summary.currentInstallmentNumber) : '')
+                    setNumberDialogOpen(true)
+                  }}
+                >
+                  Set Number
+                </Button>
+              </div>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              Expected number of installments each member should have paid by now. It increases by one every Monday automatically.
+              Expected number of installments each member should have paid by now — increases by one every Monday.
+              {summary.weeklyContributionAmount > 0
+                ? ` Each member's installments paid = their savings ÷ ${formatCurrency(summary.weeklyContributionAmount)}, so paying several weeks at once advances them proportionally.`
+                : ' Set a weekly contribution amount to have installments counted as savings ÷ amount (e.g. paying 5× the weekly amount counts as 5 installments).'}
             </p>
           </CardContent>
         </Card>
@@ -589,6 +636,42 @@ export default function ContributionsPage() {
             </Button>
             <Button onClick={handleSaveNumber} disabled={isSavingNumber || numberInput === ''}>
               {isSavingNumber ? <Spinner className="mr-2 h-4 w-4" /> : null}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set weekly contribution amount dialog */}
+      <Dialog open={amountDialogOpen} onOpenChange={setAmountDialogOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Set Weekly Contribution Amount</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              The standard amount for one weekly installment. Each member&apos;s installments
+              paid are then counted as their savings ÷ this amount, so paying several weeks&apos;
+              worth at once advances them proportionally (e.g. paying 5× the amount = 5 installments).
+              Set to 0 to go back to counting one installment per contribution entry.
+            </p>
+            <div className="space-y-1">
+              <Label>Weekly amount (₹)</Label>
+              <Input
+                type="number" min="0" step="0.01" placeholder="e.g. 100"
+                value={amountInput}
+                onChange={e => setAmountInput(e.target.value)}
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter') handleSaveAmount() }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAmountDialogOpen(false)} disabled={isSavingAmount}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveAmount} disabled={isSavingAmount || amountInput === ''}>
+              {isSavingAmount ? <Spinner className="mr-2 h-4 w-4" /> : null}
               Save
             </Button>
           </DialogFooter>

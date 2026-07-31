@@ -636,9 +636,22 @@ pub fn get_member_profile(conn: &Connection, member_id: i64) -> Result<MemberPro
     }
 
     let opening_data_locked = member.opening_balance_set_at.is_some();
-    let initial_installments = member.past_installments.max(0) as u32;
-    let current_installments = member.current_installments.max(0) as u32;
-    let total_installments = initial_installments + current_installments;
+    // When a standard weekly amount is configured, installments are derived from
+    // savings (floor(savings / amount)) — matching the Contributions page — so
+    // paying several weeks at once counts proportionally. The opening-savings share
+    // is reported as the "initial" installments and the rest as "current". With no
+    // amount set, fall back to the stored past + ongoing counts.
+    let weekly_amount = crate::db::settings::get_weekly_contribution_amount(conn)?;
+    let (initial_installments, current_installments, total_installments) = if weekly_amount > 0.005 {
+        let total = (current_balance / weekly_amount).floor().max(0.0) as u32;
+        let initial = (remaining_opening / weekly_amount).floor().max(0.0) as u32;
+        let current = total.saturating_sub(initial);
+        (initial, current, total)
+    } else {
+        let initial = member.past_installments.max(0) as u32;
+        let current = member.current_installments.max(0) as u32;
+        (initial, current, initial + current)
+    };
 
     Ok(MemberProfile {
         opening_balance: member.opening_balance,

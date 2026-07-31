@@ -88,6 +88,8 @@ fn main() {
             commands::contributions::get_savings_payout_history_cmd,
             commands::contributions::get_installment_status_cmd,
             commands::contributions::set_installment_number_cmd,
+            commands::contributions::get_weekly_contribution_amount_cmd,
+            commands::contributions::set_weekly_contribution_amount_cmd,
             commands::contributions::get_weekly_contribution_status_cmd,
             commands::loans::record_past_loan,
             commands::loans::get_all_loans,
