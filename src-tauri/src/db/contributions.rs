@@ -421,7 +421,11 @@ pub fn get_weekly_contribution_status(
              c.last_paid_at,
              COALESCE(c.payment_count, 0)   AS payment_count,
              COALESCE(mb.balance, 0.0)       AS total_savings,
-             COALESCE(m.past_installments, 0) + COALESCE(m.current_installments, 0) AS installments_paid
+             COALESCE(m.past_installments, 0) + COALESCE(m.current_installments, 0) AS installments_paid,
+             COALESCE((
+                 SELECT -SUM(mt.amount) FROM member_transactions mt
+                 WHERE mt.member_id = m.id AND mt.txn_type = 'CONTRIBUTION' AND mt.amount < 0
+             ), 0.0)                          AS withdrawals
          FROM members m
          LEFT JOIN (
              SELECT
@@ -454,10 +458,12 @@ pub fn get_weekly_contribution_status(
         let amount_paid: f64 = r.get(3)?;
         let total_savings: f64 = r.get(7)?;
         let tracked_installments: i64 = r.get(8)?;
-        // Derive from savings when a weekly amount is configured; otherwise fall
-        // back to the counted installments (past + ongoing +1 per contribution).
+        let withdrawals: f64 = r.get(9)?;
+        // Derive from GROSS contributions (net savings + any payouts added back) so a
+        // savings payout never reduces the installments the member has already paid.
+        // Fall back to the counted installments when no weekly amount is configured.
         let installments_paid = if weekly_amount > 0.005 {
-            (total_savings / weekly_amount).floor().max(0.0) as i64
+            ((total_savings + withdrawals) / weekly_amount).floor().max(0.0) as i64
         } else {
             tracked_installments
         };
