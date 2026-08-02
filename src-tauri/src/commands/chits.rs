@@ -704,6 +704,57 @@ pub fn record_chit_late_payment(
     })
 }
 
+#[derive(serde::Deserialize)]
+pub struct ChitLateBatchItem {
+    pub cycle_id: i64,
+    pub amount: f64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChitLateBatchInput {
+    pub chit_id: i64,
+    pub member_id: i64,
+    pub items: Vec<ChitLateBatchItem>,
+    pub payment_method: String,          // CASH | BANK | MIXED
+    #[serde(default)]
+    pub cash_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_amount: Option<f64>,
+    #[serde(default)]
+    pub bank_txn_id: Option<String>,
+}
+
+/// Collect overdue installments for several completed cycles at once, in a single
+/// receipt (one member, many cycles).
+#[tauri::command]
+pub fn record_chit_late_payments_batch(
+    state: State<Mutex<AppState>>,
+    input: ChitLateBatchInput,
+) -> Result<RecordPaymentResponse, String> {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = guard.db.as_mut().ok_or_else(|| "DB not unlocked".to_string())?;
+
+    let paid_at = chrono::Utc::now().to_rfc3339();
+    let items: Vec<(i64, f64)> = input.items.iter().map(|i| (i.cycle_id, i.amount)).collect();
+
+    let (total, count) = db::chits::record_chit_late_payments_batch(
+        conn, input.chit_id, input.member_id, &items,
+        &input.payment_method, input.cash_amount, input.bank_amount,
+        input.bank_txn_id.as_deref(), &paid_at,
+    ).map_err(|e: AppError| e.to_string())?;
+
+    db::audit::log_audit(conn, "CHIT_LATE_PAYMENT_BATCH", "chit_group", Some(input.chit_id),
+        &format!("₹{total} late dues for {count} cycle(s) by member {} (chit {})",
+            input.member_id, input.chit_id));
+
+    Ok(RecordPaymentResponse {
+        payment_id: 0,
+        net_amount: total,
+        receipt_generated: true,
+        message: format!("Collected ₹{total} for {count} cycle(s) in one receipt"),
+    })
+}
+
 /// Info needed to close a chit: cycle completeness, outstanding dues, and the
 /// members who still need paying out.
 #[tauri::command]

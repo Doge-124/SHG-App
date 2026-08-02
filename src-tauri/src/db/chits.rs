@@ -1020,6 +1020,88 @@ pub struct PendingDue {
 /// cycle is the monthly contribution minus the discount that applied to it
 /// (= the previous cycle's auction discount per member), matching how the
 /// live/past payment amounts are computed.
+/// Collect overdue installments for MULTIPLE completed cycles in ONE receipt.
+/// `items` is (cycle_id, amount) per cycle. A chit_payments row is written for each
+/// cycle, but a single combined CHIT_PAYMENT receipt is recorded for the total — so
+/// a member clearing many cycles at once gets just one receipt. Supports CASH/BANK/
+/// MIXED (the split applies to the combined total). Returns (total, cycle count).
+#[allow(clippy::too_many_arguments)]
+pub fn record_chit_late_payments_batch(
+    conn: &mut Connection,
+    chit_id: i64,
+    member_id: i64,
+    items: &[(i64, f64)],
+    payment_method: &str,
+    cash_amount: Option<f64>,
+    bank_amount: Option<f64>,
+    bank_txn_id: Option<&str>,
+    paid_at: &str,
+) -> Result<(f64, usize), AppError> {
+    if items.is_empty() {
+        return Err(AppError::validation("Select at least one cycle to pay"));
+    }
+    let total: f64 = ((items.iter().map(|(_, a)| a).sum::<f64>()) * 100.0).round() / 100.0;
+    validation::validate_money_amount(total)?;
+
+    let (cash_part, bank_part) = match payment_method {
+        "MIXED" => {
+            let c = cash_amount.unwrap_or(0.0);
+            let b = bank_amount.unwrap_or(0.0);
+            if c <= 0.005 || b <= 0.005 {
+                return Err(AppError::validation("A mixed payment needs a positive amount in both cash and bank"));
+            }
+            if (c + b - total).abs() > 0.01 {
+                return Err(AppError::validation("Cash + bank must equal the total amount"));
+            }
+            (Some(c), Some(b))
+        }
+        "CASH" | "BANK" => (None, None),
+        _ => return Err(AppError::validation("payment_method must be CASH, BANK, or MIXED")),
+    };
+
+    let mut tx = conn.transaction()?;
+
+    for (cycle_id, amount) in items {
+        validation::validate_money_amount(*amount)?;
+        let exists: bool = tx.query_row(
+            "SELECT COUNT(*) > 0 FROM chit_cycles WHERE id = ?1 AND chit_id = ?2",
+            (cycle_id, chit_id), |r| r.get(0),
+        ).unwrap_or(false);
+        if !exists {
+            return Err(AppError::business("A selected cycle was not found in this chit."));
+        }
+        let already: bool = tx.query_row(
+            "SELECT COUNT(*) > 0 FROM chit_payments WHERE cycle_id = ?1 AND member_id = ?2",
+            (cycle_id, member_id), |r| r.get(0),
+        ).unwrap_or(false);
+        if already {
+            return Err(AppError::business("This member has already paid one of the selected cycles."));
+        }
+        tx.execute(
+            "INSERT INTO chit_payments (chit_id, cycle_id, member_id, amount, payment_method, paid_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (chit_id, *cycle_id, member_id, *amount, payment_method, paid_at),
+        )?;
+    }
+
+    // ONE combined receipt for the whole batch.
+    let pb = passbook_number(&tx, chit_id, member_id);
+    let reason = reason_with_passbook(&format!("Chit dues — {} cycle(s)", items.len()), &pb);
+    if payment_method == "MIXED" {
+        let gid = ledger::record_receipt_mixed(&mut tx, cash_part.unwrap_or(0.0), bank_part.unwrap_or(0.0),
+            &reason, Some("CHIT_PAYMENT"), Some(member_id), paid_at, bank_txn_id)?;
+        tag_member_ref_group(&tx, member_id, gid.as_deref())?;
+    } else {
+        let bt = if payment_method == "BANK" { bank_txn_id } else { None };
+        ledger::record_receipt_ex(&mut tx, total, &reason, payment_method,
+            Some("CHIT_PAYMENT"), Some(member_id), paid_at, bt, None)?;
+        tag_member_ref(&tx, member_id)?;
+    }
+
+    tx.commit()?;
+    Ok((total, items.len()))
+}
+
 pub fn get_chit_pending_dues(
     conn: &Connection,
     chit_id: i64,
@@ -1121,11 +1203,16 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
                FROM chit_payments cp
                WHERE cp.chit_id = cm.chit_id AND cp.member_id = cm.member_id
                  AND cp.paid_at <= ?1) AS credit,
+            -- Only genuine REFERENCE past-data payments count as opening capital:
+            -- a bulk past-entry payment stores a date-only paid_at, whereas a real
+            -- late-dues collection on a past cycle carries a full timestamp (has 'T')
+            -- and brought in real cash, so it must count as live — not opening.
             (SELECT COALESCE(SUM(MAX(cp.amount, cg.monthly_contribution)), 0)
                FROM chit_payments cp
                JOIN chit_cycles cc ON cc.id = cp.cycle_id
                WHERE cp.chit_id = cm.chit_id AND cp.member_id = cm.member_id
-                 AND cp.paid_at <= ?1 AND COALESCE(cc.is_past_entry, 0) = 1) AS past_credit,
+                 AND cp.paid_at <= ?1 AND COALESCE(cc.is_past_entry, 0) = 1
+                 AND instr(cp.paid_at, 'T') = 0) AS past_credit,
             (SELECT COALESCE(cc.is_past_entry, 0)
                FROM chit_cycle_winners w JOIN chit_cycles cc ON cc.id = w.cycle_id
                WHERE w.chit_id = cm.chit_id AND w.member_id = cm.member_id
@@ -1204,12 +1291,15 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
         [as_of], |r| r.get(0),
     ).unwrap_or(0.0);
 
+    // A payment is "live" (real ledger cash) unless it is a bulk reference past-entry
+    // payment (past cycle + date-only paid_at). Late-dues on past cycles are live.
     let consumed_live: f64 = conn.query_row(
         "SELECT COALESCE(SUM(MAX(cg.monthly_contribution - cp.amount, 0)), 0)
          FROM chit_payments cp
          JOIN chit_cycles cc ON cc.id = cp.cycle_id
          JOIN chit_groups cg ON cg.id = cp.chit_id
-         WHERE COALESCE(cc.is_past_entry, 0) = 0 AND cp.paid_at <= ?1",
+         WHERE cp.paid_at <= ?1
+           AND NOT (COALESCE(cc.is_past_entry, 0) = 1 AND instr(cp.paid_at, 'T') = 0)",
         [as_of], |r| r.get(0),
     ).unwrap_or(0.0);
 
@@ -1220,7 +1310,8 @@ pub fn get_chit_member_positions(conn: &Connection, as_of: &str) -> Result<ChitP
         "SELECT COALESCE(SUM(cp.amount), 0)
          FROM chit_payments cp
          JOIN chit_cycles cc ON cc.id = cp.cycle_id
-         WHERE COALESCE(cc.is_past_entry, 0) = 0 AND cp.paid_at <= ?1",
+         WHERE cp.paid_at <= ?1
+           AND NOT (COALESCE(cc.is_past_entry, 0) = 1 AND instr(cp.paid_at, 'T') = 0)",
         [as_of], |r| r.get(0),
     ).unwrap_or(0.0);
 

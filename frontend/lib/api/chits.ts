@@ -673,6 +673,37 @@ export async function recordChitLatePayment(
   }
 }
 
+/** Collect several overdue cycles for one member in a single receipt. */
+export async function recordChitLatePaymentsBatch(
+  chitGroupId: string,
+  memberId: string,
+  items: { cycleId: string; amount: number }[],
+  opts: {
+    paymentMethod: string                 // CASH | BANK | MIXED
+    cashAmount?: number | null
+    bankAmount?: number | null
+    bankTxnId?: string | null
+  },
+): Promise<ApiResponse<void>> {
+  try {
+    await withAutoPrint(() => invoke('record_chit_late_payments_batch', {
+      input: {
+        chit_id: parseInt(chitGroupId),
+        member_id: parseInt(memberId),
+        items: items.map(i => ({ cycle_id: parseInt(i.cycleId), amount: i.amount })),
+        payment_method: opts.paymentMethod.toUpperCase(),
+        cash_amount: opts.cashAmount ?? null,
+        bank_amount: opts.bankAmount ?? null,
+        bank_txn_id: opts.bankTxnId ?? null,
+      },
+    }))
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to record batch late payment:', error)
+    return { success: false, error: typeof error === 'string' ? error : 'Failed to record the payment' }
+  }
+}
+
 export interface ChitClosingInfo {
   allCyclesComplete: boolean
   outstandingDues: number

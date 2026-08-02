@@ -25,6 +25,7 @@ import {
   processCycleWinners,
   getChitPendingDues,
   recordChitLatePayment,
+  recordChitLatePaymentsBatch,
   getChitClosingInfo,
   payClosingMembers,
   closeChit,
@@ -128,6 +129,13 @@ export function ChitManualCycleForm({
   // false → collect the amount after this cycle's bid discount; true → collect the
   // full monthly contribution (SHG's discretion for late payers).
   const [collectFull, setCollectFull] = useState(false)
+
+  // Batch collection: pay several overdue cycles for one member in a single receipt.
+  const [batchTarget, setBatchTarget] = useState<{ memberId: string; memberName: string; dues: ChitPendingDue[] } | null>(null)
+  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set())  // cycleIds
+  const [batchFull, setBatchFull] = useState(false)
+  const [batchSplit, setBatchSplit] = useState<PaymentSplit>(emptyPaymentSplit)
+  const [batchSubmitting, setBatchSubmitting] = useState(false)
 
   // Closing cycle / final settlement
   const [closingInfo, setClosingInfo] = useState<ChitClosingInfo | null>(null)
@@ -329,6 +337,51 @@ export function ChitManualCycleForm({
     }
   }
 
+  // ── Batch dues collection (one receipt for several cycles) ──────────────
+  const openBatch = (group: { memberId: string; memberName: string; dues: ChitPendingDue[] }) => {
+    setBatchTarget(group)
+    setBatchSelected(new Set(group.dues.map(d => d.cycleId)))  // all selected by default
+    setBatchFull(false)
+    setBatchSplit(emptyPaymentSplit)
+  }
+  const toggleBatchCycle = (cycleId: string) => {
+    setBatchSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(cycleId)) next.delete(cycleId); else next.add(cycleId)
+      return next
+    })
+  }
+  const batchDueAmount = (d: ChitPendingDue) => batchFull ? d.fullAmount : d.amountOwed
+  const batchSelectedDues = (batchTarget?.dues ?? []).filter(d => batchSelected.has(d.cycleId))
+  const batchTotal = batchSelectedDues.reduce((s, d) => s + batchDueAmount(d), 0)
+
+  const handleBatchCollect = async () => {
+    if (!batchTarget || batchSelectedDues.length === 0) { toast.error('Select at least one cycle'); return }
+    if (!isPaymentSplitValid(batchSplit, batchTotal)) {
+      toast.error(`For a mixed payment, cash + bank must equal ${formatCurrency(batchTotal)}`)
+      return
+    }
+    setBatchSubmitting(true)
+    try {
+      const result = await recordChitLatePaymentsBatch(
+        chitGroupId, batchTarget.memberId,
+        batchSelectedDues.map(d => ({ cycleId: d.cycleId, amount: batchDueAmount(d) })),
+        paymentInvokeArgs(batchSplit),
+      )
+      if (result.success) {
+        toast.success(`Collected ${batchSelectedDues.length} cycle(s) from ${batchTarget.memberName} — one receipt`)
+        setBatchTarget(null)
+        await loadData()
+      } else {
+        toast.error(result.error || 'Failed to collect dues')
+      }
+    } catch {
+      toast.error('An error occurred')
+    } finally {
+      setBatchSubmitting(false)
+    }
+  }
+
   // Pay out the leftover (never-won) members. Allowed even with pending dues —
   // they shouldn't be held up by late payers. Does not close the chit.
   const handlePayClosing = async () => {
@@ -515,6 +568,17 @@ export function ChitManualCycleForm({
   const calculatedDiscountPerMember = members.length > 0 ? Math.round(totalBidDiscounts / members.length * 100) / 100 : 0
   const effectiveDiscountPerMember = overrideDiscount ? parseFloat(overrideDiscount) || 0 : calculatedDiscountPerMember
 
+  // Pending dues grouped by member, so a member repaying several cycles can be
+  // collected in one receipt.
+  const duesByMember = (() => {
+    const m = new Map<string, { memberId: string; memberName: string; dues: ChitPendingDue[] }>()
+    for (const d of pendingDues) {
+      if (!m.has(d.memberId)) m.set(d.memberId, { memberId: d.memberId, memberName: d.memberName, dues: [] })
+      m.get(d.memberId)!.dues.push(d)
+    }
+    return Array.from(m.values())
+  })()
+
   const fixedWinnerPayout = totalAmount - commissionPerWinner
   const auctionWinnerPayout = (bidDiscount: number) => Math.max(0, totalAmount - bidDiscount - commissionPerWinner)
   // GROSS payout voucher amounts (before commission). The mixed split is of the
@@ -610,21 +674,37 @@ export function ChitManualCycleForm({
                   </CardHeader>
                   <CardContent>
                     <p className="text-xs text-muted-foreground mb-3">
-                      Overdue installments from completed cycles. Collecting one records a cash receipt today.
+                      Overdue installments from completed cycles. A member with several dues can be
+                      cleared in one receipt — use “Collect all”, or open it to pick specific cycles.
                     </p>
                     <div className="space-y-2">
-                      {pendingDues.map(d => (
-                        <div key={`${d.cycleId}-${d.memberId}`} className="flex items-center justify-between p-2 rounded border text-sm">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">{d.memberName}</span>
-                            <Badge variant="outline" className="text-xs">Cycle {d.cycleNo}</Badge>
+                      {duesByMember.map(g => {
+                        const total = g.dues.reduce((s, d) => s + d.amountOwed, 0)
+                        return (
+                          <div key={g.memberId} className="p-2 rounded border text-sm space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-medium">{g.memberName}</span>
+                                {g.dues.map(d => (
+                                  <Badge key={d.cycleId} variant="outline" className="text-xs">Cycle {d.cycleNo}</Badge>
+                                ))}
+                              </div>
+                              <span className="text-muted-foreground whitespace-nowrap">
+                                {g.dues.length} · {formatCurrency(total)}
+                              </span>
+                            </div>
+                            <div className="flex justify-end gap-2">
+                              {g.dues.length === 1 ? (
+                                <Button size="sm" variant="outline" onClick={() => openCollectDue(g.dues[0])}>Collect</Button>
+                              ) : (
+                                <Button size="sm" variant="outline" onClick={() => openBatch(g)}>
+                                  Collect all ({g.dues.length})
+                                </Button>
+                              )}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-3">
-                            <span className="text-muted-foreground">{formatCurrency(d.amountOwed)}</span>
-                            <Button size="sm" variant="outline" onClick={() => openCollectDue(d)}>Collect</Button>
-                          </div>
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </CardContent>
                 </Card>
@@ -1090,6 +1170,71 @@ export function ChitManualCycleForm({
           <Button variant="outline" onClick={() => setCollectDue(null)} disabled={isSubmitting}>Cancel</Button>
           <Button onClick={handleCollectDue} disabled={isSubmitting}>
             Collect Payment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Collect several overdue cycles for one member in a single receipt */}
+    <Dialog open={!!batchTarget} onOpenChange={open => { if (!open) setBatchTarget(null) }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Collect Dues — {batchTarget?.memberName}</DialogTitle>
+        </DialogHeader>
+        {batchTarget && (
+          <div className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Select the cycles being paid. One receipt is generated for the whole total.
+            </p>
+
+            {/* Charge full or after-discount for cycles that had a bid discount. */}
+            {batchTarget.dues.some(d => d.discount > 0.005) && (
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant={!batchFull ? 'default' : 'outline'}
+                  className="flex-1" onClick={() => { setBatchFull(false); setBatchSplit(emptyPaymentSplit) }}>
+                  After discount
+                </Button>
+                <Button type="button" size="sm" variant={batchFull ? 'default' : 'outline'}
+                  className="flex-1" onClick={() => { setBatchFull(true); setBatchSplit(emptyPaymentSplit) }}>
+                  Full amount
+                </Button>
+              </div>
+            )}
+
+            <div className="max-h-52 overflow-y-auto rounded-md border divide-y">
+              {batchTarget.dues.map(d => (
+                <label key={d.cycleId} className="flex items-center justify-between gap-2 p-2 text-sm cursor-pointer">
+                  <span className="flex items-center gap-2">
+                    <Checkbox
+                      checked={batchSelected.has(d.cycleId)}
+                      onCheckedChange={() => { toggleBatchCycle(d.cycleId); setBatchSplit(emptyPaymentSplit) }}
+                    />
+                    Cycle {d.cycleNo}
+                  </span>
+                  <span className="text-muted-foreground">{formatCurrency(batchDueAmount(d))}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between rounded-md bg-muted p-2 text-sm font-medium">
+              <span>{batchSelectedDues.length} cycle(s)</span>
+              <span>{formatCurrency(batchTotal)}</span>
+            </div>
+
+            {batchTotal > 0 && (
+              <PaymentMethodFields
+                total={batchTotal}
+                value={batchSplit}
+                onChange={setBatchSplit}
+                idPrefix="chit-due-batch"
+              />
+            )}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setBatchTarget(null)} disabled={batchSubmitting}>Cancel</Button>
+          <Button onClick={handleBatchCollect} disabled={batchSubmitting || batchSelectedDues.length === 0}>
+            {batchSubmitting ? 'Collecting…' : `Collect ${formatCurrency(batchTotal)}`}
           </Button>
         </DialogFooter>
       </DialogContent>

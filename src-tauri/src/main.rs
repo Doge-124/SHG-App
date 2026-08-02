@@ -121,6 +121,7 @@ fn main() {
             commands::chits::get_chit_pending_dues,
             commands::chits::get_member_chit_ledger,
             commands::chits::record_chit_late_payment,
+            commands::chits::record_chit_late_payments_batch,
             commands::chits::get_chit_closing_info,
             commands::chits::pay_closing_members,
             commands::chits::close_chit,
