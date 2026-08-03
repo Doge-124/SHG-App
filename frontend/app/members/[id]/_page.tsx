@@ -684,9 +684,12 @@ function TransactionList({ txns }: { txns: any[] }) {
                         txn.txnType === 'LOAN'         && 'bg-warning/10 text-warning',
                         txn.txnType === 'PAYMENT'      && 'bg-success/10 text-success',
                         txn.txnType === 'CONTRIBUTION' && 'bg-primary/10 text-primary',
+                        txn.txnType === 'CHIT_PAYMENT' && 'bg-purple-500/10 text-purple-600',
                       )}
                     >
-                      {txn.txnType === 'CONTRIBUTION' ? 'Weekly Contribution' : txn.txnType}
+                      {txn.txnType === 'CONTRIBUTION' ? 'Weekly Contribution'
+                        : txn.txnType === 'CHIT_PAYMENT' ? 'Chit Installment'
+                        : txn.txnType}
                     </Badge>
                   </div>
                   {txn.reason && <p className="text-sm text-muted-foreground mt-1">{txn.reason}</p>}

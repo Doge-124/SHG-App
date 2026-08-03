@@ -610,11 +610,25 @@ pub fn get_member_profile(conn: &Connection, member_id: i64) -> Result<MemberPro
     let remaining_opening = (member.opening_balance - withdrawals).max(0.0);
     let regular_balance = current_balance - remaining_opening;
 
-    // Recent transactions (includes OPENING/LOAN/PAYMENT).
+    // Recent transactions (includes OPENING/LOAN/PAYMENT). Chit installments live
+    // in their own table (chit_payments), so a chit-only member would otherwise
+    // have an empty Transactions tab — union them in as CHIT_PAYMENT rows, tagged
+    // with the cycle number, so every member type sees their activity. The id is
+    // offset to stay distinct from member_transactions ids (display key only).
     let mut stmt = conn.prepare(
-        "SELECT id, member_id, amount, txn_type, reason, created_at
-         FROM member_transactions
-         WHERE member_id = ?1
+        "SELECT id, member_id, amount, txn_type, reason, created_at FROM (
+             SELECT id, member_id, amount, txn_type, reason, created_at
+             FROM member_transactions
+             WHERE member_id = ?1
+             UNION ALL
+             SELECT (1000000000 + cp.id) AS id, cp.member_id, cp.amount,
+                    'CHIT_PAYMENT' AS txn_type,
+                    'Chit Installment Cycle ' || cc.cycle_no AS reason,
+                    cp.paid_at AS created_at
+             FROM chit_payments cp
+             JOIN chit_cycles cc ON cc.id = cp.cycle_id
+             WHERE cp.member_id = ?1
+         )
          ORDER BY created_at DESC
          LIMIT 20",
     )?;

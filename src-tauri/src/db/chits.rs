@@ -951,9 +951,9 @@ pub fn record_member_payment_with_discount(
     // the caller passed (computed from what was really paid).
     let applied_discount = (monthly_contribution - gross_amount).max(0.0);
     let installment_base = if applied_discount > 0.005 {
-        format!("Chit Installment (Bid discount {})", fmt_rs(applied_discount))
+        format!("Chit Installment Cycle {} (Bid discount {})", cycle_no, fmt_rs(applied_discount))
     } else {
-        "Chit Installment".to_string()
+        format!("Chit Installment Cycle {}", cycle_no)
     };
     let installment_reason = reason_with_passbook(&installment_base, &pb);
     if payment_method == "MIXED" {
@@ -1061,15 +1061,16 @@ pub fn record_chit_late_payments_batch(
 
     let mut tx = conn.transaction()?;
 
+    let mut cycle_nos: Vec<i64> = Vec::new();
     for (cycle_id, amount) in items {
         validation::validate_money_amount(*amount)?;
-        let exists: bool = tx.query_row(
-            "SELECT COUNT(*) > 0 FROM chit_cycles WHERE id = ?1 AND chit_id = ?2",
+        let cycle_no: Option<i64> = tx.query_row(
+            "SELECT cycle_no FROM chit_cycles WHERE id = ?1 AND chit_id = ?2",
             (cycle_id, chit_id), |r| r.get(0),
-        ).unwrap_or(false);
-        if !exists {
-            return Err(AppError::business("A selected cycle was not found in this chit."));
-        }
+        ).optional()?;
+        let cycle_no = cycle_no.ok_or_else(||
+            AppError::business("A selected cycle was not found in this chit."))?;
+        cycle_nos.push(cycle_no);
         let already: bool = tx.query_row(
             "SELECT COUNT(*) > 0 FROM chit_payments WHERE cycle_id = ?1 AND member_id = ?2",
             (cycle_id, member_id), |r| r.get(0),
@@ -1084,9 +1085,13 @@ pub fn record_chit_late_payments_batch(
         )?;
     }
 
-    // ONE combined receipt for the whole batch.
+    // ONE combined receipt for the whole batch — list the cycle numbers it covers.
+    cycle_nos.sort_unstable();
+    let cycles_label = cycle_nos.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
     let pb = passbook_number(&tx, chit_id, member_id);
-    let reason = reason_with_passbook(&format!("Chit dues — {} cycle(s)", items.len()), &pb);
+    let reason = reason_with_passbook(
+        &format!("Chit dues — Cycle{} {}", if cycle_nos.len() == 1 { "" } else { "s" }, cycles_label),
+        &pb);
     if payment_method == "MIXED" {
         let gid = ledger::record_receipt_mixed(&mut tx, cash_part.unwrap_or(0.0), bank_part.unwrap_or(0.0),
             &reason, Some("CHIT_PAYMENT"), Some(member_id), paid_at, bank_txn_id)?;
@@ -1913,11 +1918,14 @@ pub fn record_chit_payment(
         )?;
     }
 
+    let cycle_no: i64 = tx.query_row(
+        "SELECT cycle_no FROM chit_cycles WHERE id = ?1", [cycle_id], |r| r.get(0),
+    ).unwrap_or(cycle_id);
     let pb = passbook_number(&tx, chit_id, member_id);
     ledger::record_receipt(
         &mut tx,
         amount,
-        &reason_with_passbook("Chit payment", &pb),
+        &reason_with_passbook(&format!("Chit Installment Cycle {}", cycle_no), &pb),
         payment_method,
         Some("CHIT_PAYMENT"),
         Some(member_id),

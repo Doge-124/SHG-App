@@ -73,10 +73,44 @@ pub fn record_weekly_contribution(
         ));
     }
 
+    // Which installment number(s) this contribution covers, when a weekly amount
+    // is configured. Count = floor(gross / weekly), gross = savings + past
+    // withdrawals (so payouts don't shift numbering). Computed BEFORE the balance
+    // update below: the range moves from the current count to the count after +amount.
+    let weekly_amount = db::settings::get_weekly_contribution_amount(conn).unwrap_or(0.0);
+    let installment_label: Option<String> = if weekly_amount > 0.005 {
+        let savings_before: f64 = conn.query_row(
+            "SELECT COALESCE(balance, 0) FROM member_balances WHERE member_id = ?1",
+            [input.member_id], |r| r.get(0),
+        ).unwrap_or(0.0);
+        let withdrawals: f64 = conn.query_row(
+            "SELECT COALESCE(-SUM(amount), 0) FROM member_transactions
+             WHERE member_id = ?1 AND txn_type = 'CONTRIBUTION' AND amount < 0",
+            [input.member_id], |r| r.get(0),
+        ).unwrap_or(0.0);
+        let gross_before = savings_before + withdrawals;
+        let before = (gross_before / weekly_amount).floor().max(0.0) as i64;
+        let after = ((gross_before + input.amount) / weekly_amount).floor().max(0.0) as i64;
+        if after > before {
+            Some(if after == before + 1 {
+                format!("Installment {}", after)
+            } else {
+                format!("Installments {}-{}", before + 1, after)
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut tx = conn.transaction()?;
 
     // 1) SHG receipt transaction (handles CASH / BANK / MIXED + bank txn id).
     let mut reason = format!("Weekly contribution from {} ({})", member_name, member_code);
+    if let Some(lbl) = &installment_label {
+        reason.push_str(&format!(" - {}", lbl));
+    }
     if let Some(note) = &input.note {
         reason.push_str(&format!(" - {}", note));
     }

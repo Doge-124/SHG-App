@@ -310,8 +310,8 @@ export default function ReceiptsPage() {
       <DataTable
         data={filteredReceipts}
         columns={columns}
-        searchKey="reason"
-        searchPlaceholder="Search by reason..."
+        searchKey={['reason', 'member_name']}
+        searchPlaceholder="Search by reason or member name..."
         isLoading={isLoading}
         emptyMessage="No receipts found"
       />
