@@ -395,35 +395,36 @@ fn cancel_chit_installment(
     let member_id = txn.reference_id.ok_or_else(||
         AppError::business("Chit installment receipt has no member reference."))?;
 
-    // Find the chit_payments row.
-    let pay: Option<(i64, i64, i64)> = conn.query_row(
-        "SELECT id, chit_id, cycle_id FROM chit_payments
-         WHERE member_id = ?1 AND ABS(amount - ?2) < 0.005
-           AND paid_at = ?3
-         ORDER BY id DESC LIMIT 1",
-        (member_id, total, &txn.created_at),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).ok();
+    // One receipt can back SEVERAL chit_payments rows — a batch dues collection
+    // records one receipt for many cycles, all inserted with the receipt's exact
+    // paid_at. Match every chit_payment created at the same instant for this member
+    // (a normal single payment matches exactly one row). Late-dues on already-drawn
+    // cycles are cancellable: deleting the chit_payments + reversing the receipt keeps
+    // the accrual and cash consistent, and the winner's payout is untouched.
+    let payment_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM chit_payments WHERE member_id = ?1 AND paid_at = ?2",
+        )?;
+        let rows = stmt.query_map((member_id, &txn.created_at), |r| r.get::<_, i64>(0))?;
+        let mut v = Vec::new();
+        for r in rows { if let Ok(id) = r { v.push(id); } }
+        v
+    };
 
-    let (payment_id, _chit_id, cycle_id) = pay.ok_or_else(||
-        AppError::business("Couldn't match this receipt to a chit installment record."))?;
-
-    // Refuse if the cycle has already been paid out.
-    let winner_set: bool = conn.query_row(
-        "SELECT winning_member_id IS NOT NULL FROM chit_cycles WHERE id = ?1",
-        [cycle_id], |r| r.get(0),
-    ).unwrap_or(false);
-    if winner_set {
+    if payment_ids.is_empty() {
         return Err(AppError::business(
-            "This cycle has already been paid out to a winner. Cancel the payout first, then cancel this installment."
-        ));
+            "Couldn't match this receipt to a chit installment record. It may have already been cancelled."));
     }
 
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM chit_payments WHERE id = ?1", [payment_id])?;
+    for pid in &payment_ids {
+        tx.execute("DELETE FROM chit_payments WHERE id = ?1", [pid])?;
+    }
+    // Reverse the receipt(s) — void_group handles a cash+bank mixed receipt group.
     void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("CHIT_PAYMENT reversed (cycle #{}, Rs.{}): {}", cycle_id, total, reason))?;
+        Some(txn.id), &format!("CHIT_PAYMENT reversed ({} cycle(s), Rs.{}): {}",
+            payment_ids.len(), total, reason))?;
     tx.commit()?;
     Ok(())
 }

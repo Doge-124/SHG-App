@@ -346,9 +346,10 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), AppError> {
         add_column_if_missing(&tx, "settings", "installment_anchor_date", "TEXT")?;
         // Automatic cloud backup (email) config — JSON blob, NULL until set up.
         add_column_if_missing(&tx, "settings", "cloud_backup_settings", "TEXT")?;
+        // Standard weekly contribution amount — drives derived installment counts.
+        // (On a brand-new DB the column ships in the CREATE TABLE instead.)
+        add_column_if_missing(&tx, "settings", "weekly_contribution_amount", "REAL NOT NULL DEFAULT 0")?;
     }
-    // Standard weekly contribution amount — drives derived installment counts.
-    add_column_if_missing(&tx, "settings", "weekly_contribution_amount", "REAL NOT NULL DEFAULT 0")?;
 
     // 9) Daily interest rate and upfront interest for new loan logic.
     add_column_if_missing(&tx, "loans", "daily_interest_rate", "REAL NOT NULL DEFAULT 0")?;

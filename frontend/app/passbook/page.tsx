@@ -174,11 +174,13 @@ export default function PassbookPage() {
   // Load all members
   useEffect(() => {
     invoke<any[]>('list_members').then(raw => {
+      // list_members returns the Member struct serialized camelCase
+      // (memberCode / memberType); keep snake_case fallbacks for safety.
       const mapped = raw.map(m => ({
         id: m.id?.toString() ?? '',
         name: m.name ?? '',
-        code: m.member_code ?? '',
-        memberType: m.member_type ?? '',
+        code: m.memberCode ?? m.member_code ?? '',
+        memberType: m.memberType ?? m.member_type ?? '',
       }))
       setMembers(mapped)
     }).catch(() => toast.error('Failed to load members'))
