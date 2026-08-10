@@ -228,7 +228,14 @@ pub fn get_vouchers(
                 ELSE NULL
             END as member_name,
             t.bank_txn_id,
-            t.group_id
+            t.group_id,
+            -- Chit payout breakdown: the winner's bid discount and commission for
+            -- this cycle. The voucher amount is (full prize - bid discount); the
+            -- full prize = amount + bid_discount, and the winner nets amount - commission.
+            (SELECT ccw.bid_discount FROM chit_cycle_winners ccw
+             WHERE ccw.cycle_id = t.reference_id AND ccw.member_id = t.member_ref_id) as bid_discount,
+            (SELECT ccw.commission FROM chit_cycle_winners ccw
+             WHERE ccw.cycle_id = t.reference_id AND ccw.member_id = t.member_ref_id) as commission
         FROM shg_transactions t
         WHERE t.txn_type = 'VOUCHER'
     ".to_string();
@@ -266,6 +273,8 @@ pub fn get_vouchers(
                 "member_name": row.get::<_, Option<String>>(11)?,
                 "bank_txn_id": row.get::<_, Option<String>>(12)?,
                 "group_id": row.get::<_, Option<String>>(13)?,
+                "bid_discount": row.get::<_, Option<f64>>(14)?,
+                "commission": row.get::<_, Option<f64>>(15)?,
             }))
         })
         .map_err(|e| e.to_string())?;

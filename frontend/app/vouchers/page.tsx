@@ -158,16 +158,36 @@ export default function VouchersPage() {
       cell: (voucher) => {
         const voided = !!voucher.voidedAt
         const reversal = !!voucher.reversalOfId
+        // Chit payout: show the FULL prize as the headline, then the bid discount
+        // and commission as deductions below. The stored voucher amount is the
+        // prize net of the bid discount, so full prize = amount + bidDiscount,
+        // and the winner nets amount - commission.
+        const bid = voucher.bidDiscount ?? 0
+        const commission = voucher.commission ?? 0
+        const isChitPayout = voucher.referenceType === 'CHIT_PAYOUT' && (bid > 0 || commission > 0)
+        const fullAmount = voucher.amount + bid
+        const netPaid = voucher.amount - commission
         return (
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-destructive/10">
+          <div className="flex items-start gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-destructive/10 mt-0.5">
               <ArrowUpRight className="h-4 w-4 text-destructive" />
             </div>
-            <span className={`font-semibold ${voided ? 'line-through text-muted-foreground' : 'text-destructive'}`}>
-              -{formatCurrency(voucher.amount)}
-            </span>
-            {voided && <Badge variant="outline" className="text-xs border-red-300 text-red-700">VOIDED</Badge>}
-            {reversal && <Badge variant="outline" className="text-xs border-amber-300 text-amber-700">Reversal of #{voucher.reversalOfId}</Badge>}
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className={`font-semibold ${voided ? 'line-through text-muted-foreground' : 'text-destructive'}`}>
+                  -{formatCurrency(isChitPayout ? fullAmount : voucher.amount)}
+                </span>
+                {voided && <Badge variant="outline" className="text-xs border-red-300 text-red-700">VOIDED</Badge>}
+                {reversal && <Badge variant="outline" className="text-xs border-amber-300 text-amber-700">Reversal of #{voucher.reversalOfId}</Badge>}
+              </div>
+              {isChitPayout && (
+                <div className="text-xs text-muted-foreground space-y-0.5">
+                  {bid > 0 && <div>− {formatCurrency(bid)} bid discount</div>}
+                  {commission > 0 && <div>− {formatCurrency(commission)} chit commission</div>}
+                  <div className="font-medium text-foreground/70">= {formatCurrency(netPaid)} net paid</div>
+                </div>
+              )}
+            </div>
           </div>
         )
       },

@@ -143,6 +143,11 @@ export interface Voucher {
   // Set when a mixed (cash + bank) payment is collapsed into one voucher.
   cashAmount?: number | null
   bankAmount?: number | null
+  // Chit payout breakdown (CHIT_PAYOUT only): the voucher amount is the prize net
+  // of the bid discount; full prize = amount + bidDiscount, and the winner nets
+  // amount - commission. Used to show the deductions on the voucher.
+  bidDiscount?: number | null
+  commission?: number | null
 }
 
 export interface VoucherFormData {

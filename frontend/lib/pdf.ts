@@ -261,6 +261,14 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   const bankTxnId     = voucher.bankTxnId ?? voucher.bank_txn_id ?? null
   const isMixed       = paymentMethod === 'MIXED'
     || (cashAmount != null && bankAmount != null && cashAmount > 0 && bankAmount > 0)
+  // Chit payout: the stored amount is the prize net of the bid discount. Show the
+  // full prize on top and list the bid discount + commission as deductions.
+  const bidDiscount   = voucher.bidDiscount ?? voucher.bid_discount ?? 0
+  const chitCommission = voucher.commission ?? 0
+  const isChitPayout  = (voucher.referenceType ?? voucher.reference_type) === 'CHIT_PAYOUT'
+    && (bidDiscount > 0 || chitCommission > 0)
+  const fullPrize     = amount + bidDiscount
+  const netPaid       = amount - chitCommission
 
   // ── Header band (deep amber for vouchers) ──────────────────────────────────
   doc.setFillColor(120, 53, 15)    // amber-900
@@ -332,11 +340,11 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
   doc.setFontSize(8)
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(120, 53, 15)
-  doc.text('AMOUNT PAID', M + 5, y + 6)
+  doc.text(isChitPayout ? 'PRIZE AMOUNT' : 'AMOUNT PAID', M + 5, y + 6)
 
   doc.setFontSize(16)
   doc.setFont('helvetica', 'bold')
-  doc.text(fmtAmount(amount), W - M - 5, y + 13, { align: 'right' })
+  doc.text(fmtAmount(isChitPayout ? fullPrize : amount), W - M - 5, y + 13, { align: 'right' })
 
   // ── Divider ────────────────────────────────────────────────────────────────
   y += 24
@@ -365,6 +373,43 @@ function renderVoucher(doc: jsPDF, voucher: any, shgName?: string, offsetY = 0):
       doc.setTextColor(100, 116, 139)
       doc.text(`Bank Txn ID: ${bankTxnId}`, M, y)
     }
+
+    y += 5
+    doc.setDrawColor(203, 213, 225)
+    doc.setLineWidth(0.3)
+    doc.line(M, y, W - M, y)
+  }
+
+  // ── Payout breakdown (chit: prize − bid discount − commission = net) ────────
+  if (isChitPayout) {
+    y += 7
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(100, 116, 139)
+    doc.text('PAYOUT BREAKDOWN', M, y)
+
+    y += 5
+    doc.setFontSize(9.5)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(30, 41, 59)
+    doc.text('Prize amount', M, y)
+    doc.text(fmtAmount(fullPrize), W - M, y, { align: 'right' })
+
+    if (bidDiscount > 0) {
+      y += 5
+      doc.text('Less: Bid discount', M, y)
+      doc.text(`- ${fmtAmount(bidDiscount)}`, W - M, y, { align: 'right' })
+    }
+    if (chitCommission > 0) {
+      y += 5
+      doc.text('Less: Chit commission', M, y)
+      doc.text(`- ${fmtAmount(chitCommission)}`, W - M, y, { align: 'right' })
+    }
+
+    y += 5
+    doc.setFont('helvetica', 'bold')
+    doc.text('Net paid', M, y)
+    doc.text(fmtAmount(netPaid), W - M, y, { align: 'right' })
 
     y += 5
     doc.setDrawColor(203, 213, 225)

@@ -227,6 +227,8 @@ export async function getVouchers(): Promise<ApiResponse<Voucher[]>> {
         reversalOfId: txn.reversal_of_id ?? null,
         bankTxnId: txn.bank_txn_id ?? null,
         groupId: txn.group_id ?? null,
+        bidDiscount: txn.bid_discount ?? null,
+        commission: txn.commission ?? null,
       }
 
       const gid = txn.group_id
