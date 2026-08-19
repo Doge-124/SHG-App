@@ -35,6 +35,15 @@ _Note: v1.0.1, v1.0.2 and v1.0.3 tags exist but produced no published GitHub Rel
 ### Changed
 - `tauri.conf.json` now includes updater and log plugin configuration
 
+## [1.0.55] - 2026-08-19
+
+### Fixed
+- **Loan payoff could not be collected as a round rupee** — a payment more than half a paisa above the exact payoff was rejected as an overpayment, so a due of ₹50,718.78 could not be settled as ₹50,719. Payments up to ₹1 over the payoff are now accepted and close the loan, with the rounding excess booked as interest income. Principal is still capped at the outstanding amount, so the balance sheet and integrity check are unaffected. Overpayments beyond ₹1 are still rejected.
+
+### Changed
+- **Contributions — mixed (cash + bank) payments** are now available from the per-member quick-pay dialog, which previously offered only Cash or Bank. It now uses the same payment fields as the rest of the app, including the split amounts and the transfer/cheque reference.
+- **Contributions — advance and top-up payments.** The per-member Record button no longer disappears once the week is marked paid; it stays available (reading "Add") so a member can pay several installments ahead or top up a short payment. Contributions are dated on the day they are entered.
+
 ## [1.0.0] - 2026-05-18
 
 ### Initial Release
