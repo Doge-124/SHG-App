@@ -479,9 +479,22 @@ fn paid_through_floor(
     }
 }
 
+/// Overpayment absorbed as a cash-rounding adjustment (one rupee).
+///
+/// Groups collect whole rupees over the counter, so an exact payoff of
+/// 50,718.78 is settled as 50,719. The extra 0.22 is booked as interest rather
+/// than rejected: principal can never exceed what was borrowed (the balance
+/// sheet and the integrity checker both recompute outstanding as
+/// `amount - SUM(principal_amount)`), and interest + principal must still add
+/// up to the cash actually received.
+const ROUNDING_TOLERANCE: f64 = 1.0;
+
 /// Pure split function: allocate `amount` to interest first, then principal.
 /// Returns (interest_paid, principal_paid, new_unpaid_interest_balance).
-/// Returns an error if amount would exceed interest + outstanding.
+///
+/// A payment up to `ROUNDING_TOLERANCE` above the exact payoff is accepted and
+/// settles the loan, with the rounding excess booked as interest. Anything
+/// beyond that is rejected as a genuine overpayment.
 fn split_payment_interest_first(
     amount: f64,
     interest_due: f64,
@@ -494,14 +507,18 @@ fn split_payment_interest_first(
         return Ok((interest_paid, 0.0, new_unpaid));
     }
     // Pay all interest, then principal.
-    let interest_paid = interest_due;
-    let principal_paid = amount - interest_due;
-    if principal_paid > outstanding + 0.005 {
+    let principal_requested = amount - interest_due;
+    if principal_requested > outstanding + ROUNDING_TOLERANCE {
         return Err(AppError::business(format!(
             "Payment of {amount:.2} exceeds interest due ({interest_due:.2}) + outstanding principal ({outstanding:.2}). Reduce the amount or split into two payments.",
         )));
     }
-    let principal_paid = principal_paid.min(outstanding);
+    let principal_paid = principal_requested.min(outstanding);
+    // Whatever the principal could not absorb is interest. For an exact payment
+    // this is simply `interest_due`; when the payer rounded up to a whole rupee
+    // it is `interest_due` plus the rounding excess, so that
+    // interest_paid + principal_paid == amount always holds.
+    let interest_paid = amount - principal_paid;
     Ok((interest_paid, principal_paid, 0.0))
 }
 
@@ -1416,3 +1433,60 @@ pub fn get_loan_repayment_schedule(
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// interest + principal must always equal the cash received, otherwise the
+    /// receipt on the ledger won't reconcile with income + principal recovery.
+    fn assert_reconciles(amount: f64, split: (f64, f64, f64)) {
+        let (interest, principal, _) = split;
+        assert!(
+            (interest + principal - amount).abs() < 0.005,
+            "interest {interest} + principal {principal} != amount {amount}"
+        );
+    }
+
+    #[test]
+    fn exact_payoff_splits_cleanly() {
+        let split = split_payment_interest_first(50_718.78, 718.78, 50_000.0).unwrap();
+        assert!((split.0 - 718.78).abs() < 0.005, "interest");
+        assert!((split.1 - 50_000.0).abs() < 0.005, "principal");
+        assert_reconciles(50_718.78, split);
+    }
+
+    #[test]
+    fn rounding_up_to_whole_rupee_is_accepted_as_interest() {
+        // The reported case: 50,718.78 due, collected as 50,719.
+        let split = split_payment_interest_first(50_719.0, 718.78, 50_000.0).unwrap();
+        assert!((split.1 - 50_000.0).abs() < 0.005, "principal is capped at outstanding");
+        assert!((split.0 - 719.0).abs() < 0.005, "0.22 excess booked as interest");
+        assert!(split.2 < 0.005, "no interest carried over — loan closes");
+        assert_reconciles(50_719.0, split);
+    }
+
+    #[test]
+    fn rounding_up_never_inflates_principal() {
+        // Principal must stay <= outstanding so `outstanding = amount - SUM(principal)`
+        // holds for the balance sheet and the integrity checker.
+        let split = split_payment_interest_first(1_001.0, 0.4, 1_000.0).unwrap();
+        assert!(split.1 <= 1_000.0 + 0.005);
+        assert_reconciles(1_001.0, split);
+    }
+
+    #[test]
+    fn overpayment_beyond_a_rupee_is_still_rejected() {
+        let err = split_payment_interest_first(50_725.0, 718.78, 50_000.0);
+        assert!(err.is_err(), "6+ rupees over the payoff is a real overpayment");
+    }
+
+    #[test]
+    fn partial_payment_carries_interest_shortfall() {
+        let (interest, principal, unpaid) =
+            split_payment_interest_first(500.0, 718.78, 50_000.0).unwrap();
+        assert!((interest - 500.0).abs() < 0.005);
+        assert!(principal < 0.005, "principal untouched while interest is owed");
+        assert!((unpaid - 218.78).abs() < 0.005, "shortfall carries over");
+    }
+}

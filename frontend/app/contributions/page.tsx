@@ -12,8 +12,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Spinner } from '@/components/ui/spinner'
 import { PageHeader } from '@/components/page-header'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { recordWeeklyContribution } from '@/lib/api/receipts'
+import {
+  PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs,
+  emptyPaymentSplit, type PaymentSplit,
+} from '@/components/forms/payment-method-fields'
 import { formatCurrency, formatDate } from '@/lib/format'
 import {
   CheckCircle2, Clock, ChevronLeft, ChevronRight, RefreshCw,
@@ -101,7 +104,7 @@ export default function ContributionsPage() {
   // Quick-pay dialog
   const [payDialog, setPayDialog] = useState<{ open: boolean; member: MemberStatus | null }>({ open: false, member: null })
   const [payAmount, setPayAmount] = useState('')
-  const [payMethod, setPayMethod] = useState<'CASH' | 'BANK'>('CASH')
+  const [paySplit, setPaySplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [isPaying, setIsPaying] = useState(false)
 
   // Savings payouts (history + past-data entry)
@@ -189,18 +192,26 @@ export default function ContributionsPage() {
     if (!payDialog.member) return
     const amount = parseFloat(payAmount)
     if (!amount || amount <= 0) { toast.error('Enter a valid amount'); return }
+    if (!isPaymentSplitValid(paySplit, amount)) {
+      toast.error('Fix the cash/bank split — it must add up to the amount')
+      return
+    }
     setIsPaying(true)
     try {
+      const args = paymentInvokeArgs(paySplit)
       const res = await recordWeeklyContribution({
         member_id: payDialog.member.memberId,
         amount,
-        payment_method: payMethod,
+        payment_method: args.paymentMethod as 'CASH' | 'BANK' | 'MIXED',
+        cash_amount: args.cashAmount,
+        bank_amount: args.bankAmount,
+        bank_txn_id: args.bankTxnId,
       })
       if (res.success) {
         toast.success(`Recorded ${formatCurrency(amount)} for ${payDialog.member.memberName}`)
         setPayDialog({ open: false, member: null })
         setPayAmount('')
-        setPayMethod('CASH')
+        setPaySplit(emptyPaymentSplit)
         load(fromDate, toDate)
       } else {
         toast.error(res.error || 'Failed to record')
@@ -218,7 +229,7 @@ export default function ContributionsPage() {
     // pay several weeks at once.
     const weekly = summary?.weeklyContributionAmount ?? 0
     setPayAmount(weekly > 0 ? String(weekly) : '')
-    setPayMethod('CASH')
+    setPaySplit(emptyPaymentSplit)
   }
 
   const loadPayouts = useCallback(async () => {
@@ -534,18 +545,21 @@ export default function ContributionsPage() {
                     </p>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <span className="text-xs text-muted-foreground">Not paid</span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 gap-1 text-xs"
-                      onClick={() => openPayDialog(member)}
-                    >
-                      <Plus className="h-3 w-3" />Record
-                    </Button>
-                  </div>
+                  <span className="text-xs text-muted-foreground flex-shrink-0">Not paid</span>
                 )}
+
+                {/* Always available, even once this week shows as paid — a member
+                    can pay several installments in advance, or top up a short
+                    payment. Each entry is recorded separately and the installment
+                    count follows the total saved, not the number of weeks ticked. */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1 text-xs flex-shrink-0"
+                  onClick={() => openPayDialog(member)}
+                >
+                  <Plus className="h-3 w-3" />{member.hasPaid ? 'Add' : 'Record'}
+                </Button>
 
                 {/* Total savings badge */}
                 <Badge variant="secondary" className="text-xs flex-shrink-0 hidden sm:flex">
@@ -559,7 +573,7 @@ export default function ContributionsPage() {
 
       {/* Quick-pay dialog */}
       <Dialog open={payDialog.open} onOpenChange={open => !open && setPayDialog({ open: false, member: null })}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Record Contribution</DialogTitle>
           </DialogHeader>
@@ -581,18 +595,12 @@ export default function ContributionsPage() {
                   autoFocus
                 />
               </div>
-              <div className="space-y-1">
-                <Label>Payment Method</Label>
-                <RadioGroup value={payMethod} onValueChange={v => setPayMethod(v as 'CASH' | 'BANK')}
-                  className="flex gap-4">
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="CASH" id="r-cash" /><Label htmlFor="r-cash">Cash</Label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="BANK" id="r-bank" /><Label htmlFor="r-bank">Bank</Label>
-                  </div>
-                </RadioGroup>
-              </div>
+              <PaymentMethodFields
+                total={parseFloat(payAmount) || 0}
+                value={paySplit}
+                onChange={setPaySplit}
+                idPrefix="quickpay"
+              />
             </div>
           )}
           <DialogFooter>
