@@ -602,25 +602,42 @@ pub fn process_cycle_winners(
             cycle_id, &now)?;
     }
 
+    // Winners can be recorded a few at a time (they turn up on different days), so
+    // the cycle-level figures are re-derived from every winner row now on the cycle
+    // rather than from just this batch — otherwise a second call would overwrite the
+    // first call's totals instead of adding to them.
+    let _ = total_bid_discounts;
+    let cycle_bid_discounts: f64 = tx.query_row(
+        "SELECT COALESCE(SUM(bid_discount), 0) FROM chit_cycle_winners WHERE cycle_id = ?1",
+        [cycle_id], |r| r.get(0),
+    ).unwrap_or(0.0);
+
     let discount_per_member = if let Some(ov) = override_discount_per_member {
         ov
-    } else if total_members > 0 && total_bid_discounts > 0.0 {
-        (total_bid_discounts / total_members as f64 * 100.0).round() / 100.0
+    } else if total_members > 0 && cycle_bid_discounts > 0.0 {
+        (cycle_bid_discounts / total_members as f64 * 100.0).round() / 100.0
     } else {
         0.0
     };
 
-    // Backfill winning_member_id on chit_cycles for legacy compat.
-    let first_winner = fixed_winner
-        .map(|w| w.member_id)
-        .or_else(|| auction_winners.first().map(|w| w.member_id));
+    // Backfill winning_member_id on chit_cycles for legacy compat. Keep whoever is
+    // already recorded so a later batch doesn't re-point it at its own first winner.
+    let existing_winner: Option<i64> = tx.query_row(
+        "SELECT winning_member_id FROM chit_cycles WHERE id = ?1",
+        [cycle_id], |r| r.get(0),
+    ).unwrap_or(None);
+    let first_winner = existing_winner.or_else(|| {
+        fixed_winner
+            .map(|w| w.member_id)
+            .or_else(|| auction_winners.first().map(|w| w.member_id))
+    });
 
     tx.execute(
         "UPDATE chit_cycles SET
              winning_member_id = ?1, bid_discount = ?2, payout_amount = ?3,
              total_bid_discounts = ?4, auction_discount_per_member = ?5
          WHERE id = ?6",
-        (first_winner, total_bid_discounts, prize, total_bid_discounts, discount_per_member, cycle_id),
+        (first_winner, cycle_bid_discounts, prize, cycle_bid_discounts, discount_per_member, cycle_id),
     )?;
 
     tx.commit()?;
@@ -2038,4 +2055,115 @@ pub fn get_cycle_payment_summary(
     }
 
     Ok(result)
+}
+
+
+#[cfg(test)]
+mod incremental_winner_tests {
+    use super::*;
+    use crate::db::schema;
+
+    /// A 3-winner chit with one open cycle and five members.
+    fn seed() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_migrations(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO members (id, member_code, name, joined_at) VALUES
+                (1,'M1','A','2026-01-01'),(2,'M2','B','2026-01-01'),(3,'M3','C','2026-01-01'),
+                (4,'M4','D','2026-01-01'),(5,'M5','E','2026-01-01');
+             INSERT INTO chit_groups
+                (id, name, total_amount, months, total_members, monthly_contribution,
+                 commission_percent, start_date, status, winners_per_cycle,
+                 commission_per_winner, fixed_prize_amount)
+             VALUES (1,'G',30000,5,5,6000,0,'2026-01-01','ACTIVE',3,500,30000);
+             INSERT INTO chit_members (chit_id, member_id, joined_at) VALUES
+                (1,1,'2026-01-01'),(1,2,'2026-01-01'),(1,3,'2026-01-01'),
+                (1,4,'2026-01-01'),(1,5,'2026-01-01');
+             INSERT INTO chit_cycles (id, chit_id, cycle_no, auction_date, payout_amount)
+             VALUES (1,1,1,'2026-02-01',0);
+             INSERT INTO shg_balances (method, balance) VALUES ('CASH', 1000000)
+             ON CONFLICT(method) DO UPDATE SET balance = 1000000;",
+        ).unwrap();
+        conn
+    }
+
+    fn winner(member_id: i64, bid: f64) -> WinnerPayoutInput {
+        WinnerPayoutInput {
+            member_id,
+            bid_discount: bid,
+            payment_method: "CASH".into(),
+            bank_txn_id: None,
+            cash_amount: None,
+            bank_amount: None,
+        }
+    }
+
+    fn cycle_totals(conn: &Connection) -> (f64, Option<i64>, i64) {
+        conn.query_row(
+            "SELECT total_bid_discounts, winning_member_id,
+                    (SELECT COUNT(*) FROM chit_cycle_winners WHERE cycle_id = 1)
+             FROM chit_cycles WHERE id = 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap()
+    }
+
+    /// Winners collect on different days, so each is recorded in its own call. The
+    /// cycle's bid-discount total must ADD UP across those calls — deriving it from
+    /// just the current batch would let the second call wipe out the first's.
+    #[test]
+    fn recording_winners_one_at_a_time_accumulates_discounts() {
+        let mut conn = seed();
+
+        process_cycle_winners(&mut conn, 1, 1, Some(&winner(1, 0.0)), &[], None).unwrap();
+        let (after_first, pointer, count) = cycle_totals(&conn);
+        assert_eq!(count, 1, "one winner recorded");
+        assert_eq!(pointer, Some(1));
+        assert!(after_first.abs() < 0.005, "fixed winner carries no bid discount");
+
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(2, 300.0)], None).unwrap();
+        let (after_second, pointer, count) = cycle_totals(&conn);
+        assert_eq!(count, 2);
+        assert_eq!(pointer, Some(1), "pointer stays on the first winner recorded");
+        assert!((after_second - 300.0).abs() < 0.005, "got {after_second}");
+
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(3, 200.0)], None).unwrap();
+        let (after_third, _, count) = cycle_totals(&conn);
+        assert_eq!(count, 3);
+        assert!((after_third - 500.0).abs() < 0.005,
+            "discounts accumulate across separate days: got {after_third}");
+    }
+
+    /// Only once every slot is filled does the cycle close to further winners.
+    #[test]
+    fn cycle_stays_open_until_the_last_winner_is_paid() {
+        let mut conn = seed();
+        process_cycle_winners(&mut conn, 1, 1, Some(&winner(1, 0.0)), &[], None).unwrap();
+        assert!(!is_cycle_completed(&conn, 1).unwrap(), "1 of 3 — still open");
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(2, 0.0)], None).unwrap();
+        assert!(!is_cycle_completed(&conn, 1).unwrap(), "2 of 3 — still open");
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(3, 0.0)], None).unwrap();
+        assert!(is_cycle_completed(&conn, 1).unwrap(), "3 of 3 — complete");
+
+        let err = process_cycle_winners(&mut conn, 1, 1, None, &[winner(4, 0.0)], None);
+        assert!(err.is_err(), "a completed cycle takes no more winners");
+    }
+
+    /// Each winner gets their own payout voucher and commission receipt, tagged to
+    /// them, whether they were recorded together or days apart.
+    #[test]
+    fn each_winner_gets_their_own_tagged_ledger_rows() {
+        let mut conn = seed();
+        process_cycle_winners(&mut conn, 1, 1, Some(&winner(1, 0.0)), &[], None).unwrap();
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(2, 300.0)], None).unwrap();
+
+        for (ref_type, expected) in [("CHIT_PAYOUT", 2i64), ("CHIT_COMMISSION", 2i64)] {
+            let tagged: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT member_ref_id) FROM shg_transactions
+                 WHERE reference_type = ?1 AND member_ref_id IS NOT NULL",
+                [ref_type], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(tagged, expected, "{ref_type} rows pinned to each winner");
+        }
+    }
 }

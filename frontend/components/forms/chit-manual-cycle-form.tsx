@@ -23,6 +23,7 @@ import {
   getCycleEligibility,
   overrideMemberEligibility,
   processCycleWinners,
+  getChitCycleWinners,
   getChitPendingDues,
   recordChitLatePayment,
   recordChitLatePaymentsBatch,
@@ -38,7 +39,7 @@ import {
   PaymentMethodFields, isPaymentSplitValid, paymentInvokeArgs, emptyPaymentSplit,
   type PaymentSplit,
 } from '@/components/forms/payment-method-fields'
-import type { ChitMember, ChitCycle, MemberEligibility } from '@/lib/types'
+import type { ChitMember, ChitCycle, MemberEligibility, ChitCycleWinner } from '@/lib/types'
 import { formatCurrency, formatDate, roundToFive } from '@/lib/format'
 import { MemberTypeTag } from '@/components/member-type-tag'
 import { cn } from '@/lib/utils'
@@ -121,6 +122,11 @@ export function ChitManualCycleForm({
   const [fixedWinnerSplit, setFixedWinnerSplit] = useState<PaymentSplit>(emptyPaymentSplit)
   const [auctionWinners, setAuctionWinners] = useState<AuctionWinnerRow[]>([])
   const [overrideDiscount, setOverrideDiscount] = useState<string>('')
+  // Winners already paid for the active cycle. Winners collect on different days,
+  // so a cycle can sit part-recorded until the last of them turns up.
+  const [recordedWinners, setRecordedWinners] = useState<ChitCycleWinner[]>([])
+  // Which slot is mid-submit, so only that button shows a spinner.
+  const [recordingSlot, setRecordingSlot] = useState<string | null>(null)
 
   // Pending dues from earlier (completed) cycles
   const [pendingDues, setPendingDues] = useState<ChitPendingDue[]>([])
@@ -212,10 +218,16 @@ export function ChitManualCycleForm({
         const elig = summary.find(p => p.isEligibleForDiscount && !p.hasWon)
         setAuctionDiscount(elig ? Math.max(0, monthlyContribution - elig.payableAmount) : 0)
 
-        // Load eligibility if cycle exists
+        // Load eligibility + already-paid winners if cycle exists
         if (cycleRes.data.cycle) {
-          const eligRes = await getCycleEligibility(chitGroupId, cycleRes.data.cycle.id)
+          const [eligRes, winnersRes] = await Promise.all([
+            getCycleEligibility(chitGroupId, cycleRes.data.cycle.id),
+            getChitCycleWinners(cycleRes.data.cycle.id),
+          ])
           if (eligRes.success && eligRes.data) setEligibility(eligRes.data)
+          setRecordedWinners(winnersRes.success && winnersRes.data ? winnersRes.data : [])
+        } else {
+          setRecordedWinners([])
         }
       }
     } catch (error) {
@@ -470,74 +482,90 @@ export function ChitManualCycleForm({
     }
   }
 
-  const handleProcessWinners = async () => {
+  /// Record one or more winners' payouts. Each winner is independent — the fixed
+  /// winner and every auction slot can be paid on the day that winner actually
+  /// turns up, rather than all four having to be present at once.
+  const recordWinners = async (
+    slotKey: string,
+    fixed: boolean,
+    auctionRows: { index: number; row: AuctionWinnerRow }[],
+  ) => {
     if (!currentCycle) return
-    const numAuctionSlots = winnersPerCycle - 1
-    if (winnersPerCycle > 1 && auctionWinners.filter(w => w.memberId).length < numAuctionSlots) {
-      toast.error(`Please select all ${numAuctionSlots} auction winner(s)`)
-      return
-    }
-    if (!fixedWinnerId && winnersPerCycle >= 1) {
-      toast.error('Please select the fixed prize winner')
-      return
-    }
 
-    // Validate each winner's cash/bank split against their net payout.
-    if (fixedWinnerId && !isPaymentSplitValid(fixedWinnerSplit, fixedWinnerGross)) {
-      toast.error(`For the fixed winner, cash + bank must equal ${formatCurrency(fixedWinnerGross)}`)
-      return
-    }
-    for (const w of auctionWinners.filter(w => w.memberId)) {
-      if (!isPaymentSplitValid(w.split, auctionWinnerGross(w.bidDiscount))) {
-        toast.error(`For an auction winner, cash + bank must equal ${formatCurrency(auctionWinnerGross(w.bidDiscount))}`)
+    if (fixed) {
+      if (!fixedWinnerId) { toast.error('Please select the fixed prize winner'); return }
+      if (!isPaymentSplitValid(fixedWinnerSplit, fixedWinnerGross)) {
+        toast.error(`For the fixed winner, cash + bank must equal ${formatCurrency(fixedWinnerGross)}`)
         return
       }
     }
+    for (const { row } of auctionRows) {
+      if (!row.memberId) { toast.error('Please select the auction winner'); return }
+      if (!isPaymentSplitValid(row.split, auctionWinnerGross(row.bidDiscount))) {
+        toast.error(`For an auction winner, cash + bank must equal ${formatCurrency(auctionWinnerGross(row.bidDiscount))}`)
+        return
+      }
+    }
+    if (!fixed && auctionRows.length === 0) {
+      toast.error('Nothing to record — select a winner first')
+      return
+    }
 
-    const validAuctionWinners: AuctionWinnerInput[] = auctionWinners
-      .filter(w => w.memberId)
-      .map(w => {
-        const args = paymentInvokeArgs(w.split)
-        return {
-          memberId: w.memberId,
-          bidDiscount: w.bidDiscount,
-          paymentMethod: args.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed',
-          bankTxnId: args.bankTxnId,
-          cashAmount: args.cashAmount,
-          bankAmount: args.bankAmount,
-        }
-      })
+    const payload: AuctionWinnerInput[] = auctionRows.map(({ row }) => {
+      const args = paymentInvokeArgs(row.split)
+      return {
+        memberId: row.memberId,
+        bidDiscount: row.bidDiscount,
+        paymentMethod: args.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed',
+        bankTxnId: args.bankTxnId,
+        cashAmount: args.cashAmount,
+        bankAmount: args.bankAmount,
+      }
+    })
+    const fixedArgs = fixed ? paymentInvokeArgs(fixedWinnerSplit) : null
 
-    const fixedArgs = paymentInvokeArgs(fixedWinnerSplit)
-
-    setIsSubmitting(true)
+    setRecordingSlot(slotKey)
     try {
       const result = await processCycleWinners(
         chitGroupId, currentCycle.id,
-        fixedWinnerId || null,
-        fixedWinnerId ? (fixedArgs.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed') : null,
-        validAuctionWinners,
+        fixed ? fixedWinnerId : null,
+        fixedArgs ? (fixedArgs.paymentMethod.toLowerCase() as 'cash' | 'bank' | 'mixed') : null,
+        payload,
         overrideDiscount ? parseFloat(overrideDiscount) : undefined,
-        fixedWinnerId ? fixedArgs.bankTxnId : null,
-        fixedWinnerId ? fixedArgs.cashAmount : null,
-        fixedWinnerId ? fixedArgs.bankAmount : null,
+        fixedArgs ? fixedArgs.bankTxnId : null,
+        fixedArgs ? fixedArgs.cashAmount : null,
+        fixedArgs ? fixedArgs.bankAmount : null,
       )
       if (result.success && result.data) {
         toast.success(result.data.message)
-        setFixedWinnerId('')
-        setFixedWinnerSplit(emptyPaymentSplit)
-        setAuctionWinners([])
-        setOverrideDiscount('')
+        if (fixed) {
+          setFixedWinnerId('')
+          setFixedWinnerSplit(emptyPaymentSplit)
+        }
+        // Drop just the rows that were recorded; the remaining slots keep whatever
+        // has already been typed into them.
+        if (auctionRows.length > 0) {
+          const done = new Set(auctionRows.map(a => a.index))
+          setAuctionWinners(prev => prev.filter((_, j) => !done.has(j)))
+        }
         await loadData()
         onSuccess?.()
       } else {
-        toast.error(result.error || 'Failed to process winners')
+        toast.error(result.error || 'Failed to record winner')
       }
     } catch {
       toast.error('An error occurred')
     } finally {
-      setIsSubmitting(false)
+      setRecordingSlot(null)
     }
+  }
+
+  /// Convenience for the common case where everyone does show up together.
+  const handleProcessWinners = async () => {
+    const filled = auctionWinners
+      .map((row, index) => ({ index, row }))
+      .filter(a => a.row.memberId)
+    await recordWinners('all', !!fixedWinnerId && !recordedFixed, filled)
   }
 
   const handleEligibilityOverride = async (memberId: string, eligible: boolean) => {
@@ -552,7 +580,17 @@ export function ChitManualCycleForm({
   const unpaidMembers = paymentSummary.filter(p => !p.hasPaid)
   const paidMembers = paymentSummary.filter(p => p.hasPaid)
   const allPaid = unpaidMembers.length === 0 && paymentSummary.length > 0
-  const cycleCompleted = !!currentCycle?.winnerId
+  // Recorded winners for the active cycle, split by slot type.
+  const recordedFixed = recordedWinners.find(w => w.winnerType === 'FIXED')
+  const recordedAuction = recordedWinners.filter(w => w.winnerType === 'AUCTION')
+  // A cycle is complete only once EVERY winner slot has been paid. Using
+  // `winnerId` here would lock the cycle after the very first winner, because the
+  // backend sets that column as soon as one winner is recorded.
+  const cycleCompleted = winnersPerCycle > 0
+    ? recordedWinners.length >= winnersPerCycle
+    : !!currentCycle?.winnerId
+  // How many auction slots are still waiting for their winner to collect.
+  const auctionSlotsRemaining = Math.max(0, (winnersPerCycle - 1) - recordedAuction.length)
   // Members who have not yet won any cycle in this chit
   const eligibleMembersWithoutWin = members.filter(m =>
     !paymentSummary.find(p => p.memberId === m.memberId)?.hasWon
@@ -837,7 +875,7 @@ export function ChitManualCycleForm({
                     </p>
                   ) : (
                     <>
-                      {currentCycle && currentCycle.winnerId && (
+                      {currentCycle && cycleCompleted && (
                         <p className="text-xs text-muted-foreground mb-2">
                           This cycle is complete — start the next cycle to continue. The discount carries forward automatically.
                         </p>
@@ -849,7 +887,7 @@ export function ChitManualCycleForm({
                           type="date"
                           value={newCycleDate}
                           onChange={e => setNewCycleDate(e.target.value)}
-                          disabled={isSubmitting || !!(currentCycle && !currentCycle.winnerId)}
+                          disabled={isSubmitting || !!(currentCycle && !cycleCompleted)}
                         />
                         <p className="text-xs text-muted-foreground">
                           Defaults to {currentCycle ? '30 days after the current cycle' : "the chit's start date"} — change it to set the actual auction date.
@@ -857,7 +895,7 @@ export function ChitManualCycleForm({
                       </div>
                       <Button
                         onClick={handleAdvanceCycle}
-                        disabled={isSubmitting || !newCycleDate || !!(currentCycle && !currentCycle.winnerId)}
+                        disabled={isSubmitting || !newCycleDate || !!(currentCycle && !cycleCompleted)}
                         className="w-full"
                       >
                         <Plus className="h-4 w-4 mr-2" />
@@ -982,8 +1020,10 @@ export function ChitManualCycleForm({
               <Alert className="border-yellow-500">
                 <AlertDescription className="flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4" />
-                  Select {winnersPerCycle} winner(s): 1 fixed prize + {winnersPerCycle - 1} auction winner(s).
-                  This completes the cycle and creates vouchers + commission receipts.
+                  {winnersPerCycle} winner(s) this cycle: 1 fixed prize + {winnersPerCycle - 1} auction winner(s).
+                  Record each one as they collect — every payout creates its own voucher and
+                  commission receipt. The cycle completes once all {winnersPerCycle} are paid
+                  ({recordedWinners.length} of {winnersPerCycle} done).
                 </AlertDescription>
               </Alert>
 
@@ -991,33 +1031,57 @@ export function ChitManualCycleForm({
               <Card>
                 <CardHeader><CardTitle className="text-base">Fixed Prize Winner</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="space-y-1">
-                    <Label>Member</Label>
-                    <Select value={fixedWinnerId} onValueChange={setFixedWinnerId}>
-                      <SelectTrigger><SelectValue placeholder="Select winner" /></SelectTrigger>
-                      <SelectContent>
-                        {eligibleMembersWithoutWin
-                          .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
-                          .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    Payout: {formatCurrency(totalAmount)} − {formatCurrency(commissionPerWinner)} commission = <strong>{formatCurrency(fixedWinnerPayout)}</strong>
-                  </div>
-                  <PaymentMethodFields
-                    total={fixedWinnerGross}
-                    value={fixedWinnerSplit}
-                    onChange={setFixedWinnerSplit}
-                    idPrefix="chit-fixed-winner"
-                    mixedSeedCash={commissionPerWinner}
-                  />
-                  {fixedWinnerSplit.method === 'mixed' && commissionPerWinner > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      Split is of the gross prize ({formatCurrency(fixedWinnerGross)}). Keep cash =
-                      commission ({formatCurrency(commissionPerWinner)}) so it cancels against the cash
-                      commission receipt — the winner then gets {formatCurrency(fixedWinnerPayout)} by bank only.
-                    </p>
+                  {recordedFixed ? (
+                    <div className="flex items-center gap-3 rounded border border-green-200 bg-green-50/50 p-3">
+                      <CheckCircle className="h-5 w-5 text-green-600 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">{recordedFixed.memberName}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Paid {formatCurrency(recordedFixed.payoutAmount)} · {formatDate(recordedFixed.paidAt)}
+                        </p>
+                      </div>
+                      <Badge variant="secondary" className="bg-green-100 text-green-700">Paid</Badge>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-1">
+                        <Label>Member</Label>
+                        <Select value={fixedWinnerId} onValueChange={setFixedWinnerId}>
+                          <SelectTrigger><SelectValue placeholder="Select winner" /></SelectTrigger>
+                          <SelectContent>
+                            {eligibleMembersWithoutWin
+                              .filter(m => !auctionWinners.find(w => w.memberId === m.memberId))
+                              .map(m => <SelectItem key={m.memberId} value={m.memberId}>{m.memberName}<MemberTypeTag type={memberTypeOf(m.memberId)} />{passbookSuffix(m.memberId)}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        Payout: {formatCurrency(totalAmount)} − {formatCurrency(commissionPerWinner)} commission = <strong>{formatCurrency(fixedWinnerPayout)}</strong>
+                      </div>
+                      <PaymentMethodFields
+                        total={fixedWinnerGross}
+                        value={fixedWinnerSplit}
+                        onChange={setFixedWinnerSplit}
+                        idPrefix="chit-fixed-winner"
+                        mixedSeedCash={commissionPerWinner}
+                      />
+                      {fixedWinnerSplit.method === 'mixed' && commissionPerWinner > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Split is of the gross prize ({formatCurrency(fixedWinnerGross)}). Keep cash =
+                          commission ({formatCurrency(commissionPerWinner)}) so it cancels against the cash
+                          commission receipt — the winner then gets {formatCurrency(fixedWinnerPayout)} by bank only.
+                        </p>
+                      )}
+                      <Button
+                        onClick={() => recordWinners('fixed', true, [])}
+                        disabled={recordingSlot !== null || !fixedWinnerId}
+                        className="w-full"
+                        variant="secondary"
+                      >
+                        <Trophy className="h-4 w-4 mr-2" />
+                        {recordingSlot === 'fixed' ? 'Recording…' : 'Record This Payout'}
+                      </Button>
+                    </>
                   )}
                 </CardContent>
               </Card>
@@ -1025,9 +1089,28 @@ export function ChitManualCycleForm({
               {/* Auction winners */}
               {winnersPerCycle > 1 && (
                 <Card>
-                  <CardHeader><CardTitle className="text-base">Auction Winners ({winnersPerCycle - 1})</CardTitle></CardHeader>
+                  <CardHeader><CardTitle className="text-base">
+                    Auction Winners ({recordedAuction.length} of {winnersPerCycle - 1} paid)
+                  </CardTitle></CardHeader>
                   <CardContent className="space-y-4">
-                    {Array.from({ length: winnersPerCycle - 1 }, (_, i) => {
+                    {/* Already collected */}
+                    {recordedAuction.map(w => (
+                      <div key={w.id} className="flex items-center gap-3 rounded border border-green-200 bg-green-50/50 p-3">
+                        <CheckCircle className="h-5 w-5 text-green-600 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium">{w.memberName}</p>
+                          <p className="text-xs text-muted-foreground">
+                            Paid {formatCurrency(w.payoutAmount)}
+                            {w.bidDiscount > 0 && ` · bid discount ${formatCurrency(w.bidDiscount)}`}
+                            {' · '}{formatDate(w.paidAt)}
+                          </p>
+                        </div>
+                        <Badge variant="secondary" className="bg-green-100 text-green-700">Paid</Badge>
+                      </div>
+                    ))}
+
+                    {/* Still to collect — each slot records on its own */}
+                    {Array.from({ length: auctionSlotsRemaining }, (_, i) => {
                       const row: AuctionWinnerRow = auctionWinners[i] ?? { memberId: '', bidDiscount: 0, split: emptyPaymentSplit }
                       const update = (field: keyof AuctionWinnerRow, value: any) => {
                         setAuctionWinners(prev => {
@@ -1037,11 +1120,12 @@ export function ChitManualCycleForm({
                           return next
                         })
                       }
+                      const slotKey = `auction-${i}`
                       return (
                         <div key={i} className="space-y-3 p-3 rounded border bg-muted/30">
                           <div className="grid grid-cols-2 gap-3">
                             <div className="space-y-1">
-                              <Label className="text-xs">Auction Winner {i + 1}</Label>
+                              <Label className="text-xs">Auction Winner {recordedAuction.length + i + 1}</Label>
                               <Select value={row.memberId} onValueChange={v => update('memberId', v)}>
                                 <SelectTrigger className="h-8"><SelectValue placeholder="Select" /></SelectTrigger>
                                 <SelectContent>
@@ -1069,6 +1153,15 @@ export function ChitManualCycleForm({
                               mixedSeedCash={commissionPerWinner}
                             />
                           )}
+                          <Button
+                            onClick={() => recordWinners(slotKey, false, [{ index: i, row }])}
+                            disabled={recordingSlot !== null || !row.memberId}
+                            className="w-full"
+                            variant="secondary"
+                          >
+                            <Trophy className="h-4 w-4 mr-2" />
+                            {recordingSlot === slotKey ? 'Recording…' : 'Record This Payout'}
+                          </Button>
                         </div>
                       )
                     })}
@@ -1104,14 +1197,20 @@ export function ChitManualCycleForm({
                 </Card>
               )}
 
-              <Button
-                onClick={handleProcessWinners}
-                disabled={isSubmitting || !fixedWinnerId}
-                className="w-full"
-              >
-                <Trophy className="h-4 w-4 mr-2" />
-                Process All Winners & Complete Cycle
-              </Button>
+              {(( !recordedFixed && !!fixedWinnerId) || auctionWinners.some(w => w.memberId)) && (
+                <Button
+                  onClick={handleProcessWinners}
+                  disabled={recordingSlot !== null}
+                  className="w-full"
+                >
+                  <Trophy className="h-4 w-4 mr-2" />
+                  {recordingSlot === 'all' ? 'Recording…' : 'Record All Selected Winners'}
+                </Button>
+              )}
+              <p className="text-xs text-muted-foreground text-center">
+                Use the button on each winner to pay them separately, or this one to record
+                everyone you have selected at once.
+              </p>
             </div>
           )}
         </ScrollArea>
