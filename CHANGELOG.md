@@ -35,6 +35,15 @@ _Note: v1.0.1, v1.0.2 and v1.0.3 tags exist but produced no published GitHub Rel
 ### Changed
 - `tauri.conf.json` now includes updater and log plugin configuration
 
+## [1.0.56] - 2026-08-21
+
+### Fixed
+- **Cancelling one chit winner's payout unwound the whole cycle.** In a multi-winner cycle, cancelling a single payout voucher deleted *every* winner record and reversed *every* commission receipt, while reversing only the clicked payout. The other winners kept their money with no winner record, the group lost all of the cycle's commission income, and — because the winner records are what enforce one win per member — every winner in that cycle became eligible to win again and could be paid a second time. Cancelling now unwinds only the winner whose voucher was cancelled; everyone else keeps their payout, their commission, and their one-win lock. That winner's slot reopens so they can be re-paid.
+- **Reversal entries named the wrong member.** Reversing entries did not carry over the member they belonged to, so chit payout and commission reversals fell back to reading the cycle number as a member number and displayed whichever member happened to share it. Reversals now keep their member, and reversal entries already recorded are repaired automatically on upgrade. Very old entries that never recorded a member show blank rather than a wrong name.
+
+### Added
+- **Chit winners can be paid one at a time.** Winners rarely all collect on the same day, but the payout screen previously required every winner to be entered before any payout could be recorded. Each winner — the fixed prize and every auction slot — now has its own **Record This Payout** button, and paid winners are shown as such with their amount and date. Recording everyone in one go is still available. A cycle now counts as complete only once every winner has been paid, so the next cycle cannot be started while a winner is still owed.
+
 ## [1.0.55] - 2026-08-19
 
 ### Fixed
