@@ -219,11 +219,19 @@ pub fn get_vouchers(
             CASE
                 WHEN t.member_ref_id IS NOT NULL THEN
                     (SELECT name FROM members WHERE id = t.member_ref_id)
-                WHEN t.reference_type = 'CHIT_PAYOUT' AND t.reference_id IS NOT NULL THEN
+                WHEN t.reference_type IN ('CHIT_PAYOUT', 'CHIT_COMMISSION')
+                     AND t.reference_id IS NOT NULL THEN
                     (SELECT m.name FROM members m
                      JOIN chit_cycles cc ON cc.winning_member_id = m.id
                      WHERE cc.id = t.reference_id)
-                WHEN t.reference_id IS NOT NULL THEN
+                -- Only these types put a MEMBER id in reference_id. Chit rows put the
+                -- CYCLE id there, so an unguarded lookup returns whichever member
+                -- happens to share that number. Mirrors the receipts query above.
+                WHEN t.reference_type IN (
+                    'MEMBER_LOAN', 'SAVINGS_WITHDRAWAL', 'MEMBER_VOUCHER',
+                    'WEEKLY_CONTRIBUTION', 'MEMBER_CONTRIBUTION', 'MEMBER_RECEIPT',
+                    'MEMBER_PAYMENT', 'CHIT_PAYMENT', 'DONATION', 'GRANT'
+                ) AND t.reference_id IS NOT NULL THEN
                     (SELECT name FROM members WHERE id = t.reference_id)
                 ELSE NULL
             END as member_name,

@@ -11,6 +11,7 @@
 //! All steps run inside a single SQLite transaction.
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use crate::error::AppError;
 use crate::db::audit;
 
@@ -27,12 +28,16 @@ struct ShgTxn {
     voided_at: Option<i64>,
     reversal_of_id: Option<i64>,
     group_id: Option<String>,
+    /// The member a chit payout/commission row is FOR. A cycle can have several
+    /// winners, so this — not `reference_id` (the cycle) — is what identifies them.
+    member_ref_id: Option<i64>,
 }
 
 fn load_txn(conn: &Connection, txn_id: i64) -> Result<ShgTxn, AppError> {
     conn.query_row(
         "SELECT id, txn_type, amount, reason, payment_method, reference_type,
-                reference_id, created_at, voided_at, reversal_of_id, group_id
+                reference_id, created_at, voided_at, reversal_of_id, group_id,
+                member_ref_id
          FROM shg_transactions WHERE id = ?1",
         [txn_id],
         |r| Ok(ShgTxn {
@@ -40,6 +45,7 @@ fn load_txn(conn: &Connection, txn_id: i64) -> Result<ShgTxn, AppError> {
             reason: r.get(3)?, payment_method: r.get(4)?, reference_type: r.get(5)?,
             reference_id: r.get(6)?, created_at: r.get(7)?,
             voided_at: r.get(8)?, reversal_of_id: r.get(9)?, group_id: r.get(10)?,
+            member_ref_id: r.get(11)?,
         }),
     ).map_err(|_| AppError::business("Transaction not found"))
 }
@@ -192,15 +198,19 @@ fn void_and_reverse(
     };
     let reverse_reason = format!("Reversal of #{}: {}", original.id, reason);
 
+    // member_ref_id must be carried across. Without it the reversal falls back to
+    // resolving the member from the cycle (reference_id), and a multi-winner cycle
+    // has only one `chit_cycles.winning_member_id` — so every reversal in that
+    // cycle would name the same wrong member.
     tx.execute(
         "INSERT INTO shg_transactions
            (txn_type, amount, reason, payment_method, reference_type,
-            reference_id, created_at, reversal_of_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            reference_id, created_at, reversal_of_id, member_ref_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
             reverse_type, original.amount, &reverse_reason, &original.payment_method,
             &original.reference_type, original.reference_id,
-            chrono::Utc::now().to_rfc3339(), original.id,
+            chrono::Utc::now().to_rfc3339(), original.id, original.member_ref_id,
         ),
     )?;
 
@@ -429,6 +439,37 @@ fn cancel_chit_installment(
     Ok(())
 }
 
+/// Which winner a payout voucher belongs to. `member_ref_id` is authoritative;
+/// vouchers written before that column existed fall back to the cycle's legacy
+/// single-winner pointer, which only means anything when the cycle has one winner.
+fn payout_winner_id(conn: &Connection, txn: &ShgTxn, cycle_id: i64) -> Result<i64, AppError> {
+    if let Some(m) = txn.member_ref_id {
+        return Ok(m);
+    }
+    let winners: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT member_id FROM chit_cycle_winners WHERE cycle_id = ?1",
+        )?;
+        let rows = stmt.query_map([cycle_id], |r| r.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    if winners.len() == 1 {
+        return Ok(winners[0]);
+    }
+    conn.query_row(
+        "SELECT winning_member_id FROM chit_cycles WHERE id = ?1",
+        [cycle_id],
+        |r| r.get::<_, Option<i64>>(0),
+    ).ok().flatten().ok_or_else(|| AppError::business(
+        "This payout voucher is not linked to a specific winner and the cycle has several \
+         winners, so there is no way to tell which payout to reverse."
+    ))
+}
+
+/// Cancel ONE winner's payout. A cycle can have several winners, each with their own
+/// payout voucher and commission receipt, so only the clicked winner is unwound: their
+/// winner slot is freed, their commission reversed, their voucher reversed. Everyone
+/// else keeps their payout, their commission, and their one-win-per-member lock.
 fn cancel_chit_payout_with_commission(
     conn: &mut Connection,
     txn: &ShgTxn,
@@ -436,27 +477,79 @@ fn cancel_chit_payout_with_commission(
 ) -> Result<(), AppError> {
     let cycle_id = txn.reference_id.ok_or_else(||
         AppError::business("Chit payout voucher has no cycle reference."))?;
+    let member_id = payout_winner_id(conn, txn, cycle_id)?;
 
     let tx = conn.transaction()?;
 
-    // Drop winners + clear winning_member_id so the cycle is re-payable.
-    tx.execute("DELETE FROM chit_cycle_winners WHERE cycle_id = ?1", [cycle_id])?;
+    // Free only this winner's slot, dropping the cycle below its required winner
+    // count so this one seat can be re-paid. Deleting every winner (the old
+    // behaviour) both stranded the other winners' live payout vouchers and let them
+    // win again — chit_cycle_winners is what enforces one win per member per chit.
     tx.execute(
-        "UPDATE chit_cycles
-         SET winning_member_id = NULL, bid_discount = 0, payout_amount = 0
-         WHERE id = ?1",
-        [cycle_id],
+        "DELETE FROM chit_cycle_winners WHERE cycle_id = ?1 AND member_id = ?2",
+        (cycle_id, member_id),
     )?;
 
-    // Reverse any associated commission receipt(s).
-    let mut stmt = tx.prepare(
-        "SELECT id FROM shg_transactions
-         WHERE reference_type = 'CHIT_COMMISSION' AND reference_id = ?1
-           AND voided_at IS NULL AND reversal_of_id IS NULL"
-    )?;
-    let commission_ids: Vec<i64> = stmt.query_map([cycle_id], |r| r.get(0))?
-        .filter_map(|r| r.ok()).collect();
-    drop(stmt);
+    // Recompute the cycle's legacy single-winner columns from whoever is left.
+    // winning_member_id only needs re-pointing when it named the cancelled member;
+    // the discount totals are derived, so re-sum them from the surviving rows.
+    let remaining: Option<i64> = tx.query_row(
+        "SELECT member_id FROM chit_cycle_winners WHERE cycle_id = ?1 LIMIT 1",
+        [cycle_id], |r| r.get(0),
+    ).optional()?;
+    let remaining_discounts: f64 = tx.query_row(
+        "SELECT COALESCE(SUM(bid_discount), 0) FROM chit_cycle_winners WHERE cycle_id = ?1",
+        [cycle_id], |r| r.get(0),
+    ).unwrap_or(0.0);
+    let current_pointer: Option<i64> = tx.query_row(
+        "SELECT winning_member_id FROM chit_cycles WHERE id = ?1",
+        [cycle_id], |r| r.get(0),
+    ).unwrap_or(None);
+
+    if remaining.is_none() {
+        // Last winner removed — the cycle is fully back to its pre-payout state.
+        tx.execute(
+            "UPDATE chit_cycles
+             SET winning_member_id = NULL, bid_discount = 0, payout_amount = 0,
+                 total_bid_discounts = 0
+             WHERE id = ?1",
+            [cycle_id],
+        )?;
+    } else {
+        let new_pointer = if current_pointer == Some(member_id) { remaining } else { current_pointer };
+        tx.execute(
+            "UPDATE chit_cycles
+             SET winning_member_id = ?1, bid_discount = ?2, total_bid_discounts = ?2
+             WHERE id = ?3",
+            (new_pointer, remaining_discounts, cycle_id),
+        )?;
+    }
+
+    // Reverse only this winner's commission receipt(s). Commissions are pinned to
+    // their member via member_ref_id; untagged rows are only safe to claim when no
+    // other winner is left, otherwise we would reverse someone else's income.
+    let tagged: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM shg_transactions
+             WHERE reference_type = 'CHIT_COMMISSION' AND reference_id = ?1
+               AND member_ref_id = ?2
+               AND voided_at IS NULL AND reversal_of_id IS NULL"
+        )?;
+        let rows = stmt.query_map((cycle_id, member_id), |r| r.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let commission_ids: Vec<i64> = if !tagged.is_empty() || remaining.is_some() {
+        tagged
+    } else {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM shg_transactions
+             WHERE reference_type = 'CHIT_COMMISSION' AND reference_id = ?1
+               AND member_ref_id IS NULL
+               AND voided_at IS NULL AND reversal_of_id IS NULL"
+        )?;
+        let rows = stmt.query_map([cycle_id], |r| r.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
     for cid in commission_ids {
         let commission = load_txn(&tx, cid)?;
         void_and_reverse(&tx, &commission, &format!("Auto-reversed with payout #{}", txn.id))?;
@@ -466,7 +559,8 @@ fn cancel_chit_payout_with_commission(
     // both halves are reversed, not just the clicked one.
     void_group(&tx, txn, reason)?;
     audit::log_audit_tx(&tx, "TXN_CANCELLED", "shg_transaction",
-        Some(txn.id), &format!("CHIT_PAYOUT reversed (cycle #{}, Rs.{}): {}", cycle_id, txn.amount, reason))?;
+        Some(txn.id), &format!("CHIT_PAYOUT reversed for member {} (cycle #{}, Rs.{}): {}",
+            member_id, cycle_id, txn.amount, reason))?;
     tx.commit()?;
     Ok(())
 }
@@ -551,4 +645,243 @@ fn cancel_savings_withdrawal(
         Some(txn.id), &format!("SAVINGS_PAYOUT reversed (member #{}, Rs.{}): {}", member_id, total, reason))?;
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema;
+
+    /// A four-winner cycle, mirroring the reported case: every winner has their own
+    /// winner row, CHIT_PAYOUT voucher, and CHIT_COMMISSION receipt, each pinned to
+    /// that member via `member_ref_id`.
+    const WINNERS: [i64; 4] = [1, 2, 3, 4];
+
+    fn seed() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_migrations(&mut conn).unwrap();
+
+        for (id, code, name) in [
+            (1, "M001", "Asha"), (2, "M002", "Bina"),
+            (3, "M003", "Chandra"), (4, "M004", "Divya"),
+        ] {
+            conn.execute(
+                "INSERT INTO members (id, member_code, name, joined_at) VALUES (?1, ?2, ?3, '2026-01-01')",
+                rusqlite::params![id, code, name],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO chit_groups (id, name, total_amount, months, total_members,
+                                      monthly_contribution, commission_percent, start_date,
+                                      status, winners_per_cycle)
+             VALUES (7, 'Group A', 100000, 10, 20, 10000, 5, '2026-01-01', 'ACTIVE', 4)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO chit_cycles (id, chit_id, cycle_no, auction_date, winning_member_id,
+                                      payout_amount, bid_discount, total_bid_discounts)
+             VALUES (7, 7, 1, '2026-02-01', 1, 90000, 400, 400)",
+            [],
+        ).unwrap();
+
+        for m in WINNERS {
+            conn.execute(
+                "INSERT INTO chit_cycle_winners
+                   (chit_id, cycle_id, member_id, winner_type, bid_discount, commission,
+                    payout_amount, payment_method, paid_at)
+                 VALUES (7, 7, ?1, 'AUCTION', 100, 500, 89500, 'CASH', '2026-02-01T10:00:00Z')",
+                [m],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO shg_transactions
+                   (txn_type, amount, reason, payment_method, reference_type,
+                    reference_id, created_at, member_ref_id)
+                 VALUES ('RECEIPT', 500, 'Chit commission', 'CASH', 'CHIT_COMMISSION',
+                         7, '2026-02-01T10:00:00Z', ?1)",
+                [m],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO shg_transactions
+                   (txn_type, amount, reason, payment_method, reference_type,
+                    reference_id, created_at, member_ref_id)
+                 VALUES ('VOUCHER', 90000, 'Chit payout', 'CASH', 'CHIT_PAYOUT',
+                         7, '2026-02-01T10:00:00Z', ?1)",
+                [m],
+            ).unwrap();
+        }
+        conn
+    }
+
+    /// The live payout voucher belonging to one winner.
+    fn payout_id_for(conn: &Connection, member_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT id FROM shg_transactions
+             WHERE reference_type = 'CHIT_PAYOUT' AND member_ref_id = ?1
+               AND voided_at IS NULL AND reversal_of_id IS NULL",
+            [member_id], |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn payout_id(conn: &Connection) -> i64 {
+        payout_id_for(conn, 1)
+    }
+
+    fn live_count(conn: &Connection, ref_type: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM shg_transactions
+             WHERE reference_type = ?1 AND voided_at IS NULL AND reversal_of_id IS NULL",
+            [ref_type], |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn winner_ids(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare(
+            "SELECT member_id FROM chit_cycle_winners WHERE cycle_id = 7 ORDER BY member_id",
+        ).unwrap();
+        let v = stmt.query_map([], |r| r.get(0)).unwrap().filter_map(|r| r.ok()).collect();
+        v
+    }
+
+    /// Cancelling one winner's payout must not touch the other three. The old code
+    /// deleted every winner row and reversed every commission while reversing only
+    /// the clicked voucher — stranding three live payouts with no winner record and
+    /// releasing all four members to win again.
+    #[test]
+    fn cancelling_one_payout_leaves_the_other_winners_intact() {
+        let mut conn = seed();
+        let id = payout_id_for(&conn, 2);
+        cancel_shg_transaction(&mut conn, id, "paid the wrong member").unwrap();
+
+        assert_eq!(winner_ids(&conn), vec![1, 3, 4], "only the cancelled winner is freed");
+        assert_eq!(live_count(&conn, "CHIT_COMMISSION"), 3, "other commissions untouched");
+        assert_eq!(live_count(&conn, "CHIT_PAYOUT"), 3, "other payouts untouched");
+    }
+
+    /// The reversed commission must be the cancelled member's, not somebody else's.
+    #[test]
+    fn only_the_cancelled_winners_commission_is_reversed() {
+        let mut conn = seed();
+        let id = payout_id_for(&conn, 2);
+        cancel_shg_transaction(&mut conn, id, "paid the wrong member").unwrap();
+
+        let voided: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT member_ref_id FROM shg_transactions
+                 WHERE reference_type = 'CHIT_COMMISSION' AND voided_at IS NOT NULL",
+            ).unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().filter_map(|r| r.ok()).collect()
+        };
+        assert_eq!(voided, vec![2], "exactly the cancelled winner's commission");
+    }
+
+    /// The cycle pointer must move off the cancelled member rather than going blank
+    /// while three winners remain.
+    #[test]
+    fn cycle_pointer_moves_to_a_remaining_winner() {
+        let mut conn = seed();
+        let id = payout_id_for(&conn, 1); // member 1 is the cycle's winning_member_id
+        cancel_shg_transaction(&mut conn, id, "duplicate").unwrap();
+
+        let pointer: Option<i64> = conn.query_row(
+            "SELECT winning_member_id FROM chit_cycles WHERE id = 7", [], |r| r.get(0),
+        ).unwrap();
+        assert!(pointer.is_some(), "three winners remain, so the cycle still has one");
+        assert_ne!(pointer, Some(1), "pointer must leave the cancelled member");
+        let discounts: f64 = conn.query_row(
+            "SELECT total_bid_discounts FROM chit_cycles WHERE id = 7", [], |r| r.get(0),
+        ).unwrap();
+        assert!((discounts - 300.0).abs() < 0.005, "discount total re-summed from 3 winners");
+    }
+
+    /// Removing the last winner returns the cycle to its pre-payout state.
+    #[test]
+    fn removing_every_winner_resets_the_cycle() {
+        let mut conn = seed();
+        for m in WINNERS {
+            let id = payout_id_for(&conn, m);
+            cancel_shg_transaction(&mut conn, id, "restart cycle").unwrap();
+        }
+        assert!(winner_ids(&conn).is_empty());
+        assert_eq!(live_count(&conn, "CHIT_COMMISSION"), 0);
+        assert_eq!(live_count(&conn, "CHIT_PAYOUT"), 0);
+
+        let (pointer, payout): (Option<i64>, f64) = conn.query_row(
+            "SELECT winning_member_id, payout_amount FROM chit_cycles WHERE id = 7",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(pointer, None);
+        assert!(payout.abs() < 0.005);
+    }
+
+    /// Each reversal must name the member its original named. Before the fix the
+    /// reversals carried no member_ref_id at all, so reports resolved them from the
+    /// cycle and every winner in the cycle collapsed onto one (wrong) member.
+    #[test]
+    fn reversals_keep_the_original_member() {
+        let mut conn = seed();
+        let id = payout_id(&conn);
+        cancel_shg_transaction(&mut conn, id, "entered twice").unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT r.reference_type, o.member_ref_id, r.member_ref_id
+             FROM shg_transactions r
+             JOIN shg_transactions o ON o.id = r.reversal_of_id
+             WHERE r.reversal_of_id IS NOT NULL",
+        ).unwrap();
+        let rows: Vec<(String, Option<i64>, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap().filter_map(|r| r.ok()).collect();
+
+        assert_eq!(rows.len(), 2, "the winner's commission + their payout");
+        for (ref_type, original, reversal) in rows {
+            assert!(original.is_some(), "{ref_type}: test seed should pin a member");
+            assert_eq!(reversal, original, "{ref_type}: reversal lost the member");
+        }
+    }
+
+    /// Both winners must still be distinguishable after the cancellation — the
+    /// symptom was several reversals all pointing at the same member.
+    #[test]
+    fn multi_winner_reversals_stay_distinct() {
+        let mut conn = seed();
+        let id = payout_id(&conn);
+        cancel_shg_transaction(&mut conn, id, "entered twice").unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT member_ref_id FROM shg_transactions
+             WHERE reversal_of_id IS NOT NULL AND reference_type = 'CHIT_COMMISSION'
+             ORDER BY member_ref_id",
+        ).unwrap();
+        let members: Vec<i64> = stmt.query_map([], |r| r.get(0)).unwrap()
+            .filter_map(|r| r.ok()).collect();
+        assert_eq!(members, vec![1], "the reversal is attributed to its own winner");
+    }
+
+    /// The v2 migration repairs rows already written by the old code.
+    #[test]
+    fn migration_backfills_existing_reversals() {
+        let mut conn = seed();
+        let id = payout_id(&conn);
+        cancel_shg_transaction(&mut conn, id, "entered twice").unwrap();
+        // Simulate the pre-fix state: reversals written without a member.
+        conn.execute(
+            "UPDATE shg_transactions SET member_ref_id = NULL WHERE reversal_of_id IS NOT NULL",
+            [],
+        ).unwrap();
+
+        let tx = conn.transaction().unwrap();
+        crate::db::migrations::MIGRATIONS
+            .iter().find(|m| m.version == 2).map(|m| (m.up)(&tx).unwrap()).unwrap();
+        tx.commit().unwrap();
+
+        let unrepaired: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM shg_transactions r
+             JOIN shg_transactions o ON o.id = r.reversal_of_id
+             WHERE o.member_ref_id IS NOT NULL
+               AND (r.member_ref_id IS NULL OR r.member_ref_id != o.member_ref_id)",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unrepaired, 0, "every reversal should be restored to its member");
+    }
 }

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, Transaction};
 use crate::error::AppError;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 pub struct Migration {
     pub version: i64,
@@ -30,9 +30,39 @@ pub struct Migration {
 /// Add new migrations here. NEVER modify an existing migration —
 /// instead, add a new one that fixes the issue.
 pub const MIGRATIONS: &[Migration] = &[
-    // Example for the future:
-    // Migration { version: 2, name: "add_member_email_column", up: m002_add_member_email },
+    Migration {
+        version: 2,
+        name: "backfill_reversal_member_ref",
+        up: m002_backfill_reversal_member_ref,
+    },
 ];
+
+/// Reversal rows were inserted without copying `member_ref_id` from the row they
+/// reverse. Reports then fell back to resolving the member from the cycle, and a
+/// multi-winner chit cycle has only one `chit_cycles.winning_member_id` — so every
+/// reversal in that cycle was attributed to the same wrong member.
+///
+/// The correct value is unambiguous: it is whatever the original row carries, found
+/// via `reversal_of_id`. Rows whose original has no `member_ref_id` (ordinary
+/// receipts and vouchers, which resolve fine from `reference_id`) are left alone.
+fn m002_backfill_reversal_member_ref(tx: &Transaction) -> Result<(), AppError> {
+    tx.execute_batch(
+        r#"
+        UPDATE shg_transactions
+        SET member_ref_id = (
+            SELECT o.member_ref_id FROM shg_transactions o
+            WHERE o.id = shg_transactions.reversal_of_id
+        )
+        WHERE reversal_of_id IS NOT NULL
+          AND member_ref_id IS NULL
+          AND (
+            SELECT o.member_ref_id FROM shg_transactions o
+            WHERE o.id = shg_transactions.reversal_of_id
+          ) IS NOT NULL;
+        "#,
+    )?;
+    Ok(())
+}
 
 /// Initialise the schema_migrations tracking table.
 pub fn init_schema_migrations_table(conn: &Connection) -> Result<(), AppError> {
