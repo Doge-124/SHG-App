@@ -35,6 +35,12 @@ _Note: v1.0.1, v1.0.2 and v1.0.3 tags exist but produced no published GitHub Rel
 ### Changed
 - `tauri.conf.json` now includes updater and log plugin configuration
 
+## [1.0.57] - 2026-08-24
+
+### Fixed
+- **Chit payouts showed the wrong winner's name.** When a cycle had more than one winner, the Dashboard, the daily/weekly/monthly transaction reports, the Income Ledger and the bank transaction listing all displayed the *same* member against every payout in that cycle, because they identified the member from the cycle rather than from the payout itself. Chit commission entries showed no member name at all. Each entry is now named for the member it actually belongs to. **No money was affected** — payouts were always recorded against the correct member; only the displayed name was wrong, and the corrected names appear as soon as you update.
+- The transaction reports could also show an unrelated member's name against a chit commission entry, for the same underlying reason.
+
 ## [1.0.56] - 2026-08-21
 
 ### Fixed
