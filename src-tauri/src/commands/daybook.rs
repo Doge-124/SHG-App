@@ -42,9 +42,9 @@ pub fn get_bank_transaction_ids(
     let conn = guard.db.as_ref().ok_or_else(|| "DB not unlocked".to_string())?;
 
     let end_dt = format!("{}T23:59:59", end_date);
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT t.id, t.created_at, t.txn_type, t.amount, t.reason,
-                (SELECT name FROM members WHERE id = t.reference_id) AS member_name,
+                {name_expr} AS member_name,
                 t.bank_txn_id
          FROM shg_transactions t
          WHERE t.payment_method = 'BANK'
@@ -52,7 +52,9 @@ pub fn get_bank_transaction_ids(
            AND t.voided_at IS NULL AND t.reversal_of_id IS NULL
            AND t.created_at >= ?1 AND t.created_at <= ?2
          ORDER BY t.created_at ASC",
-    ).map_err(|e| e.to_string())?;
+        name_expr = crate::db::ledger::MEMBER_NAME_SQL,
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map((start_date.as_str(), end_dt.as_str()), |r| {
         Ok(BankTxnIdEntry {

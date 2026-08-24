@@ -22,6 +22,41 @@ pub struct ShgTransaction {
     pub member_name: Option<String>,
 }
 
+/// The one true way to name the party on an `shg_transactions` row, for any query
+/// that aliases the table as `t`. Returns NULL when there is no member.
+///
+/// Order matters:
+///  1. `member_ref_id` — the member a row is explicitly FOR. A chit cycle can have
+///     several winners, each with their own payout voucher and commission receipt,
+///     so this is the ONLY field that says which one a row belongs to.
+///  2. Chit rows without that tag (written before the column existed) fall back to
+///     the cycle's legacy single-winner pointer. That is one value for the whole
+///     cycle, so in a multi-winner cycle it names just one of them.
+///  3. Only the reference types listed below put a MEMBER id in `reference_id`.
+///     Chit rows put the CYCLE id there, so an unguarded lookup silently resolves
+///     whichever member happens to share that number.
+///
+/// Every list and report that shows a party name must use this. Hand-rolled copies
+/// are how the same wrong-member bug kept resurfacing one screen at a time.
+pub const MEMBER_NAME_SQL: &str = "
+    CASE
+        WHEN t.member_ref_id IS NOT NULL THEN
+            (SELECT name FROM members WHERE id = t.member_ref_id)
+        WHEN t.reference_type IN ('CHIT_PAYOUT','CHIT_COMMISSION','CHIT_CLOSING_PAYOUT')
+             AND t.reference_id IS NOT NULL THEN
+            (SELECT m.name FROM members m
+             JOIN chit_cycles cc ON cc.winning_member_id = m.id
+             WHERE cc.id = t.reference_id)
+        WHEN t.reference_type IN (
+            'WEEKLY_CONTRIBUTION','MEMBER_CONTRIBUTION','MEMBER_RECEIPT','MEMBER_PAYMENT',
+            'CHIT_PAYMENT','DONATION','GRANT','MEMBER_LOAN','MEMBER_OPENING',
+            'SAVINGS_WITHDRAWAL','MEMBER_VOUCHER'
+        ) AND t.reference_id IS NOT NULL THEN
+            (SELECT name FROM members WHERE id = t.reference_id)
+        ELSE NULL
+    END
+";
+
 /// Get the current SHG balance for a given method (`CASH` or `BANK`).
 pub fn get_shg_balance(conn: &Connection, method: &str) -> Result<f64, AppError> {
     validation::validate_payment_method(method)?;

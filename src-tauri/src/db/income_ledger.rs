@@ -115,15 +115,11 @@ fn receipt_entries(
     reference_types: &str,   // comma-separated quoted list, e.g. "'CHIT_COMMISSION'"
     chit_member: bool,       // resolve name via winning member of the chit cycle
 ) -> Result<Vec<LedgerEntry>, AppError> {
-    // Name resolution differs: chit commission references a cycle id (look up
-    // the winner), savings references a member id directly.
-    let name_expr = if chit_member {
-        "(SELECT m.name FROM members m
-          JOIN chit_cycles cc ON cc.winning_member_id = m.id
-          WHERE cc.id = t.reference_id)"
-    } else {
-        "(SELECT name FROM members WHERE id = t.reference_id)"
-    };
+    // The shared expression covers both cases: it prefers the row's own member tag,
+    // so each winner's commission is attributed to that winner rather than to the
+    // cycle's single legacy pointer, and falls back per reference type.
+    let _ = chit_member;
+    let name_expr = crate::db::ledger::MEMBER_NAME_SQL;
 
     let sql = format!(
         "SELECT t.id, t.created_at, {name_expr} AS member_name, t.amount, t.reason

@@ -19,39 +19,14 @@ fn get_transactions_in_range(
     transaction_type: Option<&str>,
     member_id: Option<i64>,
 ) -> Result<Vec<ShgTransaction>, AppError> {
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT t.id, t.txn_type, t.amount, t.reason as description,
                 t.payment_method, t.reference_type, t.reference_id, t.created_at,
-                CASE 
-                    WHEN t.txn_type = 'RECEIPT' AND t.reference_type = 'MEMBER_RECEIPT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'RECEIPT' AND t.reference_type = 'MEMBER_CONTRIBUTION' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'RECEIPT' AND t.reference_type = 'DONATION' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'RECEIPT' AND t.reference_type = 'GRANT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'VOUCHER' AND t.reference_type = 'MEMBER_VOUCHER' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'VOUCHER' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.txn_type = 'RECEIPT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.reference_type = 'MEMBER_LOAN' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.reference_type = 'MEMBER_PAYMENT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.reference_type = 'CHIT_PAYMENT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT name FROM members WHERE id = t.reference_id)
-                    WHEN t.reference_type = 'CHIT_PAYOUT' AND t.reference_id IS NOT NULL THEN 
-                        (SELECT m.name FROM members m 
-                         JOIN chit_cycles cc ON cc.winning_member_id = m.id 
-                         WHERE cc.id = t.reference_id)
-                    ELSE NULL
-                END as member_name
+                {name_expr} as member_name
          FROM shg_transactions t
          WHERE t.created_at BETWEEN ?1 AND ?2
          AND t.txn_type != 'OPENING'",
+        name_expr = crate::db::ledger::MEMBER_NAME_SQL,
     );
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();

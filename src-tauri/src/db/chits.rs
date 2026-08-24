@@ -2149,6 +2149,50 @@ mod incremental_winner_tests {
         assert!(err.is_err(), "a completed cycle takes no more winners");
     }
 
+    /// The reported bug: two winners paid minutes apart in one cycle, and every
+    /// screen showed the FIRST winner's name against both payouts. The party name
+    /// must come from each row's own member tag, never from the cycle's single
+    /// legacy `winning_member_id` pointer.
+    #[test]
+    fn every_payout_is_named_for_its_own_winner() {
+        let mut conn = seed();
+        // Member 1 is recorded first, so the cycle pointer sticks to them.
+        process_cycle_winners(&mut conn, 1, 1, Some(&winner(1, 0.0)), &[], None).unwrap();
+        process_cycle_winners(&mut conn, 1, 1, None, &[winner(2, 500.0)], None).unwrap();
+
+        let pointer: Option<i64> = conn.query_row(
+            "SELECT winning_member_id FROM chit_cycles WHERE id = 1", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(pointer, Some(1), "precondition: pointer names the first winner");
+
+        // Exactly the expression every list and report renders through.
+        let sql = format!(
+            "SELECT t.member_ref_id, {name} FROM shg_transactions t
+             WHERE t.reference_type IN ('CHIT_PAYOUT','CHIT_COMMISSION')
+             ORDER BY t.id",
+            name = crate::db::ledger::MEMBER_NAME_SQL,
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let rows: Vec<(Option<i64>, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect();
+
+        assert_eq!(rows.len(), 4, "two payouts + two commissions");
+        for (member_ref, name) in &rows {
+            let expected = match member_ref {
+                Some(1) => "A",
+                Some(2) => "B",
+                other => panic!("row not tagged with a winner: {other:?}"),
+            };
+            assert_eq!(name.as_deref(), Some(expected),
+                "row for member {member_ref:?} rendered as {name:?}");
+        }
+        // And both winners really are represented — not all four rows on one member.
+        let named: std::collections::HashSet<_> =
+            rows.iter().filter_map(|(_, n)| n.clone()).collect();
+        assert_eq!(named.len(), 2, "both winners appear, got {named:?}");
+    }
+
     /// Each winner gets their own payout voucher and commission receipt, tagged to
     /// them, whether they were recorded together or days apart.
     #[test]
