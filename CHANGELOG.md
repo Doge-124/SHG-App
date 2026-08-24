@@ -35,6 +35,11 @@ _Note: v1.0.1, v1.0.2 and v1.0.3 tags exist but produced no published GitHub Rel
 ### Changed
 - `tauri.conf.json` now includes updater and log plugin configuration
 
+## [1.0.58] - 2026-08-24
+
+### Changed
+- Manage Cycle: the first tab is now labelled **Pending** instead of Current.
+
 ## [1.0.57] - 2026-08-24
 
 ### Fixed
