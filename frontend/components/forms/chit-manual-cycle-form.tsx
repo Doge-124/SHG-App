@@ -688,7 +688,7 @@ export function ChitManualCycleForm({
               className="flex-1"
               disabled={tab !== 'current' && (!currentCycle || cycleCompleted)}
             >
-              {tab === 'current' ? <><Clock className="h-4 w-4 mr-2" />Current</>
+              {tab === 'current' ? <><Clock className="h-4 w-4 mr-2" />Pending</>
                : tab === 'payment' ? <><DollarSign className="h-4 w-4 mr-2" />Payments</>
                : <><Trophy className="h-4 w-4 mr-2" />Winners</>}
             </Button>
